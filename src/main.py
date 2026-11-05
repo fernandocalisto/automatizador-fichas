@@ -24,6 +24,8 @@ from typing import Any, Callable
 from src.gui.json_editor_tab import JsonEditorTab
 from src.gui.landing import LandingFrame
 from src.gui.perguntas_tab import PerguntasTab
+from src.gui.sql_insert_tab import SqlInsertTab
+from src.gui.sql_select_tab import SqlSelectTab
 from src.utils.json_utils import update_shared_dict_in_place
 
 
@@ -80,6 +82,22 @@ class MainApp(tk.Tk):
         )
         self.notebook.add(self.perguntas_tab, text="Perguntas & Respostas")
 
+        # Aba 3 – Gerar SQL INSERT
+        self.sql_insert_tab = SqlInsertTab(
+            self.notebook,
+            shared_json=self.json_data,
+            on_back_to_landing=self.show_landing,
+        )
+        self.notebook.add(self.sql_insert_tab, text="Gerar SQL INSERT")
+
+        # Aba 4 – Gerar SELECT Jasper
+        self.sql_select_tab = SqlSelectTab(
+            self.notebook,
+            shared_json=self.json_data,
+            on_back_to_landing=self.show_landing,
+        )
+        self.notebook.add(self.sql_select_tab, text="Gerar SELECT Jasper")
+
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     # -------------------------------------------------------------------------
@@ -89,6 +107,8 @@ class MainApp(tk.Tk):
         """Oculta o Notebook de abas, limpa o estado não salvo e exibe a Tela Inicial."""
         self.main_container.pack_forget()
         self.json_data.clear()
+        self.sql_insert_tab.clear_preview()
+        self.sql_select_tab.clear_preview()
         self.landing_frame.status_var.set("Aguardando JSON…")
         self.landing_frame.pack(fill=tk.BOTH, expand=True)
         self.title("Automatizador de Fichas – Carregar JSON")
@@ -113,7 +133,7 @@ class MainApp(tk.Tk):
     ) -> None:
         """
         Callback invocado pela LandingFrame quando um JSON válido é carregado ou colado.
-        Popula o dicionário compartilhado in-place, sincroniza as duas abas e abre o Notebook.
+        Popula o dicionário compartilhado in-place, sincroniza as abas e abre o Notebook.
         """
         update_shared_dict_in_place(self.json_data, validated_data)
         self.json_editor_tab.current_file = source_path
@@ -124,6 +144,8 @@ class MainApp(tk.Tk):
             notify=False,
         )
         self.perguntas_tab.refresh_from_shared()
+        self.sql_insert_tab.clear_preview()
+        self.sql_select_tab.clear_preview()
         self.show_notebook()
         self.notebook.select(0)
         self._notify_listeners()
@@ -153,6 +175,8 @@ class MainApp(tk.Tk):
         if selected_idx == 0:
             self.perguntas_tab.apply_changes()
             self.json_editor_tab.refresh_from_shared()
+        elif selected_idx in (2, 3):
+            self.perguntas_tab.apply_changes()
 
     # -------------------------------------------------------------------------
     # Métodos utilitários e de compatibilidade

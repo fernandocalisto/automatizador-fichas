@@ -5,6 +5,8 @@
 from src.gui.json_editor_tab import JsonEditorTab
 from src.gui.landing import SKILL_TOOLTIP_TEXT, LandingFrame, ToolTip
 from src.gui.perguntas_tab import AnswerRowWidgets, PerguntasTab, QuestionAccordionItem
+from src.gui.sql_insert_tab import SqlInsertTab
+from src.gui.sql_select_tab import SqlSelectTab
 from src.utils.json_utils import (
     apply_uppercase_to_text_fields,
     load_json_file,
@@ -21,6 +23,8 @@ __all__ = [
     "PerguntasTab",
     "QuestionAccordionItem",
     "SKILL_TOOLTIP_TEXT",
+    "SqlInsertTab",
+    "SqlSelectTab",
     "ToolTip",
     "apply_uppercase_to_text_fields",
     "load_json_file",

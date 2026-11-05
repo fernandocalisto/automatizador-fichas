@@ -86,16 +86,53 @@ def uppercase_target_fields(data: Any) -> Any:
 apply_uppercase_to_text_fields = uppercase_target_fields
 
 
+def uppercase_target_fields_in_place(data: Any) -> Any:
+    """
+    Percorre recursivamente o objeto JSON (dict/list) IN-PLACE, preservando as mesmas
+    instâncias de dict e list na memória, e converte apenas os valores de texto (strings)
+    associados aos campos alvo para UPPERCASE.
+    """
+    if isinstance(data, dict):
+        for chave, valor in list(data.items()):
+            chave_lower = chave.lower() if isinstance(chave, str) else ""
+
+            if chave_lower in PRESERVE_CASE_FIELDS:
+                continue
+            elif chave_lower in TEXT_FIELDS_UPPERCASE:
+                if isinstance(valor, str):
+                    data[chave] = valor.upper()
+                elif isinstance(valor, list):
+                    for idx, item in enumerate(valor):
+                        if isinstance(item, str):
+                            valor[idx] = item.upper()
+                        else:
+                            uppercase_target_fields_in_place(item)
+                elif isinstance(valor, dict):
+                    for k, v in list(valor.items()):
+                        if isinstance(v, str):
+                            valor[k] = v.upper()
+                        else:
+                            uppercase_target_fields_in_place(v)
+            else:
+                uppercase_target_fields_in_place(valor)
+        return data
+
+    if isinstance(data, list):
+        for item in data:
+            uppercase_target_fields_in_place(item)
+        return data
+
+    return data
+
+
 def update_shared_dict_in_place(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
     """
     Atualiza o dicionário compartilhado `target` in-place com os dados de `source`,
-    mantendo a mesma referência de objeto Python entre as abas.
+    mantendo a mesma referência de objeto Python (e sub-dicionários quando `target is source`)
+    entre as abas.
     """
     if target is source:
-        converted = uppercase_target_fields(target)
-        target.clear()
-        target.update(converted)
-        return target
+        return uppercase_target_fields_in_place(target)
 
     converted = uppercase_target_fields(source)
     target.clear()

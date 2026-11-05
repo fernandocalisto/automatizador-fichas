@@ -168,7 +168,7 @@ def test_full_workflow_landing_to_tabs_and_shared_json(
     try:
         # 1. Inicia na tela inicial
         assert app.current_view == "landing"
-        assert app.notebook.index("end") == 2
+        assert app.notebook.index("end") == 4
 
         # 2. Tenta carregar JSON inválido na Landing -> permanece na Landing e exibe erro
         bad_json_path = tmp_path / "invalido.json"

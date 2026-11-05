@@ -260,9 +260,14 @@ def test_sql_insert_tab_in_main_app(
     app = MainApp()
     app.withdraw()
     try:
-        assert app.notebook.index("end") == 3
+        assert app.notebook.index("end") == 4
         tab_titles = [app.notebook.tab(i, "text") for i in range(app.notebook.index("end"))]
-        assert tab_titles == ["Editar JSON", "Perguntas & Respostas", "Gerar SQL INSERT"]
+        assert tab_titles == [
+            "Editar JSON",
+            "Perguntas & Respostas",
+            "Gerar SQL INSERT",
+            "Gerar SELECT Jasper",
+        ]
 
         sample_data = {
             "template": {

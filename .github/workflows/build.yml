@@ -53,24 +53,24 @@ jobs:
 
       - name: Build executable with PyInstaller
         run: |
-          pyinstaller ^
-            --name "AutomatizadorFichas" ^
-            --onefile ^
-            --windowed ^
-            --add-data "src/resources;resources" ^
-            --add-data "src/utils;utils" ^
-            --add-data "src/core;core" ^
-            --add-data "src/gui;gui" ^
-            --hidden-import=tkinter ^
-            --hidden-import=tkinter.ttk ^
-            --hidden-import=tkinter.scrolledtext ^
-            --hidden-import=tkinter.filedialog ^
-            --hidden-import=tkinter.messagebox ^
-            --hidden-import=json ^
-            --hidden-import=re ^
-            --hidden-import=unicodedata ^
-            --hidden-import=pathlib ^
-            --clean ^
+          pyinstaller `
+            --name "AutomatizadorFichas" `
+            --onefile `
+            --windowed `
+            --add-data "src/resources;resources" `
+            --add-data "src/utils;utils" `
+            --add-data "src/core;core" `
+            --add-data "src/gui;gui" `
+            --hidden-import=tkinter `
+            --hidden-import=tkinter.ttk `
+            --hidden-import=tkinter.scrolledtext `
+            --hidden-import=tkinter.filedialog `
+            --hidden-import=tkinter.messagebox `
+            --hidden-import=json `
+            --hidden-import=re `
+            --hidden-import=unicodedata `
+            --hidden-import=pathlib `
+            --clean `
             src/main.py
 
       - name: Verify executable

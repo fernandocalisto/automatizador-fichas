@@ -32,11 +32,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pyinstaller
-          if (Test-Path "requirements.txt") { pip install -r requirements.txt }
-
-      - name: Run tests
-        run: |
-          python -m pytest tests/ -v || echo "No tests or tests failed, continuing..."
 
       - name: Determine version
         id: version

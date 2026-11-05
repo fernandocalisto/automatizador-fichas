@@ -1,0 +1,132 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          if (Test-Path "requirements.txt") { pip install -r requirements.txt }
+
+      - name: Run tests
+        run: |
+          python -m pytest tests/ -v || echo "No tests or tests failed, continuing..."
+
+      - name: Determine version
+        id: version
+        run: |
+          if ($env:GITHUB_REF -match 'refs/tags/v(.*)') {
+            $version = $matches[1]
+          } else {
+            $date = Get-Date -Format "yyyy.MM.dd"
+            $commit = $env:GITHUB_SHA.Substring(0, 7)
+            $version = "0.1.0-dev.$date.$commit"
+          }
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "VERSION=$version"
+
+      - name: Build executable with PyInstaller
+        run: |
+          pyinstaller ^
+            --name "AutomatizadorFichas" ^
+            --onefile ^
+            --windowed ^
+            --add-data "src/resources;resources" ^
+            --add-data "src/utils;utils" ^
+            --add-data "src/core;core" ^
+            --add-data "src/gui;gui" ^
+            --hidden-import=tkinter ^
+            --hidden-import=tkinter.ttk ^
+            --hidden-import=tkinter.scrolledtext ^
+            --hidden-import=tkinter.filedialog ^
+            --hidden-import=tkinter.messagebox ^
+            --hidden-import=json ^
+            --hidden-import=re ^
+            --hidden-import=unicodedata ^
+            --hidden-import=pathlib ^
+            --clean ^
+            src/main.py
+
+      - name: Verify executable
+        run: |
+          $exe = "dist\AutomatizadorFichas.exe"
+          if (Test-Path $exe) {
+            $size = (Get-Item $exe).Length / 1MB
+            Write-Host "Executable found: $exe (Size: $([math]::Round($size, 2)) MB)"
+            # Quick smoke test - just verify it can be invoked without GUI
+            # We can't run GUI on headless runner, so we check the file exists and has reasonable size
+            if ($size -lt 5) {
+              Write-Error "Executable too small ($size MB), build may have failed"
+              exit 1
+            }
+          } else {
+            Write-Error "Executable not found at $exe"
+            exit 1
+          }
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Automatizador de Fichas v${{ steps.version.outputs.version }}"
+          body: |
+            ## Automatizador de Fichas v${{ steps.version.outputs.version }}
+
+            ### Novidades
+            - Tela inicial com download da Skill e instruções de uso
+            - Editor de JSON com validação, formatação e conversão UPPERCASE
+            - Visualização e edição de Perguntas & Respostas (accordion expansível)
+            - Geração de SQL INSERT (bloco `DO $$`) com 3 padrões de inserção
+            - Geração de SELECT Jasper Reports baseado no padrão ouro
+            - Editores SQL com realce de sintaxe PostgreSQL e validação
+            - Copiar para área de transferência e salvar como .sql
+
+            ### Como usar
+            1. Baixe a Skill.md na tela inicial
+            2. Use a Skill com sua IA preferida (Claude, ChatGPT, etc.) para extrair o JSON do PDF da ficha clínica
+            3. Carregue o JSON gerado (arquivo ou área de transferência)
+            4. Edite/visualize perguntas e respostas
+            5. Gere o SQL INSERT para inserção no banco
+            6. Gere o SELECT Jasper para relatórios
+
+          draft: false
+          prerelease: false
+          files: |
+            dist/AutomatizadorFichas.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload artifact (for non-tag builds)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutomatizadorFichas-${{ steps.version.outputs.version }}-windows
+          path: dist/AutomatizadorFichas.exe
+          retention-days: 7

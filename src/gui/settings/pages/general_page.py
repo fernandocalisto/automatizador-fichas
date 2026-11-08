@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -46,30 +45,25 @@ class GeneralPage(QWidget):
         grp_app = QGroupBox("Preferências da Aplicação", self)
         form_app = QFormLayout(grp_app)
         form_app.setContentsMargins(12, 16, 12, 12)
-        form_app.setSpacing(12)
-        form_app.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form_app.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        form_app.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form_app.setSpacing(10)
 
         self.cmb_language = QComboBox(grp_app)
         self.cmb_language.addItem("Português (Brasil) — pt_BR", "pt_BR")
         self.cmb_language.addItem("English (US) — en_US", "en_US")
         self.cmb_language.setAccessibleName("Idioma da Interface")
         self.cmb_language.setToolTip("Selecione o idioma da interface da aplicação")
-        self.cmb_language.setMinimumWidth(220)
-        lbl_lang = QLabel("Idioma:")
-        lbl_lang.setStyleSheet("font-weight: 500; color: #334155;")
-        form_app.addRow(lbl_lang, self.cmb_language)
+        self.cmb_language.setMaximumWidth(240)
+        form_app.addRow("Idioma:", self.cmb_language)
 
         self.chk_auto_updates = QCheckBox("Verificar atualizações automaticamente ao iniciar", grp_app)
         self.chk_auto_updates.setAccessibleName("Verificar atualizações automaticamente")
         self.chk_auto_updates.setToolTip("Consulta se há novas versões ao abrir o aplicativo")
-        form_app.addRow("", self.chk_auto_updates)
+        form_app.addRow(self.chk_auto_updates)
 
         self.chk_show_tour = QCheckBox("Exibir tour guiado de boas-vindas ao iniciar", grp_app)
         self.chk_show_tour.setAccessibleName("Exibir tour ao iniciar")
         self.chk_show_tour.setToolTip("Mostra dicas rápidas de uso na inicialização")
-        form_app.addRow("", self.chk_show_tour)
+        form_app.addRow(self.chk_show_tour)
 
         layout.addWidget(grp_app)
 
@@ -77,20 +71,15 @@ class GeneralPage(QWidget):
         grp_log = QGroupBox("Diagnóstico e Logging", self)
         form_log = QFormLayout(grp_log)
         form_log.setContentsMargins(12, 16, 12, 12)
-        form_log.setSpacing(12)
-        form_log.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form_log.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        form_log.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form_log.setSpacing(10)
 
         self.cmb_log_level = QComboBox(grp_log)
         for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
             self.cmb_log_level.addItem(level, level)
         self.cmb_log_level.setAccessibleName("Nível de Log")
         self.cmb_log_level.setToolTip("Define o nível mínimo registrado em app.log e no painel inferior")
-        self.cmb_log_level.setMinimumWidth(160)
-        lbl_log = QLabel("Nível de Log:")
-        lbl_log.setStyleSheet("font-weight: 500; color: #334155;")
-        form_log.addRow(lbl_log, self.cmb_log_level)
+        self.cmb_log_level.setMaximumWidth(160)
+        form_log.addRow("Nível de Log:", self.cmb_log_level)
 
         layout.addWidget(grp_log)
         layout.addStretch(1)

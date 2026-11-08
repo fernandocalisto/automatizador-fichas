@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
@@ -46,20 +45,15 @@ class EditorPage(QWidget):
         grp_ed = QGroupBox("Comportamento e Exibição", self)
         form = QFormLayout(grp_ed)
         form.setContentsMargins(12, 16, 12, 12)
-        form.setSpacing(12)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setSpacing(10)
 
         self.spn_tab_size = QSpinBox(grp_ed)
         self.spn_tab_size.setRange(2, 8)
         self.spn_tab_size.setSuffix(" espaços")
         self.spn_tab_size.setAccessibleName("Tamanho da Tabulação")
         self.spn_tab_size.setToolTip("Quantidade de espaços por nível de indentação")
-        self.spn_tab_size.setMinimumWidth(120)
-        lbl_tab = QLabel("Tamanho do Tab:")
-        lbl_tab.setStyleSheet("font-weight: 500; color: #334155;")
-        form.addRow(lbl_tab, self.spn_tab_size)
+        self.spn_tab_size.setMaximumWidth(140)
+        form.addRow("Tamanho do Tab:", self.spn_tab_size)
 
         self.spn_autocomplete_delay = QSpinBox(grp_ed)
         self.spn_autocomplete_delay.setRange(50, 2000)
@@ -67,22 +61,20 @@ class EditorPage(QWidget):
         self.spn_autocomplete_delay.setSuffix(" ms")
         self.spn_autocomplete_delay.setAccessibleName("Atraso do Autocompletar")
         self.spn_autocomplete_delay.setToolTip("Tempo em milissegundos antes de exibir sugestões")
-        self.spn_autocomplete_delay.setMinimumWidth(120)
-        lbl_delay = QLabel("Delay Autocomplete:")
-        lbl_delay.setStyleSheet("font-weight: 500; color: #334155;")
-        form.addRow(lbl_delay, self.spn_autocomplete_delay)
+        self.spn_autocomplete_delay.setMaximumWidth(140)
+        form.addRow("Delay Autocomplete:", self.spn_autocomplete_delay)
 
         self.chk_line_numbers = QCheckBox("Exibir numeração de linhas", grp_ed)
         self.chk_line_numbers.setAccessibleName("Exibir numeração de linhas")
-        form.addRow("", self.chk_line_numbers)
+        form.addRow(self.chk_line_numbers)
 
         self.chk_whitespace = QCheckBox("Exibir caracteres de espaço em branco", grp_ed)
         self.chk_whitespace.setAccessibleName("Exibir espaços em branco")
-        form.addRow("", self.chk_whitespace)
+        form.addRow(self.chk_whitespace)
 
         self.chk_folding = QCheckBox("Habilitar recolhimento de blocos (Code Folding)", grp_ed)
         self.chk_folding.setAccessibleName("Habilitar Code Folding")
-        form.addRow("", self.chk_folding)
+        form.addRow(self.chk_folding)
 
         layout.addWidget(grp_ed)
         layout.addStretch(1)

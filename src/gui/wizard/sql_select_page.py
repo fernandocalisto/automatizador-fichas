@@ -15,15 +15,19 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPlainTextEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -86,7 +90,15 @@ class SqlSelectPage(QWidget):
         self.generated_sql: str = ""
         self.current_sql_file: Path | None = None
         self.generation_options: dict[str, Any] = {
+            "boolean_style": "coalesce_bool_or",
+            "column_naming": "label_only",
             "include_obs": True,
+            "include_metadata": False,
+            "include_all_blocks": True,
+            "include_cabecalho": True,
+            "include_paciente": True,
+            "include_profissional": True,
+            "include_atendimento": True,
             "only_non_title": False,
             "short_aliases": False,
             "group_by_type": False,
@@ -144,6 +156,117 @@ class SqlSelectPage(QWidget):
 
         root_layout.addLayout(toolbar)
 
+        # Seção colapsável: Opções de Consulta (antes do SQL preview)
+        options_header = QHBoxLayout()
+        options_header.setContentsMargins(0, 0, 0, 0)
+        self.btn_toggle_options = QPushButton("▼ Opções de Consulta", self)
+        self.btn_toggle_options.setCheckable(True)
+        self.btn_toggle_options.setChecked(True)
+        self.btn_toggle_options.setFlat(True)
+        self.btn_toggle_options.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle_options.setAccessibleName("Alternar Opções de Consulta")
+        self.btn_toggle_options.toggled.connect(self._on_toggle_options_panel)
+        options_header.addWidget(self.btn_toggle_options)
+        options_header.addStretch(1)
+        root_layout.addLayout(options_header)
+
+        self.options_panel = QFrame(self)
+        self.options_panel.setObjectName("QueryOptionsPanel")
+        self.options_panel.setFrameShape(QFrame.Shape.StyledPanel)
+        options_layout = QVBoxLayout(self.options_panel)
+        options_layout.setContentsMargins(10, 8, 10, 8)
+        options_layout.setSpacing(6)
+
+        row_main_opts = QHBoxLayout()
+        row_main_opts.setSpacing(12)
+
+        row_main_opts.addWidget(QLabel("Estilo de Booleanos:", self.options_panel))
+        self.cmb_boolean_style = QComboBox(self.options_panel)
+        self.cmb_boolean_style.addItem("COALESCE/BOOL_OR", "coalesce_bool_or")
+        self.cmb_boolean_style.addItem("'X'/''", "x_empty")
+        self.cmb_boolean_style.addItem("'SIM'/'NÃO'", "sim_nao")
+        self.cmb_boolean_style.addItem("1/0", "1_0")
+        self.cmb_boolean_style.setAccessibleName("Estilo de Booleanos")
+        self.cmb_boolean_style.setMaximumWidth(180)
+        self.cmb_boolean_style.currentIndexChanged.connect(self._on_options_changed)
+        row_main_opts.addWidget(self.cmb_boolean_style)
+
+        row_main_opts.addWidget(QLabel("Nomenclatura de Colunas:", self.options_panel))
+        self.cmb_column_naming = QComboBox(self.options_panel)
+        self.cmb_column_naming.addItem("Pergunta+Label", "pergunta_label")
+        self.cmb_column_naming.addItem("Label Only", "label_only")
+        self.cmb_column_naming.addItem("Label+Sufixo", "label_sufixo")
+        self.cmb_column_naming.setCurrentIndex(1)
+        self.cmb_column_naming.setAccessibleName("Nomenclatura de Colunas")
+        self.cmb_column_naming.setMaximumWidth(160)
+        self.cmb_column_naming.currentIndexChanged.connect(self._on_options_changed)
+        row_main_opts.addWidget(self.cmb_column_naming)
+
+        self.chk_include_obs = QCheckBox("Incluir observações (_obs)", self.options_panel)
+        self.chk_include_obs.setChecked(True)
+        self.chk_include_obs.setAccessibleName("Incluir observações (_obs)")
+        self.chk_include_obs.toggled.connect(self._on_options_changed)
+        row_main_opts.addWidget(self.chk_include_obs)
+
+        self.chk_include_metadata = QCheckBox("Incluir metadados", self.options_panel)
+        self.chk_include_metadata.setChecked(False)
+        self.chk_include_metadata.setAccessibleName("Incluir metadados")
+        self.chk_include_metadata.toggled.connect(self._on_options_changed)
+        row_main_opts.addWidget(self.chk_include_metadata)
+
+        row_main_opts.addStretch(1)
+        options_layout.addLayout(row_main_opts)
+
+        row_blocks = QHBoxLayout()
+        row_blocks.setSpacing(12)
+
+        self.chk_include_all_blocks = QCheckBox(
+            "Incluir blocos adicionais", self.options_panel
+        )
+        self.chk_include_all_blocks.setChecked(True)
+        self.chk_include_all_blocks.setAccessibleName("Incluir blocos adicionais")
+        self.chk_include_all_blocks.toggled.connect(self._on_all_blocks_toggled)
+        row_blocks.addWidget(self.chk_include_all_blocks)
+
+        self.blocks_sub_container = QWidget(self.options_panel)
+        sub_layout = QHBoxLayout(self.blocks_sub_container)
+        sub_layout.setContentsMargins(8, 0, 0, 0)
+        sub_layout.setSpacing(10)
+
+        self.chk_block_cabecalho = QCheckBox("Cabeçalho da Ficha", self.blocks_sub_container)
+        self.chk_block_cabecalho.setChecked(True)
+        self.chk_block_cabecalho.setAccessibleName("Cabeçalho da Ficha")
+        self.chk_block_cabecalho.toggled.connect(self._on_options_changed)
+        sub_layout.addWidget(self.chk_block_cabecalho)
+
+        self.chk_block_paciente = QCheckBox("Dados do Paciente", self.blocks_sub_container)
+        self.chk_block_paciente.setChecked(True)
+        self.chk_block_paciente.setAccessibleName("Dados do Paciente")
+        self.chk_block_paciente.toggled.connect(self._on_options_changed)
+        sub_layout.addWidget(self.chk_block_paciente)
+
+        self.chk_block_profissional = QCheckBox(
+            "Dados do Profissional", self.blocks_sub_container
+        )
+        self.chk_block_profissional.setChecked(True)
+        self.chk_block_profissional.setAccessibleName("Dados do Profissional")
+        self.chk_block_profissional.toggled.connect(self._on_options_changed)
+        sub_layout.addWidget(self.chk_block_profissional)
+
+        self.chk_block_atendimento = QCheckBox(
+            "Dados do Atendimento", self.blocks_sub_container
+        )
+        self.chk_block_atendimento.setChecked(True)
+        self.chk_block_atendimento.setAccessibleName("Dados do Atendimento")
+        self.chk_block_atendimento.toggled.connect(self._on_options_changed)
+        sub_layout.addWidget(self.chk_block_atendimento)
+
+        row_blocks.addWidget(self.blocks_sub_container)
+        row_blocks.addStretch(1)
+        options_layout.addLayout(row_blocks)
+
+        root_layout.addWidget(self.options_panel)
+
         self.preview_text = QPlainTextEdit(self)
         self.preview_text.setAccessibleName("Editor SELECT Jasper")
         self.preview_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
@@ -172,6 +295,47 @@ class SqlSelectPage(QWidget):
         status_row.addWidget(self.lbl_counts)
 
         root_layout.addLayout(status_row)
+
+    def _on_toggle_options_panel(self, expanded: bool) -> None:
+        self.options_panel.setVisible(expanded)
+        self.btn_toggle_options.setText(
+            "▼ Opções de Consulta" if expanded else "▶ Opções de Consulta"
+        )
+
+    def _on_all_blocks_toggled(self, checked: bool) -> None:
+        self.blocks_sub_container.setVisible(checked)
+        self._on_options_changed()
+
+    def _sync_options_from_ui(self) -> dict[str, Any]:
+        self.generation_options["boolean_style"] = (
+            self.cmb_boolean_style.currentData() or "coalesce_bool_or"
+        )
+        self.generation_options["column_naming"] = (
+            self.cmb_column_naming.currentData() or "label_only"
+        )
+        self.generation_options["include_obs"] = self.chk_include_obs.isChecked()
+        self.generation_options["include_metadata"] = self.chk_include_metadata.isChecked()
+        self.generation_options["include_all_blocks"] = (
+            self.chk_include_all_blocks.isChecked()
+        )
+        self.generation_options["include_cabecalho"] = (
+            self.chk_block_cabecalho.isChecked()
+        )
+        self.generation_options["include_paciente"] = (
+            self.chk_block_paciente.isChecked()
+        )
+        self.generation_options["include_profissional"] = (
+            self.chk_block_profissional.isChecked()
+        )
+        self.generation_options["include_atendimento"] = (
+            self.chk_block_atendimento.isChecked()
+        )
+        return self.generation_options
+
+    def _on_options_changed(self, *_: Any) -> None:
+        self._sync_options_from_ui()
+        if self.generated_sql and self.shared_json:
+            self.generate_sql(show_error_dialog=False)
 
     def apply_theme_from_service(self, theme_service: ThemeService) -> None:
         theme_service.apply_editor_theme(self.preview_text)
@@ -217,6 +381,7 @@ class SqlSelectPage(QWidget):
         )
 
     def generate_sql(self, show_error_dialog: bool = True) -> bool:
+        self._sync_options_from_ui()
         if not self.shared_json or not isinstance(self.shared_json, dict):
             msg = "Erro: Nenhum JSON carregado para gerar o SELECT Jasper."
             self.lbl_status.setText(msg)

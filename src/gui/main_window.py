@@ -963,14 +963,15 @@ class MainWindow(QMainWindow):
             help_service=self.help_service,
             parent=self,
         )
-        if 0 <= initial_row < dlg.category_list.count():
-            dlg.category_list.setCurrentRow(initial_row)
+        if dlg.category_list.count() > 0:
+            row = min(max(0, initial_row), dlg.category_list.count() - 1)
+            dlg.category_list.setCurrentRow(row)
         dlg.exec()
         return dlg
 
     def show_help(self) -> SettingsDialog:
         """Abre a página de Ajuda Contextual e Atalhos no diálogo de configurações."""
-        return self.open_settings_dialog(initial_row=6)
+        return self.open_settings_dialog(initial_row=4)
 
     def show_about_dialog(self) -> AboutDialog:
         """Exibe o diálogo modal 'Sobre' (400x300)."""

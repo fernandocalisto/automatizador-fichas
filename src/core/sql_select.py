@@ -75,9 +75,11 @@ def gerar_projecao_resposta(
     idx_r: int,
     tipo_campo: str,
     alias: str,
+    boolean_style: str = "coalesce_bool_or",
 ) -> str:
-    """Gera a cláusula SQL agregada para a resposta conforme `tipo_campo`."""
+    """Gera a cláusula SQL agregada para a resposta conforme `tipo_campo` e `boolean_style`."""
     tipo = str(tipo_campo or "").strip().upper()
+    b_style = str(boolean_style or "coalesce_bool_or").strip().lower()
 
     if tipo == "HORA":
         return (
@@ -85,6 +87,21 @@ def gerar_projecao_resposta(
             f"and c.tipo_campo = 'HORA' then TO_CHAR(c.valor_hora, 'HH24:MI') end) as {alias},"
         )
     elif tipo in ("BOOLEANO", "BOOLEANO_RADIO"):
+        if b_style == "x_empty":
+            return (
+                f"        coalesce(max(case when pfc.ordenacao = {idx_p} and c.ordenacao = {idx_r} "
+                f"and c.valor_booleano is true then 'X' end), '') as {alias},"
+            )
+        if b_style == "sim_nao":
+            return (
+                f"        case when coalesce(bool_or(case when pfc.ordenacao = {idx_p} and c.ordenacao = {idx_r} "
+                f"then c.valor_booleano::bool end), false) then 'SIM' else 'NÃO' end as {alias},"
+            )
+        if b_style == "1_0":
+            return (
+                f"        case when coalesce(bool_or(case when pfc.ordenacao = {idx_p} and c.ordenacao = {idx_r} "
+                f"then c.valor_booleano::bool end), false) then 1 else 0 end as {alias},"
+            )
         return (
             f"        coalesce(bool_or(case when pfc.ordenacao = {idx_p} and c.ordenacao = {idx_r} "
             f"then c.valor_booleano::bool end), false) as {alias},"
@@ -134,8 +151,13 @@ def gerar_secao_perguntas(
 ) -> str:
     """Gera o bloco SQL com as colunas agregadas de perguntas e respostas."""
     opts = options or {}
-    include_obs: bool = bool(opts.get("include_obs", True))
+    include_obs: bool = bool(
+        opts.get("include_obs", opts.get("include_observations", True))
+    )
+    include_metadata: bool = bool(opts.get("include_metadata", False))
     only_non_title: bool = bool(opts.get("only_non_title", False))
+    boolean_style: str = str(opts.get("boolean_style", "coalesce_bool_or") or "coalesce_bool_or")
+    column_naming: str = str(opts.get("column_naming", "label_only") or "label_only")
 
     linhas: list[str] = [
         "        ----- PERGUNTAS -----",
@@ -163,6 +185,14 @@ def gerar_secao_perguntas(
                 f"Erro na pergunta '{p_nome}': 'respostas' deve ser uma lista."
             )
 
+        if include_metadata:
+            linhas.append(
+                f"        -- [Metadados] titulo={bool(p.get('titulo', False))} "
+                f"| obrigatoria={bool(p.get('obrigatoria', False))} "
+                f"| observacao={bool(p.get('observacao', False))} "
+                f"| respostas={len(respostas)}"
+            )
+
         # Expandir caso haja repetição de quantidade_linhas com label vazio (generate_series)
         respostas_expandidas: list[dict[str, Any]] = []
         for r in respostas:
@@ -179,6 +209,8 @@ def gerar_secao_perguntas(
             else:
                 respostas_expandidas.append(r)
 
+        p_slug = normalizar_slug(str(p_nome))
+
         for idx_r, r in enumerate(respostas_expandidas, start=1):
             lbl = str(r.get("label") or "").strip()
             raw_tipo = r.get("tipo_campo")
@@ -186,16 +218,34 @@ def gerar_secao_perguntas(
             if not tipo:
                 tipo = "TEXTO"
 
-            if not lbl:
-                base_alias = f"p{idx_p}_r{idx_r}"
+            if column_naming == "pergunta_label":
+                if not lbl:
+                    base_alias = f"{p_slug}_r{idx_r}"
+                else:
+                    lbl_slug = normalizar_slug(lbl)
+                    base_alias = (
+                        lbl_slug
+                        if lbl_slug == p_slug or lbl_slug.startswith(f"{p_slug}_")
+                        else f"{p_slug}_{lbl_slug}"
+                    )
+            elif column_naming == "label_sufixo":
+                raw_base = f"p{idx_p}_r{idx_r}" if not lbl else normalizar_slug(lbl)
+                suf = sufixo_tipo(tipo)
+                base_alias = (
+                    raw_base if raw_base.endswith(f"_{suf}") else f"{raw_base}_{suf}"
+                )
             else:
-                base_alias = normalizar_slug(lbl)
+                # "label_only" (padrão clássico)
+                if not lbl:
+                    base_alias = f"p{idx_p}_r{idx_r}"
+                else:
+                    base_alias = normalizar_slug(lbl)
 
             # Verifica colisão de alias
             alias = base_alias
             if alias in aliases_usados:
                 suf = sufixo_tipo(tipo)
-                cand = f"{base_alias}_{suf}"
+                cand = f"{base_alias}_{suf}" if not base_alias.endswith(f"_{suf}") else f"{base_alias}_2"
                 if cand not in aliases_usados:
                     alias = cand
                 else:
@@ -205,7 +255,9 @@ def gerar_secao_perguntas(
                     alias = f"{cand}_{c}"
 
             aliases_usados.add(alias)
-            projecao = gerar_projecao_resposta(idx_p, idx_r, tipo, alias)
+            projecao = gerar_projecao_resposta(
+                idx_p, idx_r, tipo, alias, boolean_style=boolean_style
+            )
             linhas.append(projecao)
 
             # Se tiver observação ativa (observacao: true) e NÃO for do tipo TEXTO, puxa também o valor_texto com alias _obs
@@ -242,6 +294,83 @@ def load_default_model_sql() -> str:
     return model_path.read_text(encoding="utf-8-sig")
 
 
+def _strip_last_projection_comma(block_text: str) -> str:
+    """Remove a vírgula final da última linha de projeção válida antes do FROM."""
+    lines = block_text.split("\n")
+    for idx in range(len(lines) - 1, -1, -1):
+        stripped = lines[idx].strip()
+        if not stripped or stripped.startswith("--"):
+            continue
+        lines[idx] = re.sub(r",\s*$", "", lines[idx])
+        break
+    return "\n".join(lines)
+
+
+def _assemble_select_blocks(
+    cabecalho: str,
+    secao_perguntas: str,
+    rodape: str,
+    options: dict[str, Any] | None = None,
+) -> str:
+    """Monta o SQL final filtrando os blocos adicionais caso desmarcados."""
+    opts = options or {}
+    master_all = bool(opts.get("include_all_blocks", True))
+    inc_cabecalho = master_all and bool(opts.get("include_cabecalho", True))
+    inc_paciente = master_all and bool(opts.get("include_paciente", True))
+    inc_profissional = master_all and bool(opts.get("include_profissional", True))
+    inc_atendimento = master_all and bool(opts.get("include_atendimento", True))
+
+    if inc_cabecalho and inc_paciente and inc_profissional and inc_atendimento:
+        return f"{cabecalho}\n\n{secao_perguntas}\n{rodape}"
+
+    header_sql = cabecalho if inc_cabecalho else "select"
+
+    # Separa cláusula FROM do rodapé
+    from_match = re.search(r"\n\s*from\s+ficha_clinica\b", rodape, re.IGNORECASE)
+    if from_match:
+        projections_tail = rodape[: from_match.start()]
+        from_clause = rodape[from_match.start() :]
+    else:
+        projections_tail = rodape
+        from_clause = ""
+
+    # Separa PACIENTE, PROFISSIONAL e ATENDIMENTO dentro de projections_tail
+    prof_match = re.search(r"^[ \t]*-----\s*PROFISSIONAL\s*-----", projections_tail, re.MULTILINE)
+    if prof_match:
+        bloco_paciente = projections_tail[: prof_match.start()].rstrip()
+        prof_and_atend = projections_tail[prof_match.start() :]
+    else:
+        bloco_paciente = projections_tail.rstrip()
+        prof_and_atend = ""
+
+    atend_match = re.search(
+        r"^[ \t]*max\s*\(\s*cast\s*\(\s*age\.horario\s+as\s+date\s*\)",
+        prof_and_atend,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if atend_match:
+        bloco_profissional = prof_and_atend[: atend_match.start()].rstrip()
+        bloco_atendimento = (
+            "        ----- ATENDIMENTO -----\n" + prof_and_atend[atend_match.start() :].rstrip()
+        )
+    else:
+        bloco_profissional = prof_and_atend.rstrip()
+        bloco_atendimento = ""
+
+    parts: list[str] = [secao_perguntas.rstrip()]
+    if inc_paciente and bloco_paciente:
+        parts.append(bloco_paciente)
+    if inc_profissional and bloco_profissional:
+        parts.append(bloco_profissional)
+    if inc_atendimento and bloco_atendimento:
+        parts.append(bloco_atendimento)
+
+    body = "\n".join(parts)
+    body = _strip_last_projection_comma(body)
+
+    return f"{header_sql}\n\n{body}\n{from_clause}"
+
+
 def generate_select_jasper(
     json_data: dict[str, Any],
     model_sql: str | Path | None = None,
@@ -249,8 +378,8 @@ def generate_select_jasper(
 ) -> str:
     """
     Recebe o dicionário JSON de ficha clínica e o conteúdo (ou caminho) do modelo SQL
-    `select_padrao_ouro_jasper.sql`, substituindo apenas a seção `----- PERGUNTAS -----`
-    e mantendo o CABEÇALHO e o RODAPÉ (`----- PACIENTE ) -----`) intactos.
+    `select_padrao_ouro_jasper.sql`, substituindo a seção `----- PERGUNTAS -----`
+    e respeitando as opções de blocos e formatação em `options`.
 
     Não modifica `json_data`.
     """
@@ -301,8 +430,7 @@ def generate_select_jasper(
 
     secao_perguntas = gerar_secao_perguntas(json_data, options=options)
 
-    sql_final = f"{cabecalho}\n\n{secao_perguntas}\n{rodape}"
-    return sql_final
+    return _assemble_select_blocks(cabecalho, secao_perguntas, rodape, options=options)
 
 
 def find_unknown_field_types(json_data: dict[str, Any]) -> list[str]:

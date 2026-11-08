@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -48,34 +47,30 @@ class RegexPage(QWidget):
         grp = QGroupBox("Regras Customizadas de Substituição", self)
         form = QFormLayout(grp)
         form.setContentsMargins(12, 16, 12, 12)
-        form.setSpacing(12)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setSpacing(10)
 
         self.chk_custom_regex = QCheckBox(
             "Habilitar arquivo externo de regras Regex customizadas", grp
         )
         self.chk_custom_regex.setAccessibleName("Usar Regex Customizado")
-        form.addRow("", self.chk_custom_regex)
+        form.addRow(self.chk_custom_regex)
 
         path_row = QHBoxLayout()
         path_row.setSpacing(8)
         self.edt_regex_path = QLineEdit(grp)
         self.edt_regex_path.setPlaceholderText("Selecione um arquivo .json com regras de regex...")
         self.edt_regex_path.setAccessibleName("Caminho do Arquivo Regex")
-        self.edt_regex_path.setMinimumWidth(300)
-        path_row.addWidget(self.edt_regex_path, 1)
+        self.edt_regex_path.setMaximumWidth(320)
+        path_row.addWidget(self.edt_regex_path)
 
         self.btn_browse = QPushButton("Procurar…", grp)
         self.btn_browse.setAccessibleName("Procurar arquivo Regex")
         self.btn_browse.setToolTip("Selecionar arquivo JSON de regras Regex")
         self.btn_browse.clicked.connect(self._browse_file)
         path_row.addWidget(self.btn_browse)
+        path_row.addStretch(1)
 
-        lbl_path = QLabel("Arquivo de Regras:")
-        lbl_path.setStyleSheet("font-weight: 500; color: #334155;")
-        form.addRow(lbl_path, path_row)
+        form.addRow("Arquivo de Regras:", path_row)
 
         layout.addWidget(grp)
         layout.addStretch(1)

@@ -5,19 +5,22 @@ Página 2 do Wizard — QuestionsPage (src/gui/wizard/questions_page.py).
 Implementa a visualização e edição interativa de perguntas e respostas em PySide6:
 - Lista de perguntas em cards expansíveis (accordion) dentro de `QScrollArea`.
 - Edição do nome da pergunta (convertido automaticamente para UPPERCASE) e flag `titulo`.
-- Grade editável de respostas com `ordenacao`, `label` (UPPERCASE), `tipo_campo` e checkboxes
+- Grade editável de respostas com `ordenacao`, `label` (UPPERCASE), `tipo_campo` (ComboBox com tipos válidos) e checkboxes
   (`campo_obrigatorio`, `observacao`, `importa_historico`, `valor_data_atual`, `valor_hora_atual`).
+- Botão "Redefinir Alterações" para restaurar o estado original.
 - Opera diretamente sobre o dicionário JSON compartilhado (`shared_json`).
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -30,6 +33,22 @@ from PySide6.QtWidgets import (
 )
 
 logger = logging.getLogger("gui.wizard.questions")
+
+# Tipos válidos de campo conforme spec_sql_insert.md
+TIPOS_CAMPO_VALIDOS = [
+    "TEXTO",
+    "TEXTO_LONGO",
+    "INTEIRO",
+    "DECIMAL",
+    "BOOLEANO",
+    "DATA",
+    "HORA",
+    "DATA_HORA",
+    "CID",
+    "PROCEDIMENTO",
+    "EXAME",
+    "SINAL_VITAL",
+]
 
 
 class _StringVarAdapter:
@@ -98,6 +117,16 @@ class AnswerRowWidgets:
         self.entry_label = QLineEdit(label_inicial, parent)
         self.entry_label.setAccessibleName(f"Label da resposta {index}")
         self.entry_label.editingFinished.connect(self.commit_label_uppercase)
+
+        # ComboBox para tipo_campo
+        self.combo_tipo_campo = QComboBox(parent)
+        self.combo_tipo_campo.addItems(TIPOS_CAMPO_VALIDOS)
+        tipo_atual = str(resposta_dict.get("tipo_campo") or "TEXTO")
+        if tipo_atual in TIPOS_CAMPO_VALIDOS:
+            self.combo_tipo_campo.setCurrentText(tipo_atual)
+        else:
+            self.combo_tipo_campo.setCurrentText("TEXTO")
+        self.combo_tipo_campo.currentTextChanged.connect(self.on_tipo_campo_changed)
 
         self.chk_obrigatorio = QCheckBox(parent)
         self.chk_obrigatorio.setChecked(obrig_val)
@@ -174,6 +203,11 @@ class AnswerRowWidgets:
                 self.resposta["obrigatorio"] = val
         else:
             self.resposta[field_name] = val
+        self.on_modified()
+
+    def on_tipo_campo_changed(self, new_tipo: str) -> None:
+        """Atualiza o tipo_campo no dicionário da resposta quando o ComboBox muda."""
+        self.resposta["tipo_campo"] = new_tipo
         self.on_modified()
 
 
@@ -336,10 +370,7 @@ class QuestionAccordionItem(QFrame):
             grid.addWidget(QLabel(str(ordem_val), self.body_frame), idx, 0)
             grid.addWidget(row_obj.entry_label, idx, 1)
 
-            tipo_campo = str(resp.get("tipo_campo") or "")
-            lbl_tipo = QLabel(tipo_campo, self.body_frame)
-            lbl_tipo.setStyleSheet("color: #0369a1; font-family: Consolas, monospace; font-weight: bold;")
-            grid.addWidget(lbl_tipo, idx, 2)
+            grid.addWidget(row_obj.combo_tipo_campo, idx, 2)
 
             grid.addWidget(row_obj.chk_obrigatorio, idx, 3, Qt.AlignmentFlag.AlignCenter)
             grid.addWidget(row_obj.chk_observacao, idx, 4, Qt.AlignmentFlag.AlignCenter)
@@ -408,6 +439,7 @@ class QuestionsPage(QWidget):
         self.on_json_changed = on_json_changed
         self.on_back_to_landing = on_back_to_landing
         self.question_items: list[QuestionAccordionItem] = []
+        self._original_state: dict[str, Any] | None = None  # Para reset
 
         self.setAccessibleName("Perguntas e Respostas")
         self._build_ui()
@@ -446,6 +478,12 @@ class QuestionsPage(QWidget):
         self.btn_apply.setAccessibleName("Aplicar Alterações nas Perguntas")
         self.btn_apply.clicked.connect(self.apply_changes)
         toolbar.addWidget(self.btn_apply)
+
+        self.btn_reset = _CallableButton("Redefinir Alterações", self)
+        self.btn_reset.setAccessibleName("Redefinir Alterações para o Estado Original")
+        self.btn_reset.setToolTip("Descarta todas as alterações e restaura o JSON original carregado")
+        self.btn_reset.clicked.connect(self.reset_changes)
+        toolbar.addWidget(self.btn_reset)
 
         toolbar.addStretch(1)
 
@@ -490,13 +528,18 @@ class QuestionsPage(QWidget):
         if not self.shared_json or not isinstance(self.shared_json, dict):
             self.lbl_summary.setText("Nenhum JSON carregado.")
             self.cards_layout.addStretch(1)
+            self._original_state = None
             return
 
         perguntas = self.shared_json.get("perguntas", [])
         if not isinstance(perguntas, list):
             self.lbl_summary.setText("Lista 'perguntas' não encontrada no JSON.")
             self.cards_layout.addStretch(1)
+            self._original_state = None
             return
+
+        # Salva cópia profunda do estado original para reset
+        self._original_state = copy.deepcopy(self.shared_json)
 
         total_respostas = 0
         for idx, p_dict in enumerate(perguntas, start=1):
@@ -506,13 +549,12 @@ class QuestionsPage(QWidget):
             if isinstance(respostas, list):
                 total_respostas += len(respostas)
 
-            expand_first = idx == 1 and len(perguntas) <= 25
             card = QuestionAccordionItem(
                 self.scrollable_frame,
                 pergunta_dict=p_dict,
                 question_index=idx,
                 on_modified=self._on_item_modified,
-                initially_expanded=expand_first,
+                initially_expanded=False,
             )
             self.cards_layout.addWidget(card)
             self.question_items.append(card)
@@ -562,3 +604,24 @@ class QuestionsPage(QWidget):
         if self.on_back_to_landing is not None:
             self.on_back_to_landing()
         self.back_to_landing_requested.emit()
+
+    def reset_changes(self) -> bool:
+        """Redefine todas as alterações, restaurando o JSON ao estado original carregado."""
+        if self._original_state is None:
+            self.lbl_status.setText("Nenhum estado original salvo para restaurar.")
+            return False
+
+        # Restaura o estado original no shared_json in-place
+        self.shared_json.clear()
+        self.shared_json.update(copy.deepcopy(self._original_state))
+
+        # Reconstrói a UI a partir do estado restaurado
+        self.refresh_from_shared()
+
+        # Notifica listeners
+        if self.on_json_changed is not None:
+            self.on_json_changed(self.shared_json)
+        self.json_changed.emit(self.shared_json)
+
+        self.lbl_status.setText("Alterações descartadas — JSON restaurado ao estado original.")
+        return True

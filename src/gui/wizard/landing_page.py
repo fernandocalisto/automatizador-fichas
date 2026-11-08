@@ -3,9 +3,10 @@
 Página Inicial do Wizard — LandingPage (src/gui/wizard/landing_page.py).
 
 Implementa a tela inicial PySide6 conforme Spec 00 e `spec_json_editor.md`:
-- Logo `salutem_ferramenta_interna_logo.png` no topo (altura ~120px, mantém aspect ratio)
+- Logo `salutem_ferramenta_interna_logo.png` no topo (altura ~120px, mantém aspect ratio, cantos arredondados)
 - Título: "Automatizador de Fichas – Carregar JSON"
-- Botão "Baixar Skill (SKILL.md)" com tooltip completo e explicação curta
+- Botão "Baixar Skill (SKILL.md)" com tooltip completo
+- Explicação curta (2 linhas) centralizada
 - Botões "Carregar JSON de Arquivo" e "Colar JSON da Área de Transferência"
 - Barra de status / feedback visual
 """
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
 import src.resources.resources_rc  # noqa: F401
 from src.utils.json_utils import parse_and_validate_clinical_json
 from src.utils.resource_path import get_skill_file_path, resource_path
+from src.utils.logo_utils import load_logo_pixmap
 
 logger = logging.getLogger("gui.wizard.landing")
 
@@ -51,26 +53,14 @@ SKILL_TOOLTIP_TEXT = (
 )
 
 SHORT_EXPLANATION_TEXT = (
-    "1) Baixe o arquivo SKILL.md acima e envie-o junto com o PDF da ficha clínica para a IA de sua preferência.\n"
-    "2) Valide os campos e tipos com a IA até que ela gere o JSON final da ficha no padrão Salutem.\n"
-    "3) Carregue o arquivo .json gerado ou cole o conteúdo diretamente da área de transferência abaixo."
+    "Baixe o arquivo SKILL.md acima e envie-o junto com o PDF da ficha clínica para a IA de sua preferência. "
+    "Valide os campos e tipos com a IA até que ela gere o JSON final da ficha no padrão Salutem."
 )
 
 
 def _load_landing_logo(target_height: int = 120) -> QPixmap:
-    """Carrega o logo da aplicação escalado para a altura alvo mantendo a proporção."""
-    for candidate in (
-        ":/resources/salutem_ferramenta_interna_logo.png",
-        ":/salutem_ferramenta_interna_logo.png",
-        str(resource_path("salutem_ferramenta_interna_logo.png")),
-    ):
-        pm = QPixmap(candidate)
-        if not pm.isNull():
-            return pm.scaledToHeight(
-                target_height,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-    return QPixmap()
+    """Carrega o logo da aplicação escalado para a altura alvo mantendo a proporção e com cantos arredondados."""
+    return load_logo_pixmap(height=target_height, radius=16)
 
 
 class _StatusVarAdapter:
@@ -130,7 +120,7 @@ class LandingPage(QWidget):
 
         root_layout.addStretch(1)
 
-        # Logo centralizado (~120px de altura)
+        # Logo centralizado (~120px de altura, cantos arredondados)
         logo_row = QHBoxLayout()
         logo_row.addStretch(1)
         self.lbl_logo = QLabel(self)
@@ -164,17 +154,12 @@ class LandingPage(QWidget):
         self.btn_download_skill.clicked.connect(lambda: self.download_skill())
         btn_row.addWidget(self.btn_download_skill)
 
-        lbl_hint = QLabel(
-            "ℹ Passe o mouse sobre o botão para ver o passo a passo completo",
-            skill_group,
-        )
-        lbl_hint.setStyleSheet("color: #64748b; font-style: italic;")
-        btn_row.addWidget(lbl_hint, 1)
-
         skill_layout.addLayout(btn_row)
 
         self.lbl_explanation = QLabel(SHORT_EXPLANATION_TEXT, skill_group)
         self.lbl_explanation.setWordWrap(True)
+        self.lbl_explanation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_explanation.setStyleSheet("color: #475569; font-size: 10pt;")
         skill_layout.addWidget(self.lbl_explanation)
 
         root_layout.addWidget(skill_group)
@@ -199,12 +184,13 @@ class LandingPage(QWidget):
         )
         self.btn_paste_clipboard.setMinimumHeight(38)
         self.btn_paste_clipboard.setAccessibleName("Colar JSON da Área de Transferência")
-        self.btn_paste_clipboard.setToolTip("Validar e importar o JSON copiado na área de transferência")
+        self.btn_paste_clipboard.setToolTip("Colar JSON copiado da área de transferência (Ctrl+Shift+V)")
         self.btn_paste_clipboard.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_paste_clipboard.clicked.connect(self.paste_json_from_clipboard)
         load_layout.addWidget(self.btn_paste_clipboard, 1)
 
         root_layout.addWidget(load_group)
+
         root_layout.addStretch(1)
 
         # Barra de status inferior da página
@@ -217,6 +203,8 @@ class LandingPage(QWidget):
         """
         Copia o arquivo `SKILL.md` embutido nos recursos do projeto para o destino escolhido.
         """
+        from src.utils.resource_path import get_skill_file_path
+
         source_path = get_skill_file_path()
         if not source_path.exists():
             msg = f"O arquivo SKILL.md não foi encontrado em:\n{source_path}"
@@ -260,7 +248,6 @@ class LandingPage(QWidget):
             return False
 
     def load_json_from_file_dialog(self) -> bool:
-        """Abre diálogo de seleção de arquivo `.json` e valida o conteúdo."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Carregar JSON de Ficha Clínica",
@@ -291,7 +278,6 @@ class LandingPage(QWidget):
         )
 
     def paste_json_from_clipboard(self, show_error_dialog: bool = True) -> bool:
-        """Lê o texto da área de transferência do sistema, valida o JSON e avança se válido."""
         clipboard = QApplication.clipboard()
         raw_text = clipboard.text() if clipboard is not None else ""
         if not raw_text.strip():

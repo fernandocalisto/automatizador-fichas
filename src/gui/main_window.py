@@ -4,9 +4,8 @@
 Janela Principal da Aplicação em PySide6 (src/gui/main_window.py).
 
 Implementa `MainWindow(QMainWindow)` e `AboutDialog(QDialog)` conforme Spec 00:
-- MenuBar: Arquivo, Editar, Conexões, Ferramentas, Janela, Ajuda (Sobre)
+- MenuBar: Arquivo, Editar, Ferramentas, Janela, Ajuda (Sobre)
 - Toolbar: Novo, Abrir, Salvar, Gerar INSERT, Gerar SELECT, Config, Tema (ThemeSwitch), Ajuda
-- Sidebar QDockWidget: colapsável (64px ↔ 240px) com abas Conexões, Histórico, Favoritos
 - Central QStackedWidget: 5 páginas (LandingPage, JsonEditorPage, QuestionsPage, SqlInsertPage, SqlSelectPage)
 - Bottom QDockWidget: abas Output/Log, Validação, Propriedades
 - StatusBar: Conexão, Encoding, Ln/Col, Tema, Versão
@@ -30,7 +29,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QListWidget,
     QListWidgetItem,
     QMainWindow,
     QMenu,
@@ -45,7 +43,6 @@ from PySide6.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QToolBar,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -189,14 +186,13 @@ class AboutDialog(QDialog):
 
 class MainWindow(QMainWindow):
     """
-    Janela Principal PySide6 do Automatizador de Fichas.
+    Janela Principal da Aplicação em PySide6 (src/gui/main_window.py).
 
-    Estrutura:
-    - MenuBar: Arquivo, Editar, Conexões, Ferramentas, Janela, Ajuda (Sobre)
-    - ToolBar: Novo, Abrir, Salvar, Gerar INSERT, Gerar SELECT, Config, Tema, Ajuda
-    - Sidebar QDockWidget: colapsável 64px ↔ 240px (Conexões, Histórico, Favoritos)
-    - Central QStackedWidget: 5 páginas (Landing, JsonEditor, Questions, SqlInsert, SqlSelect)
-    - Bottom QDockWidget: Output/Log, Validação, Propriedades
+    Implementa `MainWindow(QMainWindow)` e `AboutDialog(QDialog)` conforme Spec 00:
+    - MenuBar: Arquivo, Editar, Ferramentas, Janela, Ajuda (Sobre)
+    - Toolbar: Novo, Abrir, Salvar, Gerar INSERT, Gerar SELECT, Config, Tema (ThemeSwitch), Ajuda
+    - Central QStackedWidget: 5 páginas (LandingPage, JsonEditorPage, QuestionsPage, SqlInsertPage, SqlSelectPage)
+    - Bottom QDockWidget: abas Output/Log, Validação, Propriedades
     - StatusBar: Conexão, Encoding, Ln/Col, Tema, Versão
     """
 
@@ -216,9 +212,6 @@ class MainWindow(QMainWindow):
         "5. Gerar SELECT Jasper",
     ]
 
-    SIDEBAR_COLLAPSED_WIDTH = 64
-    SIDEBAR_EXPANDED_WIDTH = 240
-
     def __init__(
         self,
         config_service: ConfigService | None = None,
@@ -237,7 +230,6 @@ class MainWindow(QMainWindow):
         self.json_data: dict[str, Any] = {}
         self.current_view: str = "landing"
         self._listeners: list[Callable[[dict[str, Any] | None], None]] = []
-        self._sidebar_collapsed: bool = False
 
         self.setObjectName("MainWindow")
         self.setWindowTitle(f"{APP_TITLE_BASE} – Carregar JSON")
@@ -252,12 +244,11 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_toolbar()
         self._build_central_area()
-        self._build_sidebar_dock()
         self._build_bottom_dock()
         self._build_statusbar()
         self._connect_signals()
 
-        # Restaura estado salvo (geometria, docks, largura da sidebar e última página)
+        # Restaura estado salvo (geometria, docks e última página)
         self.restore_window_state()
 
     # -------------------------------------------------------------------------
@@ -329,19 +320,6 @@ class MainWindow(QMainWindow):
         self.action_validate_json = QAction("Validar && Formatar JSON", self)
         self.action_validate_json.setShortcut(QKeySequence("Ctrl+Shift+F"))
         self.action_validate_json.triggered.connect(self._validate_and_format_json)
-
-        # Conexões
-        self.action_manage_connections = QAction("Gerenciar Conexões…", self)
-        self.action_manage_connections.triggered.connect(
-            lambda: self.open_settings_dialog(initial_row=5)
-        )
-
-        self.action_focus_connections_dock = QAction(
-            "Mostrar Painel de Conexões", self
-        )
-        self.action_focus_connections_dock.triggered.connect(
-            self._show_connections_sidebar_tab
-        )
 
         # Ferramentas / Geração SQL
         self.action_generate_insert = QAction(
@@ -426,12 +404,7 @@ class MainWindow(QMainWindow):
         self.menu_editar.addSeparator()
         self.menu_editar.addAction(self.action_settings)
 
-        # 3. Conexões
-        self.menu_conexoes: QMenu = menubar.addMenu("&Conexões")
-        self.menu_conexoes.addAction(self.action_manage_connections)
-        self.menu_conexoes.addAction(self.action_focus_connections_dock)
-
-        # 4. Ferramentas
+        # 3. Ferramentas
         self.menu_ferramentas: QMenu = menubar.addMenu("&Ferramentas")
         self.menu_ferramentas.addAction(self.action_generate_insert)
         self.menu_ferramentas.addAction(self.action_generate_select)
@@ -439,17 +412,19 @@ class MainWindow(QMainWindow):
         self.menu_ferramentas.addSeparator()
         self.menu_ferramentas.addAction(self.action_download_skill)
 
-        # 5. Janela
+        # 4. Janela
         self.menu_janela: QMenu = menubar.addMenu("&Janela")
-        self.action_toggle_sidebar_width = QAction(
-            "Alternar Largura da Barra Lateral (64px ↔ 240px)", self
+        self.action_toggle_bottom_dock = QAction(
+            "Alternar Painel Inferior", self
         )
-        self.action_toggle_sidebar_width.triggered.connect(
-            self.toggle_sidebar_collapse
+        self.action_toggle_bottom_dock.setCheckable(True)
+        self.action_toggle_bottom_dock.setChecked(True)
+        self.action_toggle_bottom_dock.triggered.connect(
+            lambda checked: self.bottom_dock.setVisible(checked)
         )
-        self.menu_janela.addAction(self.action_toggle_sidebar_width)
+        self.menu_janela.addAction(self.action_toggle_bottom_dock)
 
-        # 6. Ajuda (Sobre)
+        # 5. Ajuda
         self.menu_ajuda: QMenu = menubar.addMenu("A&juda")
         self.menu_ajuda.addAction(self.action_help)
         self.menu_ajuda.addAction(self.action_github)
@@ -573,153 +548,6 @@ class MainWindow(QMainWindow):
         self.sql_select_tab = self.sql_select_page
 
         self._update_step_buttons(self.PAGE_LANDING)
-
-    # -------------------------------------------------------------------------
-    # Sidebar QDockWidget (Colapsável 64px ↔ 240px: Conexões, Histórico, Favoritos)
-    # -------------------------------------------------------------------------
-    def _build_sidebar_dock(self) -> None:
-        self.sidebar_dock = QDockWidget("Navegação & Recursos", self)
-        self.sidebar_dock.setObjectName("SidebarDockWidget")
-        self.sidebar_dock.setAccessibleName("Painel Lateral")
-        self.sidebar_dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.sidebar_dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-        )
-
-        sidebar_widget = QWidget(self.sidebar_dock)
-        sidebar_layout = QVBoxLayout(sidebar_widget)
-        sidebar_layout.setContentsMargins(4, 4, 4, 4)
-        sidebar_layout.setSpacing(4)
-
-        # Cabeçalho com botão de colapsar (64px ↔ 240px)
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(2, 0, 2, 0)
-        self.btn_collapse_sidebar = QToolButton(sidebar_widget)
-        self.btn_collapse_sidebar.setText("«")
-        self.btn_collapse_sidebar.setToolTip(
-            "Recolher / Expandir barra lateral (64px ↔ 240px)"
-        )
-        self.btn_collapse_sidebar.setAccessibleName("Alternar Largura da Barra Lateral")
-        self.btn_collapse_sidebar.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_collapse_sidebar.clicked.connect(self.toggle_sidebar_collapse)
-        header_row.addWidget(self.btn_collapse_sidebar)
-
-        self.lbl_sidebar_header = QLabel("Explorador", sidebar_widget)
-        self.lbl_sidebar_header.setStyleSheet("font-weight: 600;")
-        header_row.addWidget(self.lbl_sidebar_header, 1)
-        sidebar_layout.addLayout(header_row)
-
-        # Abas da Sidebar: Conexões, Histórico, Favoritos
-        self.sidebar_tabs = QTabWidget(sidebar_widget)
-        self.sidebar_tabs.setAccessibleName("Abas da Barra Lateral")
-        self.sidebar_tabs.setDocumentMode(True)
-
-        # Tab 1: Conexões
-        self.tab_connections = QWidget(self.sidebar_tabs)
-        conn_layout = QVBoxLayout(self.tab_connections)
-        conn_layout.setContentsMargins(6, 6, 6, 6)
-        conn_layout.setSpacing(6)
-        self.connections_list = QListWidget(self.tab_connections)
-        self.connections_list.setAccessibleName("Lista de Conexões")
-        self.connections_list.addItem("PostgreSQL Local (Offline)")
-        conn_layout.addWidget(self.connections_list, 1)
-        self.btn_manage_conn_sidebar = QPushButton(
-            "Configurar Conexões…", self.tab_connections
-        )
-        self.btn_manage_conn_sidebar.clicked.connect(
-            lambda: self.open_settings_dialog(initial_row=5)
-        )
-        conn_layout.addWidget(self.btn_manage_conn_sidebar)
-        self.sidebar_tabs.addTab(self.tab_connections, "Conexões")
-
-        # Tab 2: Histórico
-        self.tab_history = QWidget(self.sidebar_tabs)
-        hist_layout = QVBoxLayout(self.tab_history)
-        hist_layout.setContentsMargins(6, 6, 6, 6)
-        hist_layout.setSpacing(6)
-        self.history_list = QListWidget(self.tab_history)
-        self.history_list.setAccessibleName("Lista de Histórico")
-        self.history_list.itemDoubleClicked.connect(self._on_history_item_activated)
-        hist_layout.addWidget(self.history_list, 1)
-        self.sidebar_tabs.addTab(self.tab_history, "Histórico")
-
-        # Tab 3: Favoritos
-        self.tab_favorites = QWidget(self.sidebar_tabs)
-        fav_layout = QVBoxLayout(self.tab_favorites)
-        fav_layout.setContentsMargins(6, 6, 6, 6)
-        fav_layout.setSpacing(6)
-        self.favorites_list = QListWidget(self.tab_favorites)
-        self.favorites_list.setAccessibleName("Lista de Favoritos")
-        for idx, title in enumerate(self.PAGE_TITLES):
-            item = QListWidgetItem(title)
-            item.setData(Qt.ItemDataRole.UserRole, idx)
-            self.favorites_list.addItem(item)
-        self.favorites_list.itemClicked.connect(self._on_favorite_item_clicked)
-        fav_layout.addWidget(self.favorites_list, 1)
-        self.sidebar_tabs.addTab(self.tab_favorites, "Favoritos")
-
-        sidebar_layout.addWidget(self.sidebar_tabs, 1)
-
-        # Barra compacta exibida quando recolhida em 64px
-        self.compact_rail = QWidget(sidebar_widget)
-        rail_layout = QVBoxLayout(self.compact_rail)
-        rail_layout.setContentsMargins(2, 4, 2, 4)
-        rail_layout.setSpacing(8)
-        for idx, short_label in enumerate(["Con", "Hist", "Fav"]):
-            btn = QPushButton(short_label, self.compact_rail)
-            btn.setToolTip(self.sidebar_tabs.tabText(idx))
-            btn.clicked.connect(
-                lambda _c=False, tab_idx=idx: self._expand_sidebar_to_tab(tab_idx)
-            )
-            rail_layout.addWidget(btn)
-        rail_layout.addStretch(1)
-        self.compact_rail.setVisible(False)
-        sidebar_layout.addWidget(self.compact_rail, 1)
-
-        self.sidebar_dock.setWidget(sidebar_widget)
-        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.sidebar_dock)
-        self.set_sidebar_collapsed(False)
-
-        self.menu_janela.addAction(self.sidebar_dock.toggleViewAction())
-
-    def set_sidebar_collapsed(self, collapsed: bool) -> None:
-        """Define a largura da Sidebar entre 64px (recolhida) e 240px (expandida)."""
-        self._sidebar_collapsed = bool(collapsed)
-        if self._sidebar_collapsed:
-            self.sidebar_tabs.setVisible(False)
-            self.lbl_sidebar_header.setVisible(False)
-            self.compact_rail.setVisible(True)
-            self.btn_collapse_sidebar.setText("»")
-            self.sidebar_dock.setMinimumWidth(self.SIDEBAR_COLLAPSED_WIDTH)
-            self.sidebar_dock.setMaximumWidth(self.SIDEBAR_COLLAPSED_WIDTH)
-            self.sidebar_dock.resize(
-                self.SIDEBAR_COLLAPSED_WIDTH, self.sidebar_dock.height()
-            )
-        else:
-            self.compact_rail.setVisible(False)
-            self.sidebar_tabs.setVisible(True)
-            self.lbl_sidebar_header.setVisible(True)
-            self.btn_collapse_sidebar.setText("«")
-            self.sidebar_dock.setMinimumWidth(self.SIDEBAR_EXPANDED_WIDTH)
-            self.sidebar_dock.setMaximumWidth(self.SIDEBAR_EXPANDED_WIDTH)
-            self.sidebar_dock.resize(
-                self.SIDEBAR_EXPANDED_WIDTH, self.sidebar_dock.height()
-            )
-
-    def toggle_sidebar_collapse(self) -> None:
-        """Alterna a Sidebar entre os estados 64px e 240px."""
-        self.set_sidebar_collapsed(not self._sidebar_collapsed)
-
-    def _expand_sidebar_to_tab(self, tab_index: int) -> None:
-        self.set_sidebar_collapsed(False)
-        self.sidebar_tabs.setCurrentIndex(tab_index)
-
-    def _show_connections_sidebar_tab(self) -> None:
-        self.sidebar_dock.setVisible(True)
-        self._expand_sidebar_to_tab(0)
 
     # -------------------------------------------------------------------------
     # Bottom QDockWidget (Output/Log, Validação, Propriedades)
@@ -915,6 +743,8 @@ class MainWindow(QMainWindow):
             self.properties_table.setItem(row_idx, 1, QTableWidgetItem(val))
 
     def _add_history_entry(self, description: str, file_path: Path | None = None) -> None:
+        if not hasattr(self, "history_list"):
+            return
         item = QListWidgetItem(description)
         if file_path is not None:
             item.setData(Qt.ItemDataRole.UserRole, str(file_path))
@@ -1171,19 +1001,18 @@ class MainWindow(QMainWindow):
     # Persistência de Estado (`saveState` / `restoreState` + `QSettings`)
     # -------------------------------------------------------------------------
     def save_window_state(self) -> None:
-        """Salva geometria, estado das docks, colapso da sidebar e página atual no `QSettings`."""
+        """Salva geometria, estado das docks, e página atual no `QSettings`."""
         settings: QSettings = self.config_service.settings
         try:
             settings.setValue("window/geometry", self.saveGeometry())
             settings.setValue("window/state", self.saveState())
-            settings.setValue("window/sidebar_collapsed", self._sidebar_collapsed)
             settings.setValue("window/last_page", self.central_stack.currentIndex())
             settings.sync()
         except Exception as exc:
             logger.warning("Não foi possível salvar estado da janela: %s", exc)
 
     def restore_window_state(self) -> None:
-        """Restaura geometria, estado das docks, colapso da sidebar e última página do `QSettings`."""
+        """Restaura geometria, estado das docks, e última página do `QSettings`."""
         settings: QSettings = self.config_service.settings
         try:
             geom = settings.value("window/geometry")
@@ -1194,19 +1023,9 @@ class MainWindow(QMainWindow):
             if isinstance(state, QByteArray) and not state.isEmpty():
                 self.restoreState(state)
 
-            collapsed_val = settings.value("window/sidebar_collapsed", False)
-            is_collapsed = (
-                collapsed_val.strip().lower() in ("true", "1", "yes")
-                if isinstance(collapsed_val, str)
-                else bool(collapsed_val)
-            )
-            self.set_sidebar_collapsed(is_collapsed)
-
             last_page_raw = settings.value("window/last_page", self.PAGE_LANDING)
             last_page = int(last_page_raw) if last_page_raw is not None else 0
             if 0 <= last_page < self.central_stack.count():
-                # Se não houver JSON carregado na inicialização, mantém na LandingPage
-                # mas preserva a capacidade de restaurar qualquer página válida quando aplicável
                 if last_page == self.PAGE_LANDING or self.json_data:
                     self.central_stack.setCurrentIndex(last_page)
         except Exception as exc:

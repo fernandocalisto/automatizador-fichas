@@ -4,14 +4,13 @@ Diálogo de Configurações da Aplicação (src/gui/settings/dialog.py).
 
 Implementa `SettingsDialog(QDialog)` conforme Spec 00:
 - Header com logo 32x32 (`salutem_ferramenta_interna_logo.png`) e título
-- `QListWidget` à esquerda com as 7 categorias:
+- `QListWidget` à esquerda com as 6 categorias:
   1. Geral (`GeneralPage`)
   2. Tema (`ThemePage`)
   3. Editor SQL (`EditorPage`)
   4. SELECT Jasper (`SelectPage`)
-  5. Regex (`RegexPage`)
-  6. Conexões (`ConnectionsPage`)
-  7. Ajuda (`HelpPage`)
+  4. Regex (`RegexPage`)
+  5. Ajuda (`HelpPage`)
 - `QStackedWidget` à direita exibindo a página selecionada
 - Botões de rodapé: `Restaurar Padrões`, `Cancelar`, `Aplicar`, `OK`
 """
@@ -40,7 +39,6 @@ from PySide6.QtWidgets import (
 
 import src.resources.resources_rc  # noqa: F401
 from src.gui.settings.pages import (
-    ConnectionsPage,
     EditorPage,
     GeneralPage,
     HelpPage,
@@ -146,7 +144,6 @@ class SettingsDialog(QDialog):
         self.editor_page = EditorPage(self.stack)
         self.select_page = SelectPage(self.stack)
         self.regex_page = RegexPage(self.stack)
-        self.connections_page = ConnectionsPage(self.stack)
         self.help_page = HelpPage(self.help_service, self.stack)
 
         self._pages = [
@@ -155,7 +152,6 @@ class SettingsDialog(QDialog):
             ("Editor SQL", self.editor_page),
             ("SELECT Jasper", self.select_page),
             ("Regex", self.regex_page),
-            ("Conexões", self.connections_page),
             ("Ajuda", self.help_page),
         ]
 

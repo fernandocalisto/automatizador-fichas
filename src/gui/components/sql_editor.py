@@ -23,10 +23,8 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QWidget, QPlainTextEdit
 
 # QScintilla imports - optional dependency
-# Note: QScintilla bindings are for PyQt6 (PyQt6-QScintilla package)
-# We import from PyQt6.Qsci since that's what the package provides
 try:
-    from PyQt6.Qsci import (
+    from PySide6.Qsci import (
         QsciLexerCustom,
         QsciLexerPostgreSQL,
         QsciScintilla,

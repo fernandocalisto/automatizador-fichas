@@ -1,12 +1,7 @@
-# Automatizador de Fichas - Runtime Dependencies
-# Install: pip install -r requirements.txt
+# Automatizador de Fichas - Dependencies
+# Core: Python 3.11+ standard library only (tkinter, json, re, unicodedata, pathlib, etc.)
+# Build: pyinstaller (installed separately in CI)
 
-# Core GUI framework
-PySide6>=6.5.0
-
-# QScintilla editor (PyQt6 binding - official QScintilla package)
-PyQt6-QScintilla>=2.14.0
-
-# Development / Testing
+# Optional: for development/testing
 pytest>=7.0.0
 pytest-cov>=4.0.0

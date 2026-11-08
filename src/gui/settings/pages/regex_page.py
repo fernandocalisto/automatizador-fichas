@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -47,7 +48,10 @@ class RegexPage(QWidget):
         grp = QGroupBox("Regras Customizadas de Substituição", self)
         form = QFormLayout(grp)
         form.setContentsMargins(12, 16, 12, 12)
-        form.setSpacing(10)
+        form.setSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.chk_custom_regex = QCheckBox(
             "Habilitar arquivo externo de regras Regex customizadas", grp
@@ -60,6 +64,7 @@ class RegexPage(QWidget):
         self.edt_regex_path = QLineEdit(grp)
         self.edt_regex_path.setPlaceholderText("Selecione um arquivo .json com regras de regex...")
         self.edt_regex_path.setAccessibleName("Caminho do Arquivo Regex")
+        self.edt_regex_path.setMinimumWidth(300)
         path_row.addWidget(self.edt_regex_path, 1)
 
         self.btn_browse = QPushButton("Procurar…", grp)
@@ -68,7 +73,9 @@ class RegexPage(QWidget):
         self.btn_browse.clicked.connect(self._browse_file)
         path_row.addWidget(self.btn_browse)
 
-        form.addRow("Arquivo de Regras:", path_row)
+        lbl_path = QLabel("Arquivo de Regras:")
+        lbl_path.setStyleSheet("font-weight: 500; color: #334155;")
+        form.addRow(lbl_path, path_row)
 
         layout.addWidget(grp)
         layout.addStretch(1)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -46,7 +47,10 @@ class ThemePage(QWidget):
         grp_theme = QGroupBox("Esquema de Cores", self)
         form_theme = QFormLayout(grp_theme)
         form_theme.setContentsMargins(12, 16, 12, 12)
-        form_theme.setSpacing(10)
+        form_theme.setSpacing(12)
+        form_theme.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form_theme.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        form_theme.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.cmb_app_theme = QComboBox(grp_theme)
         self.cmb_app_theme.addItem("Sistema (Automático)", "system")
@@ -54,7 +58,10 @@ class ThemePage(QWidget):
         self.cmb_app_theme.addItem("Escuro (Dark)", "dark")
         self.cmb_app_theme.setAccessibleName("Tema da Aplicação")
         self.cmb_app_theme.setToolTip("Escolha o tema geral das janelas e painéis")
-        form_theme.addRow("Tema da Aplicação:", self.cmb_app_theme)
+        self.cmb_app_theme.setMinimumWidth(220)
+        lbl_app = QLabel("Tema da Aplicação:")
+        lbl_app.setStyleSheet("font-weight: 500; color: #334155;")
+        form_theme.addRow(lbl_app, self.cmb_app_theme)
 
         self.cmb_editor_theme = QComboBox(grp_theme)
         self.cmb_editor_theme.addItem("VS Code Dark+", "vscode")
@@ -64,7 +71,10 @@ class ThemePage(QWidget):
         self.cmb_editor_theme.addItem("Solarized Dark", "solarized")
         self.cmb_editor_theme.setAccessibleName("Tema do Editor")
         self.cmb_editor_theme.setToolTip("Escolha o esquema de cores dos editores JSON e SQL")
-        form_theme.addRow("Tema do Editor:", self.cmb_editor_theme)
+        self.cmb_editor_theme.setMinimumWidth(220)
+        lbl_ed = QLabel("Tema do Editor:")
+        lbl_ed.setStyleSheet("font-weight: 500; color: #334155;")
+        form_theme.addRow(lbl_ed, self.cmb_editor_theme)
 
         layout.addWidget(grp_theme)
 
@@ -72,7 +82,10 @@ class ThemePage(QWidget):
         grp_font = QGroupBox("Tipografia do Editor", self)
         form_font = QFormLayout(grp_font)
         form_font.setContentsMargins(12, 16, 12, 12)
-        form_font.setSpacing(10)
+        form_font.setSpacing(12)
+        form_font.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form_font.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        form_font.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.cmb_font_family = QComboBox(grp_font)
         self.cmb_font_family.setEditable(True)
@@ -80,14 +93,20 @@ class ThemePage(QWidget):
             self.cmb_font_family.addItem(family, family)
         self.cmb_font_family.setAccessibleName("Família da Fonte do Editor")
         self.cmb_font_family.setToolTip("Fonte monoespaçada utilizada nos editores JSON e SQL")
-        form_font.addRow("Fonte do Editor:", self.cmb_font_family)
+        self.cmb_font_family.setMinimumWidth(220)
+        lbl_font = QLabel("Fonte do Editor:")
+        lbl_font.setStyleSheet("font-weight: 500; color: #334155;")
+        form_font.addRow(lbl_font, self.cmb_font_family)
 
         self.spn_font_size = QSpinBox(grp_font)
         self.spn_font_size.setRange(8, 28)
         self.spn_font_size.setSuffix(" pt")
         self.spn_font_size.setAccessibleName("Tamanho da Fonte do Editor")
         self.spn_font_size.setToolTip("Tamanho da fonte em pontos (8 a 28 pt)")
-        form_font.addRow("Tamanho da Fonte:", self.spn_font_size)
+        self.spn_font_size.setMinimumWidth(120)
+        lbl_size = QLabel("Tamanho da Fonte:")
+        lbl_size.setStyleSheet("font-weight: 500; color: #334155;")
+        form_font.addRow(lbl_size, self.spn_font_size)
 
         layout.addWidget(grp_font)
         layout.addStretch(1)

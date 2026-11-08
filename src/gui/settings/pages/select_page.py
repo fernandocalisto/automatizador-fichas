@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -45,7 +46,10 @@ class SelectPage(QWidget):
         grp = QGroupBox("Formatação de Projeções e Colunas", self)
         form = QFormLayout(grp)
         form.setContentsMargins(12, 16, 12, 12)
-        form.setSpacing(10)
+        form.setSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.cmb_boolean_style = QComboBox(grp)
         self.cmb_boolean_style.addItem("COALESCE(BOOL_OR(...), false)", "coalesce_bool_or")
@@ -54,7 +58,10 @@ class SelectPage(QWidget):
         self.cmb_boolean_style.addItem("Numérico (1 / 0)", "1_0")
         self.cmb_boolean_style.setAccessibleName("Estilo de Campos Booleanos")
         self.cmb_boolean_style.setToolTip("Define como campos BOOLEANO são projetados no SELECT")
-        form.addRow("Estilo de Booleanos:", self.cmb_boolean_style)
+        self.cmb_boolean_style.setMinimumWidth(280)
+        lbl_bool = QLabel("Estilo de Booleanos:")
+        lbl_bool.setStyleSheet("font-weight: 500; color: #334155;")
+        form.addRow(lbl_bool, self.cmb_boolean_style)
 
         self.cmb_column_naming = QComboBox(grp)
         self.cmb_column_naming.addItem("Pergunta + Label", "pergunta_label")
@@ -62,7 +69,10 @@ class SelectPage(QWidget):
         self.cmb_column_naming.addItem("Label + Sufixo de Tipo", "label_sufixo")
         self.cmb_column_naming.setAccessibleName("Nomenclatura de Colunas")
         self.cmb_column_naming.setToolTip("Convenção de geração dos aliases SQL")
-        form.addRow("Aliases de Coluna:", self.cmb_column_naming)
+        self.cmb_column_naming.setMinimumWidth(280)
+        lbl_col = QLabel("Aliases de Coluna:")
+        lbl_col.setStyleSheet("font-weight: 500; color: #334155;")
+        form.addRow(lbl_col, self.cmb_column_naming)
 
         self.chk_observations = QCheckBox("Incluir colunas adicionais de observação (_obs)", grp)
         self.chk_observations.setAccessibleName("Incluir colunas de observação")

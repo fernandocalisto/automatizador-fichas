@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QFormLayout,
@@ -45,14 +46,20 @@ class EditorPage(QWidget):
         grp_ed = QGroupBox("Comportamento e Exibição", self)
         form = QFormLayout(grp_ed)
         form.setContentsMargins(12, 16, 12, 12)
-        form.setSpacing(10)
+        form.setSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.spn_tab_size = QSpinBox(grp_ed)
         self.spn_tab_size.setRange(2, 8)
         self.spn_tab_size.setSuffix(" espaços")
         self.spn_tab_size.setAccessibleName("Tamanho da Tabulação")
         self.spn_tab_size.setToolTip("Quantidade de espaços por nível de indentação")
-        form.addRow("Tamanho do Tab:", self.spn_tab_size)
+        self.spn_tab_size.setMinimumWidth(120)
+        lbl_tab = QLabel("Tamanho do Tab:")
+        lbl_tab.setStyleSheet("font-weight: 500; color: #334155;")
+        form.addRow(lbl_tab, self.spn_tab_size)
 
         self.spn_autocomplete_delay = QSpinBox(grp_ed)
         self.spn_autocomplete_delay.setRange(50, 2000)
@@ -60,7 +67,10 @@ class EditorPage(QWidget):
         self.spn_autocomplete_delay.setSuffix(" ms")
         self.spn_autocomplete_delay.setAccessibleName("Atraso do Autocompletar")
         self.spn_autocomplete_delay.setToolTip("Tempo em milissegundos antes de exibir sugestões")
-        form.addRow("Delay Autocomplete:", self.spn_autocomplete_delay)
+        self.spn_autocomplete_delay.setMinimumWidth(120)
+        lbl_delay = QLabel("Delay Autocomplete:")
+        lbl_delay.setStyleSheet("font-weight: 500; color: #334155;")
+        form.addRow(lbl_delay, self.spn_autocomplete_delay)
 
         self.chk_line_numbers = QCheckBox("Exibir numeração de linhas", grp_ed)
         self.chk_line_numbers.setAccessibleName("Exibir numeração de linhas")

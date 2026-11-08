@@ -12,7 +12,7 @@ from src.gui.wizard.questions_page import (
     QuestionAccordionItem,
     QuestionsPage,
 )
-from src.gui.wizard.sql_insert_page import PostgresSyntaxHighlighter, SqlInsertPage
+from src.gui.wizard.sql_insert_page import SqlInsertPage
 from src.gui.wizard.sql_select_page import SqlSelectPage
 
 __all__ = [
@@ -20,7 +20,6 @@ __all__ = [
     "JsonEditorPage",
     "JsonSyntaxHighlighter",
     "LandingPage",
-    "PostgresSyntaxHighlighter",
     "QuestionAccordionItem",
     "QuestionsPage",
     "SHORT_EXPLANATION_TEXT",

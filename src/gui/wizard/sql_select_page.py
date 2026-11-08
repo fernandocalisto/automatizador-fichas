@@ -6,7 +6,8 @@ Implementa a interface PySide6 para geração da consulta SQL SELECT para Jasper
 (Padrão Ouro) conforme `spec_sql_select.md` e Spec 00:
 - Botões: "Gerar SELECT Jasper", "Validar Sintaxe", "Copiar para Área de Transferência",
   "Salvar como .sql", "Voltar à Tela Inicial"
-- Editor `QPlainTextEdit` com `PostgresSyntaxHighlighter` e integração com `ThemeService`.
+- Editor `SqlEditorWidget` (QScintilla) com lexer PostgreSQL + Jasper, line numbers, folding,
+  brace matching, e integração com `ThemeService` (5 temas).
 """
 
 from __future__ import annotations
@@ -26,7 +27,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -38,17 +38,37 @@ from src.core.sql_select import (
     generate_select_jasper,
     validate_postgres_syntax,
 )
-from src.gui.wizard.sql_insert_page import (
-    PostgresSyntaxHighlighter,
-    _LabelVarAdapter,
-    _StatefulButton,
-)
 from src.utils.resource_path import resource_path
 
 if TYPE_CHECKING:
     from src.services.theme_service import ThemeService
 
 logger = logging.getLogger("sql_select")
+
+
+class _LabelVarAdapter:
+    """Adaptador `.get()` / `.set()` sobre `QLabel`."""
+
+    def __init__(self, label: QLabel) -> None:
+        self._label = label
+
+    def get(self) -> str:
+        return self._label.text()
+
+    def set(self, value: str) -> None:
+        self._label.setText(str(value))
+
+
+class _StatefulButton(QPushButton):
+    """`QPushButton` com método `cget('state')` e `invoke()` para compatibilidade."""
+
+    def cget(self, key: str) -> str:
+        if key == "state":
+            return "normal" if self.isEnabled() else "disabled"
+        return ""
+
+    def invoke(self) -> None:
+        self.click()
 
 
 class SqlSelectPage(QWidget):
@@ -267,16 +287,14 @@ class SqlSelectPage(QWidget):
 
         root_layout.addWidget(self.options_panel)
 
-        self.preview_text = QPlainTextEdit(self)
+        # SqlEditorWidget (QScintilla) com lexer PostgreSQL + Jasper
+        from src.gui.components.sql_editor import SqlEditorWidget
+        self.preview_text = SqlEditorWidget(
+            self,
+            read_only=False,
+            theme_service=self._theme_service,
+        )
         self.preview_text.setAccessibleName("Editor SELECT Jasper")
-        self.preview_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = QFont("JetBrains Mono", 11)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.preview_text.setFont(font)
-
-        self.highlighter = PostgresSyntaxHighlighter(self.preview_text.document())
-
-        self.preview_text.textChanged.connect(self._on_text_edited)
         self.preview_text.cursorPositionChanged.connect(self._on_cursor_changed)
         root_layout.addWidget(self.preview_text, 1)
 
@@ -338,37 +356,28 @@ class SqlSelectPage(QWidget):
             self.generate_sql(show_error_dialog=False)
 
     def apply_theme_from_service(self, theme_service: ThemeService) -> None:
-        theme_service.apply_editor_theme(self.preview_text)
-        theme_data = theme_service.get_editor_theme_data()
-        styles = theme_data.get("styles", {})
-        if isinstance(styles, dict):
-            self.highlighter.apply_palette(styles)
+        if hasattr(self.preview_text, "set_theme"):
+            theme_name = theme_service.current_editor_theme()
+            self.preview_text.set_theme(theme_name)
 
-    def _on_cursor_changed(self) -> None:
-        cursor = self.preview_text.textCursor()
-        self.cursor_position_changed.emit(cursor.blockNumber() + 1, cursor.columnNumber() + 1)
+    def _on_cursor_changed(self, line: int, col: int) -> None:
+        self.cursor_position_changed.emit(line, col)
 
     def _update_counts(self, sql_text: str) -> None:
         num_chars = len(sql_text)
         num_lines = sql_text.count("\n") + 1 if sql_text else 0
         self.lbl_counts.setText(f"Linhas: {num_lines} | Caracteres: {num_chars}")
 
-    def _on_text_edited(self) -> None:
-        current = self.get_preview_text()
-        self.generated_sql = current
-        self._update_counts(current)
-        has_content = bool(current.strip())
-        self.btn_copy.setEnabled(has_content)
-        self.btn_save.setEnabled(has_content)
-
     def get_preview_text(self) -> str:
-        return self.preview_text.toPlainText()
+        if hasattr(self.preview_text, "get_text"):
+            return self.preview_text.get_text()
+        return ""
 
     def set_preview_text(self, sql_text: str) -> None:
-        self.preview_text.blockSignals(True)
-        self.preview_text.setPlainText(sql_text)
-        self.preview_text.blockSignals(False)
-        self.highlighter.rehighlight()
+        if hasattr(self.preview_text, "set_text"):
+            self.preview_text.blockSignals(True)
+            self.preview_text.set_text(sql_text)
+            self.preview_text.blockSignals(False)
         self._update_counts(sql_text)
 
     def clear_preview(self) -> None:

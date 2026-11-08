@@ -7,39 +7,29 @@ Implementa a interface PySide6 para geração do script SQL PostgreSQL de inser�
 conforme `spec_sql_perguntas.md` e Spec 00:
 - Botões: "Gerar SQL INSERT", "Validar Sintaxe", "Copiar para Área de Transferência",
   "Salvar como .sql", "Voltar à Tela Inicial"
-- Editor `QPlainTextEdit` com `PostgresSyntaxHighlighter` e integração com `ThemeService`.
+- Editor `SqlEditorWidget` (QScintilla) com lexer PostgreSQL + Jasper, line numbers, folding,
+  brace matching, e integração com `ThemeService` (5 temas).
 """
 
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from PySide6.QtCore import Signal
-from PySide6.QtGui import (
-    QColor,
-    QFont,
-    QSyntaxHighlighter,
-    QTextCharFormat,
-    QTextDocument,
-)
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from src.core.sql_insert import (
-    POSTGRES_FUNCTIONS,
-    POSTGRES_KEYWORDS,
     generate_insert_sql,
     validate_postgres_syntax,
 )
@@ -48,84 +38,6 @@ if TYPE_CHECKING:
     from src.services.theme_service import ThemeService
 
 logger = logging.getLogger("sql_insert")
-
-
-class PostgresSyntaxHighlighter(QSyntaxHighlighter):
-    """Realçador de sintaxe PostgreSQL para `QPlainTextEdit`."""
-
-    def __init__(self, document: QTextDocument) -> None:
-        super().__init__(document)
-        self.fmt_keyword = QTextCharFormat()
-        self.fmt_keyword.setForeground(QColor("#1d4ed8"))
-        self.fmt_keyword.setFontWeight(QFont.Weight.Bold)
-
-        self.fmt_function = QTextCharFormat()
-        self.fmt_function.setForeground(QColor("#7c3aed"))
-
-        self.fmt_string = QTextCharFormat()
-        self.fmt_string.setForeground(QColor("#15803d"))
-
-        self.fmt_number = QTextCharFormat()
-        self.fmt_number.setForeground(QColor("#b45309"))
-
-        self.fmt_comment = QTextCharFormat()
-        self.fmt_comment.setForeground(QColor("#64748b"))
-        self.fmt_comment.setFontItalic(True)
-
-        kw_pattern = "|".join(re.escape(k) for k in sorted(POSTGRES_KEYWORDS, key=len, reverse=True))
-        fn_pattern = "|".join(re.escape(f) for f in sorted(POSTGRES_FUNCTIONS, key=len, reverse=True))
-
-        self._re_kw = re.compile(rf"\b(?:{kw_pattern})\b", re.IGNORECASE)
-        self._re_fn = re.compile(rf"\b(?:{fn_pattern})\b", re.IGNORECASE)
-        self._re_num = re.compile(r"\b\d+(?:\.\d+)?\b")
-        self._re_str_or_comment = re.compile(r"('(?:''|[^'])*')|(--[^\n]*)")
-
-    def apply_palette(self, styles: dict[str, Any]) -> None:
-        kw = styles.get("keyword", {}).get("fore")
-        fn = styles.get("function", {}).get("fore")
-        st = styles.get("string", {}).get("fore")
-        nm = styles.get("number", {}).get("fore")
-        cm = styles.get("comment", {}).get("fore")
-
-        if kw:
-            self.fmt_keyword.setForeground(QColor(kw))
-        if fn:
-            self.fmt_function.setForeground(QColor(fn))
-        if st:
-            self.fmt_string.setForeground(QColor(st))
-        if nm:
-            self.fmt_number.setForeground(QColor(nm))
-        if cm:
-            self.fmt_comment.setForeground(QColor(cm))
-        self.rehighlight()
-
-    def highlightBlock(self, text: str) -> None:
-        if not text:
-            return
-
-        protected: list[tuple[int, int]] = []
-        for m in self._re_str_or_comment.finditer(text):
-            s_idx, e_idx = m.start(), m.end()
-            protected.append((s_idx, e_idx))
-            if m.group(1) is not None:
-                self.setFormat(s_idx, e_idx - s_idx, self.fmt_string)
-            else:
-                self.setFormat(s_idx, e_idx - s_idx, self.fmt_comment)
-
-        def _is_protected(start: int, end: int) -> bool:
-            return any(start < p_end and end > p_start for p_start, p_end in protected)
-
-        for m in self._re_kw.finditer(text):
-            if not _is_protected(m.start(), m.end()):
-                self.setFormat(m.start(), m.end() - m.start(), self.fmt_keyword)
-
-        for m in self._re_fn.finditer(text):
-            if not _is_protected(m.start(), m.end()):
-                self.setFormat(m.start(), m.end() - m.start(), self.fmt_function)
-
-        for m in self._re_num.finditer(text):
-            if not _is_protected(m.start(), m.end()):
-                self.setFormat(m.start(), m.end() - m.start(), self.fmt_number)
 
 
 class _LabelVarAdapter:
@@ -202,7 +114,7 @@ class SqlInsertPage(QWidget):
         if self._theme_service is not None:
             self.apply_theme_from_service(self._theme_service)
             self._theme_service.editor_theme_changed.connect(
-                lambda _: self.apply_theme_from_service(self._theme_service)  # type: ignore[arg-type]
+                lambda _: self.apply_theme_from_service(self._theme_service)
             )
 
     def _build_ui(self) -> None:
@@ -245,16 +157,14 @@ class SqlInsertPage(QWidget):
 
         root_layout.addLayout(toolbar)
 
-        self.preview_text = QPlainTextEdit(self)
+        # SqlEditorWidget (QScintilla) com lexer PostgreSQL + Jasper
+        from src.gui.components.sql_editor import SqlEditorWidget
+        self.preview_text = SqlEditorWidget(
+            self,
+            read_only=False,
+            theme_service=self._theme_service,
+        )
         self.preview_text.setAccessibleName("Editor SQL INSERT")
-        self.preview_text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        font = QFont("JetBrains Mono", 11)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.preview_text.setFont(font)
-
-        self.highlighter = PostgresSyntaxHighlighter(self.preview_text.document())
-
-        self.preview_text.textChanged.connect(self._on_text_edited)
         self.preview_text.cursorPositionChanged.connect(self._on_cursor_changed)
         root_layout.addWidget(self.preview_text, 1)
 
@@ -275,37 +185,28 @@ class SqlInsertPage(QWidget):
         root_layout.addLayout(status_row)
 
     def apply_theme_from_service(self, theme_service: ThemeService) -> None:
-        theme_service.apply_editor_theme(self.preview_text)
-        theme_data = theme_service.get_editor_theme_data()
-        styles = theme_data.get("styles", {})
-        if isinstance(styles, dict):
-            self.highlighter.apply_palette(styles)
+        if hasattr(self.preview_text, "set_theme"):
+            theme_name = theme_service.current_editor_theme()
+            self.preview_text.set_theme(theme_name)
 
-    def _on_cursor_changed(self) -> None:
-        cursor = self.preview_text.textCursor()
-        self.cursor_position_changed.emit(cursor.blockNumber() + 1, cursor.columnNumber() + 1)
+    def _on_cursor_changed(self, line: int, col: int) -> None:
+        self.cursor_position_changed.emit(line, col)
 
     def _update_counts(self, sql_text: str) -> None:
         num_chars = len(sql_text)
         num_lines = sql_text.count("\n") + 1 if sql_text else 0
         self.lbl_counts.setText(f"Linhas: {num_lines} | Caracteres: {num_chars}")
 
-    def _on_text_edited(self) -> None:
-        current = self.get_preview_text()
-        self.generated_sql = current
-        self._update_counts(current)
-        has_content = bool(current.strip())
-        self.btn_copy.setEnabled(has_content)
-        self.btn_save.setEnabled(has_content)
-
     def get_preview_text(self) -> str:
-        return self.preview_text.toPlainText()
+        if hasattr(self.preview_text, "get_text"):
+            return self.preview_text.get_text()
+        return ""
 
     def set_preview_text(self, sql_text: str) -> None:
-        self.preview_text.blockSignals(True)
-        self.preview_text.setPlainText(sql_text)
-        self.preview_text.blockSignals(False)
-        self.highlighter.rehighlight()
+        if hasattr(self.preview_text, "set_text"):
+            self.preview_text.blockSignals(True)
+            self.preview_text.set_text(sql_text)
+            self.preview_text.blockSignals(False)
         self._update_counts(sql_text)
 
     def clear_preview(self) -> None:

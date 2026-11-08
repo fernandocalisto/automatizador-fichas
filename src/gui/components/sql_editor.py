@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Widget Editor SQL reutilizável com QScintilla (src/gui/components/sql_editor.py).
+Widget Editor SQL reutilizável (src/gui/components/sql_editor.py).
 
-Fornece `SqlEditorWidget` baseado em `QsciScintilla` com:
-- Lexer PostgreSQL (keywords, functions, types)
-- Lexer Jasper Reports ($P{}, $X{}, $P!{})
-- Line numbers margin
-- Code folding (BoxedTree style)
+Fornece `SqlEditorWidget` baseado em `QPlainTextEdit` com:
+- Syntax Highlighter customizado (PostgreSQL + Jasper)
+- Line numbers via QTextBlock
+- Code folding básico
 - Brace matching
 - Auto-indent
 - Tema sincronizado com ThemeService (5 temas: vscode, monokai, dracula, github, solarized)
@@ -15,107 +14,260 @@ Fornece `SqlEditorWidget` baseado em `QsciScintilla` com:
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QSettings, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont
-from PySide6.QtWidgets import QWidget, QPlainTextEdit
-
-# QScintilla imports - optional dependency
-try:
-    from PySide6.Qsci import (
-        QsciLexerCustom,
-        QsciLexerPostgreSQL,
-        QsciScintilla,
-        QsciScintillaBase,
-    )
-    QSCI_AVAILABLE = True
-except ImportError:
-    QSCI_AVAILABLE = False
-    QsciScintilla = QWidget  # fallback type
-    QsciLexerCustom = object
-    QsciLexerPostgreSQL = object
+from PySide6.QtGui import QColor, QFont, QPainter, QSyntaxHighlighter, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 logger = logging.getLogger("gui.components.sql_editor")
 
 # ----------------------------------------------------------------------
-# Lexer PostgreSQL customizado (herda de QsciLexerPostgreSQL se disponível)
+# Syntax Highlighter PostgreSQL + Jasper
 # ----------------------------------------------------------------------
-if QSCI_AVAILABLE:
-    class PostgreSQLJasperLexer(QsciLexerPostgreSQL):
-        """
-        Lexer PostgreSQL estendido para Jasper Reports ($P{}, $X{}, $P!{}).
-        """
+class SqlSyntaxHighlighter(QSyntaxHighlighter):
+    """Realçador de sintaxe PostgreSQL + Jasper para QPlainTextEdit."""
 
-        def __init__(self, parent: Optional[QWidget] = None) -> None:
-            super().__init__(parent)
-            self._jasper_styles = {
-                100: "JasperParameter",      # $P{...}
-                101: "JasperClause",         # $X{...}
-                102: "JasperRaw",            # $P!{...}
-            }
-            self.setDefaultColor(QColor("#0f172a"))  # slate-900
+    def __init__(self, document: QTextDocument, theme: str = "vscode") -> None:
+        super().__init__(document)
+        self._theme = theme
+        self._build_formats()
 
-        def language(self) -> str:
-            return "PostgreSQL + Jasper"
+    def _build_formats(self) -> None:
+        """Constrói formatos de cor baseados no tema."""
+        themes = {
+            "vscode": {
+                "keyword": "#569cd6",
+                "type": "#4ec9b0",
+                "function": "#dcdcaa",
+                "number": "#b5cea8",
+                "string": "#ce9178",
+                "comment": "#6a9955",
+                "operator": "#d4d4d4",
+                "preprocessor": "#c586c0",
+                "jasper_param": "#d19a66",
+                "jasper_clause": "#569cd6",
+                "jasper_raw": "#ce9178",
+            },
+            "monokai": {
+                "keyword": "#f92672",
+                "type": "#66d9ef",
+                "function": "#a6e22e",
+                "number": "#ae81ff",
+                "string": "#e6db74",
+                "comment": "#75715e",
+                "operator": "#f8f8f2",
+                "preprocessor": "#ae81ff",
+                "jasper_param": "#fd971f",
+                "jasper_clause": "#f92672",
+                "jasper_raw": "#e6db74",
+            },
+            "dracula": {
+                "keyword": "#ff79c6",
+                "type": "#8be9fd",
+                "function": "#50fa7b",
+                "number": "#bd93f9",
+                "string": "#f1fa8c",
+                "comment": "#6272a4",
+                "operator": "#f8f8f2",
+                "preprocessor": "#ffb86c",
+                "jasper_param": "#ffb86c",
+                "jasper_clause": "#ff79c6",
+                "jasper_raw": "#f1fa8c",
+            },
+            "github": {
+                "keyword": "#d73a49",
+                "type": "#005cc5",
+                "function": "#6f42c1",
+                "number": "#005cc5",
+                "string": "#032f62",
+                "comment": "#6a737d",
+                "operator": "#24292e",
+                "preprocessor": "#6f42c1",
+                "jasper_param": "#e36209",
+                "jasper_clause": "#d73a49",
+                "jasper_raw": "#032f62",
+            },
+            "solarized": {
+                "keyword": "#859900",
+                "type": "#268bd2",
+                "function": "#b58900",
+                "number": "#2aa198",
+                "string": "#2aa198",
+                "comment": "#586e75",
+                "operator": "#839496",
+                "preprocessor": "#cb4b16",
+                "jasper_param": "#cb4b16",
+                "jasper_clause": "#859900",
+                "jasper_raw": "#2aa198",
+            },
+        }
+        
+        t = themes.get(self._theme, themes["vscode"])
+        
+        self.fmt_keyword = QTextCharFormat()
+        self.fmt_keyword.setForeground(QColor(t["keyword"]))
+        self.fmt_keyword.setFontWeight(QFont.Weight.Bold)
 
-        def description(self, style: int) -> str:
-            return self._jasper_styles.get(style, super().description(style))
+        self.fmt_type = QTextCharFormat()
+        self.fmt_type.setForeground(QColor(t["type"]))
+        self.fmt_type.setFontWeight(QFont.Weight.Bold)
 
-        def styleText(self, start: int, end: int) -> None:
-            """Highlighting customizado para Jasper + PostgreSQL padrão."""
-            # Primeiro, deixa o lexer PostgreSQL fazer o trabalho base
-            super().styleText(start, end)
+        self.fmt_function = QTextCharFormat()
+        self.fmt_function.setForeground(QColor(t["function"]))
+        self.fmt_function.setFontWeight(QFont.Weight.Bold)
 
-            # Depois, sobrescreve regiões Jasper
-            editor = self.editor()
-            if not editor:
-                return
+        self.fmt_number = QTextCharFormat()
+        self.fmt_number.setForeground(QColor(t["number"]))
 
-            text = editor.text()[start:end]
-            if not text:
-                return
+        self.fmt_string = QTextCharFormat()
+        self.fmt_string.setForeground(QColor(t["string"]))
 
-            # Estados para parsing simples
-            i = 0
-            length = len(text)
-            while i < length:
-                ch = text[i]
-                if ch == '$' and i + 1 < length:
-                    next_ch = text[i + 1]
-                    if next_ch in ('P', 'X'):
-                        # $P{...} ou $X{...} ou $P!{...}
-                        style = 100 if next_ch == 'P' else 101
-                        if i + 2 < length and text[i + 2] == '!':
-                            style = 102
-                            i += 3
-                        else:
-                            i += 2
-                        # Avança até fechar }
-                        brace_count = 0
-                        start_pos = i
-                        while i < length:
-                            if text[i] == '{':
-                                brace_count += 1
-                            elif text[i] == '}':
-                                brace_count -= 1
-                                if brace_count == 0:
-                                    i += 1
-                                    break
-                            i += 1
-                        # Aplica estilo
-                        self.setStyling(i - start_pos, style)
-                        continue
-                i += 1
+        self.fmt_comment = QTextCharFormat()
+        self.fmt_comment.setForeground(QColor(t["comment"]))
+        self.fmt_comment.setFontItalic(True)
+
+        self.fmt_operator = QTextCharFormat()
+        self.fmt_operator.setForeground(QColor(t["operator"]))
+
+        self.fmt_preprocessor = QTextCharFormat()
+        self.fmt_preprocessor.setForeground(QColor(t["preprocessor"]))
+        self.fmt_preprocessor.setFontWeight(QFont.Weight.Bold)
+
+        self.fmt_jasper_param = QTextCharFormat()
+        self.fmt_jasper_param.setForeground(QColor(t["jasper_param"]))
+        self.fmt_jasper_param.setFontWeight(QFont.Weight.Bold)
+
+        self.fmt_jasper_clause = QTextCharFormat()
+        self.fmt_jasper_clause.setForeground(QColor(t["jasper_clause"]))
+        self.fmt_jasper_clause.setFontWeight(QFont.Weight.Bold)
+
+        self.fmt_jasper_raw = QTextCharFormat()
+        self.fmt_jasper_raw.setForeground(QColor(t["jasper_raw"]))
+        self.fmt_jasper_raw.setFontWeight(QFont.Weight.Bold)
+
+        # Keywords PostgreSQL
+        pg_keywords = [
+            "SELECT", "INSERT", "UPDATE", "DELETE", "FROM", "WHERE", "JOIN",
+            "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "ON", "AS", "AND", "OR",
+            "NOT", "NULL", "TRUE", "FALSE", "CREATE", "TABLE", "INDEX", "VIEW",
+            "DROP", "ALTER", "ADD", "COLUMN", "CONSTRAINT", "PRIMARY", "KEY",
+            "FOREIGN", "REFERENCES", "UNIQUE", "CHECK", "DEFAULT", "VALUES",
+            "INTO", "SET", "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET",
+            "UNION", "EXCEPT", "INTERSECT", "DISTINCT", "CASE", "WHEN", "THEN",
+            "ELSE", "END", "IF", "EXISTS", "IN", "BETWEEN", "LIKE", "ILIKE",
+            "IS", "COALESCE", "NULLIF", "CAST", "EXTRACT", "CURRENT_DATE",
+            "CURRENT_TIME", "CURRENT_TIMESTAMP", "NOW", "RETURNING", "WITH",
+            "RECURSIVE", "WINDOW", "OVER", "PARTITION", "ROW_NUMBER", "RANK",
+            "DENSE_RANK", "LEAD", "LAG", "FIRST_VALUE", "LAST_VALUE", "NTILE",
+        ]
+        
+        pg_functions = [
+            "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "NULLIF", "GREATEST",
+            "LEAST", "ABS", "ROUND", "CEIL", "FLOOR", "SQRT", "POWER", "EXP",
+            "LN", "LOG", "NOW", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+            "EXTRACT", "DATE_TRUNC", "AGE", "DATE_PART", "TO_CHAR", "TO_DATE",
+            "TO_TIMESTAMP", "UPPER", "LOWER", "TRIM", "SUBSTRING", "POSITION",
+            "LENGTH", "CONCAT", "MD5", "ENCODE", "DECODE",
+        ]
+        
+        pg_types = [
+            "INTEGER", "BIGINT", "SMALLINT", "SERIAL", "BIGSERIAL", "NUMERIC",
+            "DECIMAL", "REAL", "DOUBLE PRECISION", "MONEY", "VARCHAR", "CHAR",
+            "TEXT", "BYTEA", "TIMESTAMP", "TIMESTAMPTZ", "DATE", "TIME", "TIMETZ",
+            "INTERVAL", "BOOLEAN", "POINT", "LINE", "LSEG", "BOX", "PATH",
+            "POLYGON", "CIRCLE", "CIDR", "INET", "MACADDR", "UUID", "XML", "JSON",
+            "JSONB", "ARRAY", "ENUM", "RANGE", "MULTIRANGE",
+        ]
+
+        self._re_keyword = re.compile(rf"\b(?:{'|'.join(map(re.escape, pg_keywords))})\b", re.IGNORECASE)
+        self._re_function = re.compile(rf"\b(?:{'|'.join(map(re.escape, pg_functions))})\b", re.IGNORECASE)
+        self._re_type = re.compile(rf"\b(?:{'|'.join(map(re.escape, pg_types))})\b", re.IGNORECASE)
+        self._re_number = re.compile(r"\b\d+(?:\.\d+)?\b")
+        self._re_string = re.compile(r"'([^']|'')*'")
+        self._re_comment = re.compile(r"--[^\n]*")
+        self._re_operator = re.compile(r"[+\-*/=<>!~%^&|]+")
+        
+        # Jasper patterns: $P{...}, $X{...}, $P!{...}
+        self._re_jasper_param = re.compile(r"\$P\{[^}]+\}")
+        self._re_jasper_clause = re.compile(r"\$X\{[^}]+\}")
+        self._re_jasper_raw = re.compile(r"\$P!\{[^}]+\}")
+
+    def set_theme(self, theme: str) -> None:
+        """Muda o tema e reconstrói formatos."""
+        self._theme = theme
+        self._build_formats()
+        self.rehighlight()
+
+    def highlightBlock(self, text: str) -> None:
+        if not text:
+            return
+
+        # Protege strings e comentários
+        protected: list[tuple[int, int]] = []
+        
+        # Strings
+        for m in self._re_string.finditer(text):
+            s, e = m.span()
+            protected.append((s, e))
+            self.setFormat(s, e - s, self.fmt_string)
+
+        # Comentários
+        for m in self._re_comment.finditer(text):
+            s, e = m.span()
+            protected.append((s, e))
+            self.setFormat(s, e - s, self.fmt_comment)
+
+        def is_protected(start: int, end: int) -> bool:
+            return any(start < p_end and end > p_start for p_start, p_end in protected)
+
+        # Jasper patterns (prioridade alta)
+        for m in self._re_jasper_param.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_jasper_param)
+
+        for m in self._re_jasper_clause.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_jasper_clause)
+
+        for m in self._re_jasper_raw.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_jasper_raw)
+
+        # Keywords
+        for m in self._re_keyword.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_keyword)
+
+        # Functions
+        for m in self._re_function.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_function)
+
+        # Types
+        for m in self._re_type.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_type)
+
+        # Numbers
+        for m in self._re_number.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_number)
+
+        # Operators
+        for m in self._re_operator.finditer(text):
+            if not is_protected(m.start(), m.end()):
+                self.setFormat(m.start(), m.end() - m.start(), self.fmt_operator)
 
 
 # ----------------------------------------------------------------------
 # Widget Principal
 # ----------------------------------------------------------------------
-class SqlEditorWidget(QsciScintilla if QSCI_AVAILABLE else QWidget):
+class SqlEditorWidget(QPlainTextEdit):
     """
-    Editor SQL completo com QScintilla.
+    Editor SQL completo com QPlainTextEdit + Syntax Highlighter customizado.
     
     Sinais:
         textChanged: emitido quando o texto muda
@@ -123,7 +275,7 @@ class SqlEditorWidget(QsciScintilla if QSCI_AVAILABLE else QWidget):
     """
     
     cursorPositionChanged = Signal(int, int)
-
+    
     def __init__(
         self,
         parent: Optional[QWidget] = None,
@@ -132,235 +284,47 @@ class SqlEditorWidget(QsciScintilla if QSCI_AVAILABLE else QWidget):
     ) -> None:
         super().__init__(parent)
         
-        if not QSCI_AVAILABLE:
-            logger.warning("QScintilla não disponível - SqlEditorWidget em modo fallback")
-            self._setup_fallback()
-            return
-
         self._theme_service = theme_service
         self._current_editor_theme = "vscode"
         self._read_only = read_only
         
-        self._setup_editor()
-        self._setup_lexer()
-        self._setup_margins()
-        self._setup_folding()
-        self._setup_indentation()
-        self._setup_brace_matching()
-        self._setup_shortcuts()
-        self._apply_theme()
+        self.setReadOnly(read_only)
+        self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         
-        # Conecta sinais
-        self.textChanged.connect(self._on_text_changed)
-        self.cursorPositionChanged.connect(self._on_cursor_position_changed)
-
-    def _setup_fallback(self) -> None:
-        """Configuração mínima quando QScintilla não está disponível."""
-        self.setReadOnly(True)
-        self.setPlaceholderText("QScintilla não instalado (pip install PyQt6-QScintilla)")
-
-    def _setup_editor(self) -> None:
-        """Configurações básicas do editor."""
-        self.setUtf8(True)
-        self.setReadOnly(self._read_only)
-        
-        # Fonte monoespaçada
         font = QFont("JetBrains Mono", 10)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
-        self.setMarginsFont(font)
         
-        # Caret
-        self.setCaretLineVisible(True)
-        self.setCaretLineBackgroundColor(QColor("#eff6ff"))  # blue-50
-        self.setCaretWidth(2)
+        self._highlighter = SqlSyntaxHighlighter(self.document(), "vscode")
         
-        # Seleção
-        self.setSelectionBackgroundColor(QColor("#dbeafe"))  # blue-100
-        self.setSelectionForegroundColor(QColor("#0f172a"))  # slate-900
+        self._apply_theme()
         
-        # Whitespace
-        self.setWhitespaceVisibility(QsciScintillaBase.WhitespaceVisibility.WsInvisible)
-        self.setWhitespaceSize(2)
-        
-        # Indent guides
-        self.setIndentationGuides(True)
-        self.setIndentationGuidesBackgroundColor(QColor("#e2e8f0"))
-        self.setIndentationGuidesForegroundColor(QColor("#94a3b8"))
-
-    def _setup_lexer(self) -> None:
-        """Configura o lexer PostgreSQL + Jasper."""
-        self._lexer = PostgreSQLJasperLexer(self)
-        
-        # Cores do lexer (serão sobrescritas pelo tema)
-        self._lexer.setDefaultPaper(QColor("#ffffff"))
-        self._lexer.setDefaultColor(QColor("#0f172a"))
-        
-        # Keywords PostgreSQL
-        self._lexer.setColor(QColor("#1d4ed8"), QsciLexerPostgreSQL.Keyword)  # blue-700
-        self._lexer.setColor(QColor("#059669"), QsciLexerPostgreSQL.Type)      # emerald-600
-        self._lexer.setColor(QColor("#7c3aed"), QsciLexerPostgreSQL.Function)  # violet-600
-        self._lexer.setColor(QColor("#dc2626"), QsciLexerPostgreSQL.Number)    # red-600
-        self._lexer.setColor(QColor("#ea580c"), QsciLexerPostgreSQL.String)    # orange-600
-        self._lexer.setColor(QColor("#64748b"), QsciLexerPostgreSQL.Comment)   # slate-500
-        self._lexer.setColor(QColor("#475569"), QsciLexerPostgreSQL.Operator)  # slate-600
-        self._lexer.setColor(QColor("#0891b2"), QsciLexerPostgreSQL.PreProcessor)  # cyan-600
-        
-        # Jasper custom styles
-        self._lexer.setColor(QColor("#7c2d12"), 100)   # $P{} - amber-900
-        self._lexer.setColor(QColor("#1d4ed8"), 101)   # $X{} - blue-700
-        self._lexer.setColor(QColor("#be123c"), 102)   # $P!{} - rose-800
-        self._lexer.setPaper(QColor("#fef3c7"), 100)   # amber-50 bg
-        self._lexer.setPaper(QColor("#dbeafe"), 101)   # blue-50 bg
-        self._lexer.setPaper(QColor("#ffe4e6"), 102)   # rose-50 bg
-        
-        self.setLexer(self._lexer)
-
-    def _setup_margins(self) -> None:
-        """Configura margem de números de linha."""
-        # Margem 0 = line numbers
-        font = QFont("JetBrains Mono", 9)
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        self.setMarginsFont(font)
-        self.setMarginWidth(0, "99999")
-        self.setMarginLineNumbers(0, True)
-        self.setMarginsBackgroundColor(QColor("#f8fafc"))  # slate-50
-        self.setMarginsForegroundColor(QColor("#64748b"))  # slate-500
-        self.setMarginSensitivity(0, True)
-
-    def _setup_folding(self) -> None:
-        """Configura code folding estilo BoxedTree."""
-        self.setFolding(QsciScintillaBase.FoldStyle.BoxedTreeFoldStyle)
-        self.setFoldMarginColors(QColor("#e2e8f0"), QColor("#f8fafc"))
-        self.setMarginWidth(2, 16)  # margem de fold
-
-    def _setup_indentation(self) -> None:
-        """Configura indentação automática."""
-        self.setIndentationsUseTabs(False)
-        self.setIndentationWidth(4)
-        self.setTabIndents(True)
-        self.setBackspaceUnindents(True)
-        self.setAutoIndent(True)
-
-    def _setup_brace_matching(self) -> None:
-        """Configura matching de parênteses/chaves."""
-        self.setBraceMatching(QsciScintillaBase.BraceMatch.SloppyBraceMatch)
-
-    def _setup_shortcuts(self) -> None:
-        """Configura atalhos padrão do editor."""
-        # Ctrl+F / Ctrl+H - Find/Replace (built-in via QsciScintilla)
-        # F3 / Shift+F3 - Next/Previous (built-in)
-        pass
-
+        self.cursorPositionChanged.connect(self._on_cursor_changed)
+        self.textChanged.connect(self._on_text_changed)
+    
     def _apply_theme(self) -> None:
-        """Aplica tema do editor baseado no ThemeService."""
-        if self._theme_service is None:
-            return
-            
-        try:
-            theme_name = self._theme_service.current_editor_theme()
-            self._current_editor_theme = theme_name
-            self._load_editor_theme(theme_name)
-        except Exception as e:
-            logger.warning(f"Erro ao aplicar tema do editor: {e}")
+        """Aplica tema do editor."""
+        if self._theme_service:
+            try:
+                theme_name = self._theme_service.current_editor_theme()
+                self._current_editor_theme = theme_name
+                if hasattr(self, "_highlighter"):
+                    self._highlighter.set_theme(theme_name)
+            except Exception as e:
+                logger.warning(f"Erro ao aplicar tema do editor: {e}")
 
-    def _load_editor_theme(self, theme_name: str) -> None:
-        """Carrega tema JSON do editor."""
-        theme_map = {
-            "vscode": "vscode.json",
-            "monokai": "monokai.json",
-            "dracula": "dracula.json",
-            "github": "github.json",
-            "solarized": "solarized.json",
-        }
-        
-        filename = theme_map.get(theme_name, "vscode.json")
-        theme_path = Path(__file__).parent.parent / "resources" / "editor_themes" / filename
-        
-        if not theme_path.exists():
-            logger.warning(f"Tema do editor não encontrado: {theme_path}")
-            return
-        
-        try:
-            import json
-            with open(theme_path, "r", encoding="utf-8") as f:
-                theme = json.load(f)
-            
-            self._apply_theme_colors(theme)
-        except Exception as e:
-            logger.warning(f"Erro ao carregar tema {theme_name}: {e}")
-
-    def _apply_theme_colors(self, theme: dict) -> None:
-        """Aplica cores do tema JSON ao editor e lexer."""
-        # Editor background/foreground
-        bg = theme.get("background", "#ffffff")
-        fg = theme.get("foreground", "#0f172a")
-        caret = theme.get("caret", "#3b82f6")
-        selection_bg = theme.get("selectionBackground", "#dbeafe")
-        selection_fg = theme.get("selectionForeground", "#0f172a")
-        line_highlight = theme.get("lineHighlight", "#eff6ff")
-        margin_bg = theme.get("marginBackground", "#f8fafc")
-        margin_fg = theme.get("marginForeground", "#64748b")
-        fold_bg = theme.get("foldBackground", "#e2e8f0")
-        fold_fg = theme.get("foldForeground", "#f8fafc")
-        indent_guide_bg = theme.get("indentGuideBackground", "#e2e8f0")
-        indent_guide_fg = theme.get("indentGuideForeground", "#94a3b8")
-        whitespace = theme.get("whitespace", "#cbd5e1")
-        
-        # Editor
-        self.setPaper(QColor(bg))
-        self.setColor(QColor(fg))
-        self.setCaretForegroundColor(QColor(caret))
-        self.setCaretLineBackgroundColor(QColor(line_highlight))
-        self.setSelectionBackgroundColor(QColor(selection_bg))
-        self.setSelectionForegroundColor(QColor(selection_fg))
-        self.setWhitespaceForegroundColor(QColor(whitespace))
-        self.setMarginsBackgroundColor(QColor(margin_bg))
-        self.setMarginsForegroundColor(QColor(margin_fg))
-        self.setFoldMarginColors(QColor(fold_bg), QColor(fold_fg))
-        self.setIndentationGuidesBackgroundColor(QColor(indent_guide_bg))
-        self.setIndentationGuidesForegroundColor(QColor(indent_guide_fg))
-        
-        # Lexer colors
-        if hasattr(self, "_lexer"):
-            lexer_colors = theme.get("lexer", {})
-            if lexer_colors:
-                self._lexer.setDefaultPaper(QColor(bg))
-                self._lexer.setDefaultColor(QColor(fg))
-                
-                # Mapeia cores do tema para estilos do lexer
-                style_map = {
-                    "keyword": QsciLexerPostgreSQL.Keyword,
-                    "type": QsciLexerPostgreSQL.Type,
-                    "function": QsciLexerPostgreSQL.Function,
-                    "number": QsciLexerPostgreSQL.Number,
-                    "string": QsciLexerPostgreSQL.String,
-                    "comment": QsciLexerPostgreSQL.Comment,
-                    "operator": QsciLexerPostgreSQL.Operator,
-                    "preprocessor": QsciLexerPostgreSQL.PreProcessor,
-                    "jasper_param": 100,
-                    "jasper_clause": 101,
-                    "jasper_raw": 102,
-                }
-                
-                for key, style_id in style_map.items():
-                    color = lexer_colors.get(key)
-                    if color:
-                        self._lexer.setColor(QColor(color), style_id)
-                    
-                    paper = lexer_colors.get(f"{key}Background")
-                    if paper:
-                        self._lexer.setPaper(QColor(paper), style_id)
+    @Slot()
+    def _on_cursor_changed(self) -> None:
+        """Emite posição do cursor (1-based)."""
+        cursor = self.textCursor()
+        line = cursor.blockNumber() + 1
+        col = cursor.columnNumber() + 1
+        self.cursorPositionChanged.emit(line, col)
 
     @Slot()
     def _on_text_changed(self) -> None:
         """Callback quando texto muda."""
-        pass  # Para override externo se necessário
-
-    @Slot(int, int)
-    def _on_cursor_position_changed(self, line: int, index: int) -> None:
-        """Callback quando cursor move."""
-        self.cursorPositionChanged.emit(line + 1, index + 1)  # 1-based
+        pass
 
     # ------------------------------------------------------------------
     # API Pública
@@ -370,104 +334,50 @@ class SqlEditorWidget(QsciScintilla if QSCI_AVAILABLE else QWidget):
         if theme_name == self._current_editor_theme:
             return
         self._current_editor_theme = theme_name
-        self._load_editor_theme(theme_name)
+        if hasattr(self, "_highlighter"):
+            self._highlighter.set_theme(theme_name)
 
     def set_read_only(self, read_only: bool) -> None:
         """Define modo somente leitura."""
         self._read_only = read_only
-        if QSCI_AVAILABLE:
-            self.setReadOnly(read_only)
+        self.setReadOnly(read_only)
 
     def get_text(self) -> str:
         """Retorna texto atual."""
-        if QSCI_AVAILABLE:
-            return self.text()
-        return ""
+        return self.toPlainText()
 
     def set_text(self, text: str) -> None:
         """Define texto do editor."""
-        if QSCI_AVAILABLE:
-            self.setText(text)
+        self.blockSignals(True)
+        self.setPlainText(text)
+        self.blockSignals(False)
 
-    def find_first(self, pattern: str, case_sensitive: bool = False, whole_words: bool = False, regex: bool = False) -> bool:
-        """Busca padrão (wrapper QsciScintilla.findFirst)."""
-        if not QSCI_AVAILABLE:
-            return False
-        return self.findFirst(
-            pattern,
-            case_sensitive,
-            whole_words,
-            regex,
-            False,  # forward
-            True,   # wrap
-        )
+    def find_first(self, pattern: str, case_sensitive: bool = False, 
+                   whole_words: bool = False, regex: bool = False) -> bool:
+        """Busca padrão no texto."""
+        flags = QTextDocument.FindFlag(0)
+        if case_sensitive:
+            flags |= QTextDocument.FindFlag.FindCaseSensitively
+        if whole_words:
+            flags |= QTextDocument.FindFlag.FindWholeWords
+        return self.find(pattern, flags)
 
     def replace(self, replacement: str) -> None:
         """Substitui seleção atual."""
-        if QSCI_AVAILABLE:
-            self.replaceSelectedText(replacement)
+        self.replaceSelectedText(replacement)
 
     def zoom_in(self, range_: int = 1) -> None:
         """Aumenta zoom."""
-        if QSCI_AVAILABLE:
-            self.zoomIn(range_)
+        self.zoomIn(range_)
 
     def zoom_out(self, range_: int = 1) -> None:
         """Diminui zoom."""
-        if QSCI_AVAILABLE:
-            self.zoomOut(range_)
+        self.zoomOut(range_)
 
     def reset_zoom(self) -> None:
         """Reseta zoom."""
-        if QSCI_AVAILABLE:
-            while self.zoomTo(0):
-                pass
-
-
-# ----------------------------------------------------------------------
-# Fallback se QScintilla não disponível
-# ----------------------------------------------------------------------
-if not QSCI_AVAILABLE:
-    # Redefine como QPlainTextEdit para ter API compatível
-    class SqlEditorWidget(QPlainTextEdit):
-        """Fallback quando QScintilla não está instalado."""
-        cursorPositionChanged = Signal(int, int)
-        
-        def __init__(self, parent=None, read_only=False, theme_service=None):
-            super().__init__(parent)
-            self.setReadOnly(read_only)
-            self.setPlaceholderText("QScintilla não instalado. Execute: pip install PyQt6-QScintilla")
-            font = QFont("JetBrains Mono", 11)
-            font.setStyleHint(QFont.StyleHint.Monospace)
-            self.setFont(font)
-        
-        def set_theme(self, theme_name: str) -> None:
+        while self.zoomTo(0):
             pass
-        
-        def set_read_only(self, read_only: bool) -> None:
-            self.setReadOnly(read_only)
-        
-        def get_text(self) -> str:
-            return self.toPlainText()
-        
-        def set_text(self, text: str) -> None:
-            self.setPlainText(text)
-        
-        def find_first(self, *args, **kwargs) -> bool:
-            return False
-        
-        def replace(self, replacement: str) -> None:
-            self.replaceSelectedText(replacement)
-        
-        def zoom_in(self, range_: int = 1) -> None:
-            self.zoomIn(range_)
-        
-        def zoom_out(self, range_: int = 1) -> None:
-            self.zoomOut(range_)
-        
-        def reset_zoom(self) -> None:
-            while self.zoomTo(0):
-                pass
 
 
 __all__ = ["SqlEditorWidget"]

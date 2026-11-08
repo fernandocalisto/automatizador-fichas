@@ -159,7 +159,7 @@ class LandingPage(QWidget):
         self.lbl_explanation = QLabel(SHORT_EXPLANATION_TEXT, skill_group)
         self.lbl_explanation.setWordWrap(True)
         self.lbl_explanation.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_explanation.setStyleSheet("color: #475569; font-size: 10pt;")
+        self.lbl_explanation.setStyleSheet("color: #475569; font-size: 10pt; background-color: transparent;")
         skill_layout.addWidget(self.lbl_explanation)
 
         root_layout.addWidget(skill_group)

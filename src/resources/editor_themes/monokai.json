@@ -1,0 +1,22 @@
+{
+  "name": "Monokai",
+  "background": "#272822",
+  "foreground": "#F8F8F2",
+  "caret": "#F8F8F0",
+  "selection": "#49483E",
+  "line_number": "#3E3D32",
+  "line_number_bg": "#272822",
+  "fold_margin": "#272822",
+  "styles": {
+    "default": {"fore": "#F8F8F2"},
+    "keyword": {"fore": "#F92672", "bold": true},
+    "function": {"fore": "#A6E22E"},
+    "string": {"fore": "#E6DB74"},
+    "number": {"fore": "#AE81FF"},
+    "comment": {"fore": "#75715E"},
+    "operator": {"fore": "#F92672"},
+    "brace": {"fore": "#F8F8F2", "bold": true},
+    "preprocessor": {"fore": "#66D9EF"},
+    "identifier": {"fore": "#F8F8F2"}
+  }
+}

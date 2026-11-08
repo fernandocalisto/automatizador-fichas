@@ -1,0 +1,25 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/resources">
+        <file alias="salutem_ferramenta_interna_logo.png">src/resources/salutem_ferramenta_interna_logo.png</file>
+        <file alias="themes/light.qss">resources/themes/light.qss</file>
+        <file alias="themes/dark.qss">resources/themes/dark.qss</file>
+        <file alias="themes/system.qss">resources/themes/system.qss</file>
+        <file alias="editor_themes/monokai.json">resources/editor_themes/monokai.json</file>
+        <file alias="editor_themes/dracula.json">resources/editor_themes/dracula.json</file>
+        <file alias="editor_themes/github.json">resources/editor_themes/github.json</file>
+        <file alias="editor_themes/solarized.json">resources/editor_themes/solarized.json</file>
+        <file alias="editor_themes/vscode.json">resources/editor_themes/vscode.json</file>
+    </qresource>
+    <qresource prefix="/">
+        <file alias="salutem_ferramenta_interna_logo.png">src/resources/salutem_ferramenta_interna_logo.png</file>
+        <file alias="themes/light.qss">resources/themes/light.qss</file>
+        <file alias="themes/dark.qss">resources/themes/dark.qss</file>
+        <file alias="themes/system.qss">resources/themes/system.qss</file>
+        <file alias="editor_themes/monokai.json">resources/editor_themes/monokai.json</file>
+        <file alias="editor_themes/dracula.json">resources/editor_themes/dracula.json</file>
+        <file alias="editor_themes/github.json">resources/editor_themes/github.json</file>
+        <file alias="editor_themes/solarized.json">resources/editor_themes/solarized.json</file>
+        <file alias="editor_themes/vscode.json">resources/editor_themes/vscode.json</file>
+    </qresource>
+</RCC>

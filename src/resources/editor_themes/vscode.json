@@ -1,0 +1,22 @@
+{
+  "name": "VS Code Dark+",
+  "background": "#1E1E1E",
+  "foreground": "#D4D4D4",
+  "caret": "#FFFFFF",
+  "selection": "#264F78",
+  "line_number": "#858585",
+  "line_number_bg": "#1E1E1E",
+  "fold_margin": "#1E1E1E",
+  "styles": {
+    "default": {"fore": "#D4D4D4"},
+    "keyword": {"fore": "#569CD6", "bold": true},
+    "function": {"fore": "#DCDCAA"},
+    "string": {"fore": "#CE9178"},
+    "number": {"fore": "#B5CEA8"},
+    "comment": {"fore": "#6A9955"},
+    "operator": {"fore": "#D4D4D4"},
+    "brace": {"fore": "#D4D4D4", "bold": true},
+    "preprocessor": {"fore": "#C586C0"},
+    "identifier": {"fore": "#9CDCFE"}
+  }
+}

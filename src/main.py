@@ -1,228 +1,251 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ponto de entrada principal da aplicação Automatizador de Fichas (src/main.py).
+Ponto de entrada principal da aplicação Automatizador de Fichas em PySide6 (src/main.py).
 
-Implementa a classe `MainApp(tk.Tk)` conforme spec_json_editor.md:
-- Inicia exibindo a Tela Inicial (`LandingFrame`).
-- Mantém um único dicionário compartilhado (`self.json_data: dict[str, Any]`) como
-  ponto único de verdade entre as abas.
-- Ao carregar ou colar um JSON válido na Tela Inicial, faz a transição para o
-  `ttk.Notebook` com duas abas sincronizadas:
-  1. Editar JSON (`JsonEditorTab`)
-  2. Perguntas & Respostas (`PerguntasTab`)
-- Suporta o botão "Voltar à Tela Inicial" em ambas as abas.
+Fluxo de inicialização (Spec 00):
+1. Bootstrap do `QApplication`
+2. Exibição imediata do `QSplashScreen` com o logo oficial dos recursos
+3. Inicialização dos serviços centrais (`ConfigService`, `LogService`, `ThemeService`, `HelpService`)
+4. Criação e exibição da `MainWindow` (`src.gui.main_window`)
+5. Garantia de exibição mínima de 1.5s (1500ms) da splash screen e fade-out suave de 300ms após `MainWindow.show()`
 """
 
 from __future__ import annotations
 
-import tkinter as tk
-from pathlib import Path
-from tkinter import ttk
-from typing import Any, Callable
+import sys
+import time
+from typing import Sequence
 
-from src.gui.json_editor_tab import JsonEditorTab
-from src.gui.landing import LandingFrame
-from src.gui.perguntas_tab import PerguntasTab
-from src.gui.sql_insert_tab import SqlInsertTab
-from src.gui.sql_select_tab import SqlSelectTab
-from src.utils.json_utils import update_shared_dict_in_place
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtWidgets import QApplication, QSplashScreen, QWidget
+
+import src.resources.resources_rc  # noqa: F401
+from src.gui.main_window import (
+    APP_TITLE_BASE,
+    APP_VERSION,
+    AboutDialog,
+    MainApp,
+    MainWindow,
+    load_app_icon,
+    load_app_logo_pixmap,
+)
+from src.services.config_service import ConfigService
+from src.services.help_service import HelpService
+from src.services.log_service import LogService
+from src.services.theme_service import ThemeService
+
+SPLASH_MIN_DURATION_MS: int = 1500
+SPLASH_FADE_DURATION_MS: int = 300
 
 
-class MainApp(tk.Tk):
+def build_splash_pixmap(width: int = 480, height: int = 280) -> QPixmap:
     """
-    Janela principal do Automatizador de Fichas.
-    Gerencia a transição entre a Tela Inicial (Landing) e o Notebook de duas abas,
-    compartilhando a mesma instância de dicionário Python (`self.json_data`).
+    Constrói o `QPixmap` da Splash Screen combinando o logo dos recursos,
+    título da aplicação e versão sobre um fundo escuro estilizado.
     """
+    canvas = QPixmap(width, height)
+    canvas.fill(QColor("#0f172a"))
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.title("Automatizador de Fichas – Carregar JSON")
-        self.geometry("1080x740")
-        self.minsize(860, 580)
+    painter = QPainter(canvas)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        # Único ponto de verdade do JSON compartilhado in-place entre as abas
-        self.json_data: dict[str, Any] = {}
-        self.current_view: str = "landing"
-        self._listeners: list[Callable[[dict[str, Any] | None], None]] = []
+    # Borda sutil
+    painter.setPen(QColor("#334155"))
+    painter.drawRect(0, 0, width - 1, height - 1)
 
-        self._build_ui()
-        self.show_landing()
+    # Logo centralizado
+    logo_pm = load_app_logo_pixmap(height=110)
+    if not logo_pm.isNull():
+        logo_x = (width - logo_pm.width()) // 2
+        logo_y = 32
+        painter.drawPixmap(logo_x, logo_y, logo_pm)
 
-    def _build_ui(self) -> None:
-        """Cria o frame da Tela Inicial e o container do Notebook com as duas abas."""
-        # 1. Tela Inicial (Landing)
-        self.landing_frame = LandingFrame(
-            self,
-            on_json_loaded=self._on_landing_json_loaded,
-        )
+    # Título principal
+    title_font = QFont("Segoe UI", 15, QFont.Weight.Bold)
+    painter.setFont(title_font)
+    painter.setPen(QColor("#f8fafc"))
+    painter.drawText(
+        0,
+        160,
+        width,
+        30,
+        Qt.AlignmentFlag.AlignCenter,
+        APP_TITLE_BASE,
+    )
 
-        # 2. Container Principal (exibido após JSON válido carregado)
-        self.main_container = ttk.Frame(self)
+    # Subtítulo e versão
+    sub_font = QFont("Segoe UI", 9, QFont.Weight.DemiBold)
+    painter.setFont(sub_font)
+    painter.setPen(QColor("#38bdf8"))
+    painter.drawText(
+        0,
+        190,
+        width,
+        24,
+        Qt.AlignmentFlag.AlignCenter,
+        f"Ferramenta Interna Salutem — {APP_VERSION}",
+    )
 
-        self.notebook = ttk.Notebook(self.main_container)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-        # Aba 1 – Editar JSON
-        self.json_editor_tab = JsonEditorTab(
-            self.notebook,
-            shared_json=self.json_data,
-            on_json_changed=self._on_json_updated_from_editor_tab,
-            on_back_to_landing=self.show_landing,
-        )
-        self.notebook.add(self.json_editor_tab, text="Editar JSON")
-
-        # Aba 2 – Perguntas & Respostas
-        self.perguntas_tab = PerguntasTab(
-            self.notebook,
-            shared_json=self.json_data,
-            on_json_changed=self._on_json_updated_from_perguntas_tab,
-            on_back_to_landing=self.show_landing,
-        )
-        self.notebook.add(self.perguntas_tab, text="Perguntas & Respostas")
-
-        # Aba 3 – Gerar SQL INSERT
-        self.sql_insert_tab = SqlInsertTab(
-            self.notebook,
-            shared_json=self.json_data,
-            on_back_to_landing=self.show_landing,
-        )
-        self.notebook.add(self.sql_insert_tab, text="Gerar SQL INSERT")
-
-        # Aba 4 – Gerar SELECT Jasper
-        self.sql_select_tab = SqlSelectTab(
-            self.notebook,
-            shared_json=self.json_data,
-            on_back_to_landing=self.show_landing,
-        )
-        self.notebook.add(self.sql_select_tab, text="Gerar SELECT Jasper")
-
-        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-
-    # -------------------------------------------------------------------------
-    # Navegação entre Tela Inicial e Janela Principal com Abas
-    # -------------------------------------------------------------------------
-    def show_landing(self) -> None:
-        """Oculta o Notebook de abas, limpa o estado não salvo e exibe a Tela Inicial."""
-        self.main_container.pack_forget()
-        self.json_data.clear()
-        self.sql_insert_tab.clear_preview()
-        self.sql_select_tab.clear_preview()
-        self.landing_frame.status_var.set("Aguardando JSON…")
-        self.landing_frame.pack(fill=tk.BOTH, expand=True)
-        self.title("Automatizador de Fichas – Carregar JSON")
-        self.current_view = "landing"
-        self._notify_listeners()
-
-    def show_notebook(self) -> None:
-        """Oculta a Tela Inicial e exibe o Notebook com as abas Editar JSON e Perguntas & Respostas."""
-        self.landing_frame.pack_forget()
-        self.main_container.pack(fill=tk.BOTH, expand=True)
-        tmpl = self.json_data.get("template", {})
-        nome_ficha = (
-            tmpl.get("nome", "Ficha Carregada")
-            if isinstance(tmpl, dict)
-            else "Ficha Carregada"
-        )
-        self.title(f"Automatizador de Fichas – {nome_ficha}")
-        self.current_view = "notebook"
-
-    def _on_landing_json_loaded(
-        self, validated_data: dict[str, Any], source_path: Path | None = None
-    ) -> None:
-        """
-        Callback invocado pela LandingFrame quando um JSON válido é carregado ou colado.
-        Popula o dicionário compartilhado in-place, sincroniza as abas e abre o Notebook.
-        """
-        update_shared_dict_in_place(self.json_data, validated_data)
-        self.json_editor_tab.current_file = source_path
-        self.json_editor_tab.set_json_data(
-            self.json_data,
-            update_original=True,
-            apply_uppercase=True,
-            notify=False,
-        )
-        self.perguntas_tab.refresh_from_shared()
-        self.sql_insert_tab.clear_preview()
-        self.sql_select_tab.clear_preview()
-        self.show_notebook()
-        self.notebook.select(0)
-        self._notify_listeners()
-
-    # -------------------------------------------------------------------------
-    # Sincronização do Dicionário Compartilhado entre Abas
-    # -------------------------------------------------------------------------
-    def _on_json_updated_from_editor_tab(self, updated_data: dict[str, Any]) -> None:
-        """Quando a Aba 1 (Editar JSON) valida/formata, atualiza a Aba 2 (Perguntas & Respostas)."""
-        if updated_data is not self.json_data:
-            update_shared_dict_in_place(self.json_data, updated_data)
-        self.perguntas_tab.refresh_from_shared()
-        self._notify_listeners()
-
-    def _on_json_updated_from_perguntas_tab(self, updated_data: dict[str, Any]) -> None:
-        """Quando a Aba 2 (Perguntas & Respostas) edita campos, atualiza o texto da Aba 1."""
-        if updated_data is not self.json_data:
-            update_shared_dict_in_place(self.json_data, updated_data)
-        self.json_editor_tab.refresh_from_shared()
-        self._notify_listeners()
-
-    def _on_tab_changed(self, _event: Any = None) -> None:
-        """Garante que ao alternar de aba os dados mais recentes estejam visíveis."""
-        if not self.json_data:
-            return
-        selected_idx = self.notebook.index(self.notebook.select())
-        if selected_idx == 0:
-            self.perguntas_tab.apply_changes()
-            self.json_editor_tab.refresh_from_shared()
-        elif selected_idx in (2, 3):
-            self.perguntas_tab.apply_changes()
-
-    # -------------------------------------------------------------------------
-    # Métodos utilitários e de compatibilidade
-    # -------------------------------------------------------------------------
-    def get_json_data(self) -> dict[str, Any] | None:
-        """Retorna o dicionário compartilhado ativo (ou None se estiver vazio)."""
-        return self.json_data if self.json_data else None
-
-    def set_json_data(
-        self, data: dict[str, Any], *, update_editor: bool = True
-    ) -> dict[str, Any]:
-        """Define os dados do dicionário compartilhado in-place e sincroniza ambas as abas."""
-        update_shared_dict_in_place(self.json_data, data)
-        if update_editor:
-            self.json_editor_tab.set_json_data(
-                self.json_data,
-                update_original=True,
-                apply_uppercase=False,
-                notify=False,
-            )
-        self.perguntas_tab.refresh_from_shared()
-        if self.current_view == "landing":
-            self.show_notebook()
-        self._notify_listeners()
-        return self.json_data
-
-    def register_json_listener(
-        self, callback: Callable[[dict[str, Any] | None], None]
-    ) -> None:
-        """Registra um callback chamado quando o JSON compartilhado muda."""
-        self._listeners.append(callback)
-
-    def _notify_listeners(self) -> None:
-        active = self.json_data if self.json_data else None
-        for callback in self._listeners:
-            callback(active)
+    painter.end()
+    return canvas
 
 
-# Alias de compatibilidade
-MainWindow = MainApp
+def create_splash_screen() -> QSplashScreen:
+    """Cria e configura o `QSplashScreen` inicial com o logo da aplicação."""
+    pixmap = build_splash_pixmap()
+    splash = QSplashScreen(
+        pixmap,
+        Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.SplashScreen,
+    )
+    splash.setAccessibleName("Tela de Abertura Automatizador de Fichas")
+    splash.showMessage(
+        "Iniciando aplicação…",
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#94a3b8"),
+    )
+    return splash
 
 
-def main() -> None:
-    app = MainApp()
-    app.mainloop()
+def fade_out_splash(
+    splash: QSplashScreen,
+    main_window: QWidget,
+    start_monotonic: float | None = None,
+    min_duration_ms: int = SPLASH_MIN_DURATION_MS,
+    fade_duration_ms: int = SPLASH_FADE_DURATION_MS,
+) -> QPropertyAnimation:
+    """
+    Aguarda o tempo mínimo restante de exibição (`min_duration_ms` = 1500ms) e executa
+    animação de fade-out (`fade_duration_ms` = 300ms) no `QSplashScreen` após `main_window.show()`.
+    """
+    elapsed_ms = (
+        int((time.monotonic() - start_monotonic) * 1000)
+        if start_monotonic is not None
+        else min_duration_ms
+    )
+    remaining_ms = max(0, min_duration_ms - elapsed_ms)
+
+    anim = QPropertyAnimation(splash, b"windowOpacity", splash)
+    anim.setDuration(fade_duration_ms)
+    anim.setStartValue(1.0)
+    anim.setEndValue(0.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.finished.connect(lambda: splash.finish(main_window))
+
+    # Mantém referência na splash para evitar coleta de lixo durante a animação
+    setattr(splash, "_fade_animation", anim)
+
+    if remaining_ms > 0:
+        QTimer.singleShot(remaining_ms, anim.start)
+    else:
+        anim.start()
+
+    return anim
+
+
+def get_or_create_application(argv: Sequence[str] | None = None) -> QApplication:
+    """Retorna a instância ativa de `QApplication` ou cria uma nova configurada."""
+    existing = QApplication.instance()
+    if isinstance(existing, QApplication):
+        return existing
+
+    app = QApplication(list(argv) if argv is not None else sys.argv)
+    app.setOrganizationName(ConfigService.ORGANIZATION)
+    app.setApplicationName(ConfigService.APPLICATION)
+    app.setApplicationDisplayName(APP_TITLE_BASE)
+    app.setApplicationVersion(APP_VERSION)
+
+    icon = load_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
+    return app
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """
+    Função principal de bootstrap PySide6:
+    1. Inicializa `QApplication`
+    2. Exibe `QSplashScreen` imediatamente
+    3. Inicializa `ConfigService`, `LogService`, `ThemeService` e `HelpService`
+    4. Instancia e exibe `MainWindow`
+    5. Executa fade-out (300ms) da splash após mínimo de 1.5s
+    """
+    app = get_or_create_application(argv)
+
+    # 1. QSplashScreen FIRST
+    splash_start = time.monotonic()
+    splash = create_splash_screen()
+    splash.show()
+    app.processEvents()
+
+    # 2. Inicializa Serviços
+    splash.showMessage(
+        "Carregando configurações…",
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#94a3b8"),
+    )
+    app.processEvents()
+    config_service = ConfigService()
+
+    splash.showMessage(
+        "Inicializando serviço de logs…",
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#94a3b8"),
+    )
+    app.processEvents()
+    LogService.setup(
+        app_name=ConfigService.APPLICATION,
+        config=config_service.config,
+    )
+    log_service = LogService()
+
+    splash.showMessage(
+        "Aplicando tema visual…",
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#94a3b8"),
+    )
+    app.processEvents()
+    theme_service = ThemeService(config_service)
+    theme_service.apply_app_theme(config_service.config.app_theme, persist=False)
+
+    splash.showMessage(
+        "Carregando serviço de ajuda…",
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#94a3b8"),
+    )
+    app.processEvents()
+    help_service = HelpService()
+
+    # 3. Cria MainWindow e exibe
+    splash.showMessage(
+        "Construindo interface principal…",
+        Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter,
+        QColor("#94a3b8"),
+    )
+    app.processEvents()
+    window = MainWindow(
+        config_service=config_service,
+        theme_service=theme_service,
+        log_service=log_service,
+        help_service=help_service,
+    )
+    window.show()
+    app.processEvents()
+
+    # 4. Fade-out da Splash após MainWindow.show() (respeitando 1.5s mín. + 300ms fade)
+    fade_out_splash(
+        splash=splash,
+        main_window=window,
+        start_monotonic=splash_start,
+        min_duration_ms=SPLASH_MIN_DURATION_MS,
+        fade_duration_ms=SPLASH_FADE_DURATION_MS,
+    )
+
+    return app.exec()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

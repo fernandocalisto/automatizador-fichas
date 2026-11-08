@@ -61,6 +61,7 @@ from src.services.help_service import HelpService
 from src.services.log_service import LogService
 from src.services.theme_service import ThemeService
 from src.utils.json_utils import update_shared_dict_in_place
+from src.utils.logo_utils import load_logo_pixmap
 from src.utils.resource_path import resource_path
 
 logger = logging.getLogger("gui.main_window")
@@ -72,32 +73,12 @@ APP_TITLE_BASE = "Automatizador de Fichas"
 def load_app_logo_pixmap(
     width: int | None = None, height: int | None = None
 ) -> QPixmap:
-    """Carrega o logo da aplicação a partir do Qt Resource System ou do disco."""
-    for candidate in (
-        ":/resources/salutem_ferramenta_interna_logo.png",
-        ":/salutem_ferramenta_interna_logo.png",
-        str(resource_path("salutem_ferramenta_interna_logo.png")),
-    ):
-        pm = QPixmap(candidate)
-        if not pm.isNull():
-            if width is not None and height is not None:
-                return pm.scaled(
-                    width,
-                    height,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            if height is not None:
-                return pm.scaledToHeight(
-                    height,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            return pm
-    return QPixmap()
+    """Carrega o logo da aplicação com cantos arredondados."""
+    return load_logo_pixmap(width=width, height=height, radius=16)
 
 
 def load_app_icon() -> QIcon:
-    """Retorna o `QIcon` da aplicação carregado dos recursos."""
+    """Retorna o `QIcon` da aplicação com cantos arredondados."""
     pm = load_app_logo_pixmap()
     if not pm.isNull():
         return QIcon(pm)

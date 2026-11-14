@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Testes unitários e de integração para `src/core/sql_insert.py` e `src/gui/sql_insert_tab.py`
-conforme `spec_sql_perguntas.md`.
+Testes unitários e de integração para `src/core/sql_insert.py`, `src/gui/components/sql_editor.py`
+e `src/gui/wizard/sql_insert_page.py` conforme `spec_sql_perguntas.md`.
 """
 
 import copy
 import json
 from pathlib import Path
-from tkinter import messagebox
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
 from src.core.sql_insert import (
     CORRECOES_OCR_EXATAS,
@@ -26,7 +26,9 @@ from src.core.sql_insert import (
     usa_colunas_extras,
     validate_postgres_syntax,
 )
-from src.gui.sql_insert_tab import SqlInsertTab
+from src.gui.components.sql_editor import SqlEditorWidget
+from src.gui.wizard.questions_page import TIPOS_CAMPO_VALIDOS
+from src.gui.wizard.sql_insert_page import SqlInsertPage
 from src.main import MainApp
 
 
@@ -46,6 +48,8 @@ def test_eleven_valid_types_constant() -> None:
     }
     assert TIPOS_VALIDOS == expected
     assert len(TIPOS_VALIDOS) == 11
+    assert set(TIPOS_CAMPO_VALIDOS) == expected
+    assert len(TIPOS_CAMPO_VALIDOS) == 11
 
 
 def test_ocr_cleaning_and_uppercase() -> None:
@@ -254,19 +258,19 @@ def test_sql_insert_tab_in_main_app(
 ) -> None:
     erros: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        messagebox, "showerror", lambda title, msg: erros.append((title, msg))
+        QMessageBox, "critical", lambda _parent, title, msg: erros.append((title, msg))
     )
 
     app = MainApp()
     app.withdraw()
     try:
-        assert app.notebook.index("end") == 4
-        tab_titles = [app.notebook.tab(i, "text") for i in range(app.notebook.index("end"))]
-        assert tab_titles == [
-            "Editar JSON",
-            "Perguntas & Respostas",
-            "Gerar SQL INSERT",
-            "Gerar SELECT Jasper",
+        assert app.central_stack.count() == 5
+        assert app.PAGE_TITLES == [
+            "1. Tela Inicial",
+            "2. Editar JSON",
+            "3. Perguntas & Respostas",
+            "4. Gerar SQL INSERT",
+            "5. Gerar SELECT Jasper",
         ]
 
         sample_data = {
@@ -303,37 +307,53 @@ def test_sql_insert_tab_in_main_app(
         app.set_json_data(sample_data)
         snapshot_before = copy.deepcopy(app.json_data)
 
-        sql_tab: SqlInsertTab = app.sql_insert_tab
-        assert sql_tab.shared_json is app.json_data
+        sql_page: SqlInsertPage = app.sql_insert_page
+        assert sql_page.shared_json is app.json_data
 
         # Clica em "Gerar SQL INSERT"
-        assert sql_tab.generate_sql() is True
-        assert sql_tab.status_var.get() == "SQL gerado com sucesso"
+        assert sql_page.generate_sql() is True
+        assert sql_page.status_var.get() == "SQL gerado com sucesso"
 
-        preview = sql_tab.get_preview_text()
+        preview = sql_page.get_preview_text()
         assert "DO $$" in preview
         assert "'ÁLCOOL 70%'" in preview
         assert "'ONDANSETRONA'" in preview
-        assert str(sql_tab.btn_copy.cget("state")) == "normal"
-        assert str(sql_tab.btn_save.cget("state")) == "normal"
+        assert str(sql_page.btn_copy.cget("state")) == "normal"
+        assert str(sql_page.btn_save.cget("state")) == "normal"
 
         # Garante que o JSON compartilhado não foi modificado durante a geração
         assert app.json_data == snapshot_before
 
         # Testa botão Copiar para Área de Transferência
-        assert sql_tab.copy_to_clipboard() is True
+        assert sql_page.copy_to_clipboard() is True
         assert app.clipboard_get() == preview
 
         # Testa salvar como .sql em UTF-8
         sql_out_path = tmp_path / "saida_teste.sql"
-        assert sql_tab.save_sql_to_path(sql_out_path) is True
+        assert sql_page.save_sql_to_path(sql_out_path) is True
         assert sql_out_path.exists()
         assert sql_out_path.read_text(encoding="utf-8") == preview
 
         # Testa erro quando tipo_campo é inválido
         app.json_data["perguntas"][0]["respostas"][0]["tipo_campo"] = "TIPO_INEXISTENTE"
-        assert sql_tab.generate_sql() is False
-        assert "tipo_campo inválido" in sql_tab.status_var.get()
+        assert sql_page.generate_sql() is False
+        assert "tipo_campo inválido" in sql_page.status_var.get()
         assert len(erros) == 1
     finally:
         app.destroy()
+
+
+def test_sql_editor_widget_replace_and_zoom() -> None:
+    editor = SqlEditorWidget()
+    editor.set_text("SELECT foo FROM bar;")
+    assert editor.find_first("foo") is True
+    editor.replace("baz")
+    assert editor.get_text() == "SELECT baz FROM bar;"
+
+    initial_size = editor.font().pointSize()
+    editor.zoom_in(4)
+    assert editor.font().pointSize() == initial_size + 4
+    editor.zoom_out(2)
+    assert editor.font().pointSize() == initial_size + 2
+    editor.reset_zoom()
+    assert editor.font().pointSize() == initial_size

@@ -8,14 +8,18 @@ exibição do tour inicial (`show_tour_on_startup`) e nível de log global (`log
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import TYPE_CHECKING
 
+from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +30,8 @@ if TYPE_CHECKING:
 
 class GeneralPage(QWidget):
     """Página 'Geral' do diálogo de configurações."""
+
+    check_updates_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -60,6 +66,21 @@ class GeneralPage(QWidget):
         self.chk_auto_updates.setToolTip("Consulta se há novas versões ao abrir o aplicativo")
         form_app.addRow(self.chk_auto_updates)
 
+        updates_row = QHBoxLayout()
+        updates_row.setContentsMargins(0, 0, 0, 0)
+        updates_row.setSpacing(10)
+
+        self.btn_check_updates_now = QPushButton("Verificar Agora", grp_app)
+        self.btn_check_updates_now.setAccessibleName("Verificar Atualizações Agora")
+        self.btn_check_updates_now.setToolTip("Consulta o GitHub Releases imediatamente em busca de uma nova versão")
+        self.btn_check_updates_now.clicked.connect(self.check_updates_requested.emit)
+        updates_row.addWidget(self.btn_check_updates_now)
+
+        self.lbl_last_update_check = QLabel("Última verificação: Nunca", grp_app)
+        self.lbl_last_update_check.setAccessibleName("Última verificação de atualização")
+        updates_row.addWidget(self.lbl_last_update_check, 1)
+        form_app.addRow("Atualizações:", updates_row)
+
         self.chk_show_tour = QCheckBox("Exibir tour guiado de boas-vindas ao iniciar", grp_app)
         self.chk_show_tour.setAccessibleName("Exibir tour ao iniciar")
         self.chk_show_tour.setToolTip("Mostra dicas rápidas de uso na inicialização")
@@ -84,11 +105,25 @@ class GeneralPage(QWidget):
         layout.addWidget(grp_log)
         layout.addStretch(1)
 
+    def set_last_update_check_text(self, iso_value: str) -> None:
+        """Formata o timestamp ISO da última verificação para DD/MM/AAAA HH:MM."""
+        raw = (iso_value or "").strip()
+        if not raw:
+            self.lbl_last_update_check.setText("Última verificação: Nunca")
+            return
+        try:
+            dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            formatted = dt.astimezone().strftime("%d/%m/%Y %H:%M") if dt.tzinfo else dt.strftime("%d/%m/%Y %H:%M")
+        except ValueError:
+            formatted = raw
+        self.lbl_last_update_check.setText(f"Última verificação: {formatted}")
+
     def load_from_config(self, config: AppConfig) -> None:
         """Carrega os valores de `AppConfig` nos controles da página."""
         idx_lang = self.cmb_language.findData(config.language)
         self.cmb_language.setCurrentIndex(max(0, idx_lang))
         self.chk_auto_updates.setChecked(bool(config.auto_check_updates))
+        self.set_last_update_check_text(getattr(config, "last_update_check", ""))
         self.chk_show_tour.setChecked(bool(config.show_tour_on_startup))
 
         idx_log = self.cmb_log_level.findData(config.log_level.upper())

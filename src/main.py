@@ -234,6 +234,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     window.show()
     app.processEvents()
+    window.check_updates_on_startup()
 
     # 4. Fade-out da Splash após MainWindow.show() (respeitando 1.5s mín. + 300ms fade)
     fade_out_splash(

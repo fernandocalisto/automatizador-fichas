@@ -31,7 +31,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Run headless tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -c pytest.ini tests
 
       - name: Determine version
         id: version
@@ -41,32 +47,14 @@ jobs:
           } else {
             $date = Get-Date -Format "yyyy.MM.dd"
             $commit = $env:GITHUB_SHA.Substring(0, 7)
-            $version = "0.1.0-dev.$date.$commit"
+            $version = "0.2.0-dev.$date.$commit"
           }
           echo "version=$version" >> $env:GITHUB_OUTPUT
           echo "VERSION=$version"
 
       - name: Build executable with PyInstaller
         run: |
-          pyinstaller `
-            --name "AutomatizadorFichas" `
-            --onefile `
-            --windowed `
-            --add-data "src/resources;resources" `
-            --add-data "src/utils;utils" `
-            --add-data "src/core;core" `
-            --add-data "src/gui;gui" `
-            --hidden-import=tkinter `
-            --hidden-import=tkinter.ttk `
-            --hidden-import=tkinter.scrolledtext `
-            --hidden-import=tkinter.filedialog `
-            --hidden-import=tkinter.messagebox `
-            --hidden-import=json `
-            --hidden-import=re `
-            --hidden-import=unicodedata `
-            --hidden-import=pathlib `
-            --clean `
-            src/main.py
+          python -m PyInstaller --clean --noconfirm build.spec
 
       - name: Verify executable
         run: |
@@ -74,9 +62,7 @@ jobs:
           if (Test-Path $exe) {
             $size = (Get-Item $exe).Length / 1MB
             Write-Host "Executable found: $exe (Size: $([math]::Round($size, 2)) MB)"
-            # Quick smoke test - just verify it can be invoked without GUI
-            # We can't run GUI on headless runner, so we check the file exists and has reasonable size
-            if ($size -lt 5) {
+            if ($size -lt 15) {
               Write-Error "Executable too small ($size MB), build may have failed"
               exit 1
             }
@@ -86,7 +72,7 @@ jobs:
           }
 
       - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -94,23 +80,16 @@ jobs:
           body: |
             ## Automatizador de Fichas v${{ steps.version.outputs.version }}
 
-            ### Novidades
-            - Tela inicial com download da Skill e instruções de uso
-            - Editor de JSON com validação, formatação e conversão UPPERCASE
-            - Visualização e edição de Perguntas & Respostas (accordion expansível)
-            - Geração de SQL INSERT (bloco `DO $$`) com 3 padrões de inserção
-            - Geração de SELECT Jasper Reports baseado no padrão ouro
-            - Editores SQL com realce de sintaxe PostgreSQL e validação
-            - Copiar para área de transferência e salvar como .sql
+            ### Principais Novidades
+            - **Nova Interface PySide6**: `MainWindow` moderna com `QSplashScreen`, navegação em 5 etapas (`Ctrl+1..5`), `QDockWidget` de logs/validação, `StatusBar` interativa e notificações `Toast`.
+            - **Sistema de Temas Dual**: 4 temas de aplicação (`Claro`, `Escuro`, `Alto Contraste`, `Sistema`) + 5 temas de editor SQL (`VSCode`, `Monokai`, `Dracula`, `GitHub`, `Solarized`).
+            - **Editor SQL Nativo (`SqlEditorWidget`)**: realce PostgreSQL + Jasper (`$P{}`, `$X{}`, `$P!{}`), numeração de linhas (`LineNumberArea`), busca/substituição (`Ctrl+F`, `Ctrl+H`, `F3`, `Shift+F3`) e sincronização em tempo real com as configurações.
+            - **Opções Avançadas do SELECT Jasper**: 4 estilos booleanos, 3 modos de nomenclatura de colunas (`label_only` padrão), controle de `_obs`, metadados e blocos adicionais (`Cabeçalho`, `Paciente`, `Profissional`, `Atendimento`) com preview em tempo real e persistência entre sessões.
+            - **11 Tipos de Campo Salutem Unificados**: suporte completo a `BOOLEANO`, `BOOLEANO_RADIO`, `COMBO`, `COMBO_MULTI`, `TEXTO`, `TEXTO_LONGO`, `DATA`, `HORA`, `NUMERICO`, `TITULO` e `CID`.
+            - **Auto-Updater GitHub Releases**: verificação automática a cada 24h no startup ou manual em *Configurações → Geral*, visualização de Release Notes em Markdown e atualização automatizada do executável.
 
-            ### Como usar
-            1. Baixe a Skill.md na tela inicial
-            2. Use a Skill com sua IA preferida (Claude, ChatGPT, etc.) para extrair o JSON do PDF da ficha clínica
-            3. Carregue o JSON gerado (arquivo ou área de transferência)
-            4. Edite/visualize perguntas e respostas
-            5. Gere o SQL INSERT para inserção no banco
-            6. Gere o SELECT Jasper para relatórios
-
+            Consulte o [CHANGELOG.md](https://github.com/fernandocalisto/automatizador-fichas/blob/main/CHANGELOG.md) para a lista completa de alterações.
+          generate_release_notes: true
           draft: false
           prerelease: false
           files: |
@@ -119,7 +98,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifact (for non-tag builds)
-        if: "!startsWith(github.ref, 'refs/tags/')"
+        if: "!startsWith(github.ref, 'refs/tags/v')"
         uses: actions/upload-artifact@v4
         with:
           name: AutomatizadorFichas-${{ steps.version.outputs.version }}-windows

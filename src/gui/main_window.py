@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QByteArray, QSettings, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QFont, QIcon, QKeySequence, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QFont,
+    QIcon,
+    QKeySequence,
+    QPixmap,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -50,6 +58,7 @@ from PySide6.QtWidgets import (
 import src.resources.resources_rc  # noqa: F401
 from src.gui.components.theme_switch import THEME_LABELS, ThemeSwitch
 from src.gui.components.toast import Toast
+from src.gui.components.update_dialog import UpdateDialog
 from src.gui.settings.dialog import SettingsDialog
 from src.gui.wizard.json_editor_page import JsonEditorPage
 from src.gui.wizard.landing_page import LandingPage
@@ -60,6 +69,7 @@ from src.services.config_service import ConfigService
 from src.services.help_service import HelpService
 from src.services.log_service import LogService
 from src.services.theme_service import ThemeService
+from src.services.update_service import UpdateInfo, UpdateService
 from src.utils.json_utils import update_shared_dict_in_place
 from src.utils.logo_utils import load_logo_pixmap
 from src.utils.resource_path import resource_path
@@ -200,12 +210,14 @@ class MainWindow(QMainWindow):
         log_service: LogService | None = None,
         help_service: HelpService | None = None,
         parent: QWidget | None = None,
+        update_service: UpdateService | None = None,
     ) -> None:
         super().__init__(parent)
         self.config_service = config_service or ConfigService()
         self.theme_service = theme_service or ThemeService(self.config_service)
         self.log_service = log_service or LogService()
         self.help_service = help_service or HelpService()
+        self.update_service = update_service or UpdateService(self.config_service, parent=self)
 
         # Dicionário compartilhado in-place entre todas as páginas do Wizard
         self.json_data: dict[str, Any] = {}
@@ -455,14 +467,20 @@ class MainWindow(QMainWindow):
         step_layout.setSpacing(6)
 
         self.step_buttons: list[QPushButton] = []
+        self.page_shortcuts: list[QShortcut] = []
         for idx, title in enumerate(self.PAGE_TITLES):
             btn = QPushButton(title, self.step_bar)
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setAccessibleName(f"Ir para {title}")
+            btn.setToolTip(f"{title} (Ctrl+{idx + 1})")
             btn.clicked.connect(lambda _checked=False, i=idx: self.navigate_to_page(i))
             step_layout.addWidget(btn)
             self.step_buttons.append(btn)
+
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{idx + 1}"), self)
+            shortcut.activated.connect(lambda i=idx: self.navigate_to_page(i))
+            self.page_shortcuts.append(shortcut)
 
         step_layout.addStretch(1)
         central_layout.addWidget(self.step_bar)
@@ -486,6 +504,7 @@ class MainWindow(QMainWindow):
             on_json_changed=self._on_json_updated_from_editor_page,
             on_back_to_landing=self.show_landing,
             theme_service=self.theme_service,
+            config_service=self.config_service,
         )
         self.central_stack.addWidget(self.json_editor_page)
 
@@ -505,6 +524,7 @@ class MainWindow(QMainWindow):
             on_sql_generated=lambda sql: self._on_sql_generated("INSERT", sql),
             on_back_to_landing=self.show_landing,
             theme_service=self.theme_service,
+            config_service=self.config_service,
         )
         self.central_stack.addWidget(self.sql_insert_page)
 
@@ -515,6 +535,7 @@ class MainWindow(QMainWindow):
             on_sql_generated=lambda sql: self._on_sql_generated("SELECT", sql),
             on_back_to_landing=self.show_landing,
             theme_service=self.theme_service,
+            config_service=self.config_service,
         )
         self.central_stack.addWidget(self.sql_select_page)
 
@@ -656,6 +677,12 @@ class MainWindow(QMainWindow):
         # Ponte de logs em tempo real para o painel Output/Log
         bridge = LogService.get_signal_bridge()
         bridge.log_emitted.connect(self._append_log_message)
+
+        # Verificação assíncrona de atualizações no GitHub Releases
+        self.update_service.update_available.connect(self._on_update_available)
+        self.update_service.check_failed.connect(
+            lambda msg: logger.debug("Verificação de atualizações falhou: %s", msg)
+        )
 
     def _append_log_message(self, level_name: str, formatted_message: str) -> None:
         self.log_output_text.appendPlainText(formatted_message)
@@ -962,12 +989,39 @@ class MainWindow(QMainWindow):
             theme_service=self.theme_service,
             help_service=self.help_service,
             parent=self,
+            update_service=self.update_service,
+            current_version=APP_VERSION,
         )
         if dlg.category_list.count() > 0:
             row = min(max(0, initial_row), dlg.category_list.count() - 1)
             dlg.category_list.setCurrentRow(row)
         dlg.exec()
         return dlg
+
+    def check_updates_on_startup(self, force: bool = False) -> Any:
+        """Dispara verificação assíncrona de atualizações na inicialização quando elegível."""
+        if not force and not self.update_service.should_auto_check():
+            return None
+        return self.update_service.check_for_updates_async(
+            current_version=APP_VERSION,
+            force=force,
+        )
+
+    def _on_update_available(self, info: UpdateInfo) -> None:
+        """Notifica nova release via Toast e abre o diálogo de atualização."""
+        Toast.show(
+            self,
+            f"Nova versão {info.version} disponível!",
+            level="info",
+        )
+        dlg = UpdateDialog(
+            update_info=info,
+            current_version=APP_VERSION,
+            update_service=self.update_service,
+            config_service=self.config_service,
+            parent=self,
+        )
+        dlg.exec()
 
     def show_help(self) -> SettingsDialog:
         """Abre a página de Ajuda Contextual e Atalhos no diálogo de configurações."""

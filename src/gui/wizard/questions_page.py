@@ -34,20 +34,19 @@ from PySide6.QtWidgets import (
 
 logger = logging.getLogger("gui.wizard.questions")
 
-# Tipos válidos de campo conforme spec_sql_insert.md
+# Tipos válidos de campo conforme spec_sql_perguntas.md / src/core/sql_insert.py
 TIPOS_CAMPO_VALIDOS = [
-    "TEXTO",
-    "TEXTO_LONGO",
-    "INTEIRO",
-    "DECIMAL",
     "BOOLEANO",
-    "DATA",
-    "HORA",
-    "DATA_HORA",
+    "BOOLEANO_RADIO",
     "CID",
-    "PROCEDIMENTO",
+    "COMBOBOX",
+    "DATA",
     "EXAME",
-    "SINAL_VITAL",
+    "HORA",
+    "NUMERICO",
+    "PROCEDIMENTO",
+    "PROCEDIMENTO_CID",
+    "TEXTO",
 ]
 
 
@@ -554,7 +553,7 @@ class QuestionsPage(QWidget):
                 pergunta_dict=p_dict,
                 question_index=idx,
                 on_modified=self._on_item_modified,
-                initially_expanded=False,
+                initially_expanded=(idx == 1),
             )
             self.cards_layout.addWidget(card)
             self.question_items.append(card)

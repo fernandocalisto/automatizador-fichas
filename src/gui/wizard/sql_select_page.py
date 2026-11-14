@@ -41,6 +41,7 @@ from src.core.sql_select import (
 from src.utils.resource_path import resource_path
 
 if TYPE_CHECKING:
+    from src.services.config_service import ConfigService
     from src.services.theme_service import ThemeService
 
 logger = logging.getLogger("sql_select")
@@ -95,12 +96,14 @@ class SqlSelectPage(QWidget):
         on_back_to_landing: Callable[[], None] | None = None,
         model_path: str | Path | None = None,
         theme_service: ThemeService | None = None,
+        config_service: ConfigService | None = None,
     ) -> None:
         super().__init__(parent)
         self.shared_json: dict[str, Any] = shared_json if shared_json is not None else {}
         self.on_sql_generated = on_sql_generated
         self.on_back_to_landing = on_back_to_landing
         self._theme_service = theme_service
+        self._config_service = config_service
         self.model_path: Path = (
             Path(model_path)
             if model_path is not None
@@ -126,6 +129,7 @@ class SqlSelectPage(QWidget):
 
         self.setAccessibleName("Gerar SELECT Jasper")
         self._build_ui()
+        self._load_options_from_config()
 
         self.status_var = _LabelVarAdapter(self.lbl_status)
         self.counts_var = _LabelVarAdapter(self.lbl_counts)
@@ -293,6 +297,7 @@ class SqlSelectPage(QWidget):
             self,
             read_only=False,
             theme_service=self._theme_service,
+            config_service=self._config_service,
         )
         self.preview_text.setAccessibleName("Editor SELECT Jasper")
         self.preview_text.cursorPositionChanged.connect(self._on_cursor_changed)
@@ -350,8 +355,65 @@ class SqlSelectPage(QWidget):
         )
         return self.generation_options
 
+    def _load_options_from_config(self) -> None:
+        """Restaura as opções de geração SELECT Jasper a partir do `ConfigService`."""
+        if self._config_service is None or not hasattr(
+            self._config_service, "get_select_jasper_options"
+        ):
+            return
+
+        saved = self._config_service.get_select_jasper_options()
+        self.generation_options.update(saved)
+
+        widgets = (
+            self.cmb_boolean_style,
+            self.cmb_column_naming,
+            self.chk_include_obs,
+            self.chk_include_metadata,
+            self.chk_include_all_blocks,
+            self.chk_block_cabecalho,
+            self.chk_block_paciente,
+            self.chk_block_profissional,
+            self.chk_block_atendimento,
+        )
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            idx_bool = self.cmb_boolean_style.findData(
+                saved.get("boolean_style", "coalesce_bool_or")
+            )
+            if idx_bool >= 0:
+                self.cmb_boolean_style.setCurrentIndex(idx_bool)
+
+            idx_col = self.cmb_column_naming.findData(
+                saved.get("column_naming", "label_only")
+            )
+            if idx_col >= 0:
+                self.cmb_column_naming.setCurrentIndex(idx_col)
+
+            self.chk_include_obs.setChecked(bool(saved.get("include_obs", True)))
+            self.chk_include_metadata.setChecked(bool(saved.get("include_metadata", False)))
+            all_blocks = bool(saved.get("include_all_blocks", True))
+            self.chk_include_all_blocks.setChecked(all_blocks)
+            self.blocks_sub_container.setVisible(all_blocks)
+            self.chk_block_cabecalho.setChecked(bool(saved.get("include_cabecalho", True)))
+            self.chk_block_paciente.setChecked(bool(saved.get("include_paciente", True)))
+            self.chk_block_profissional.setChecked(
+                bool(saved.get("include_profissional", True))
+            )
+            self.chk_block_atendimento.setChecked(
+                bool(saved.get("include_atendimento", True))
+            )
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+
     def _on_options_changed(self, *_: Any) -> None:
         self._sync_options_from_ui()
+        if self._config_service is not None and hasattr(
+            self._config_service, "save_select_jasper_options"
+        ):
+            self._config_service.save_select_jasper_options(self.generation_options)
         if self.generated_sql and self.shared_json:
             self.generate_sql(show_error_dialog=False)
 

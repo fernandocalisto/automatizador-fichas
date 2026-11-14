@@ -40,6 +40,8 @@ class AppConfig:
     # General
     language: str = "pt_BR"
     auto_check_updates: bool = True
+    last_update_check: str = ""
+    ignored_update_version: str = ""
     show_tour_on_startup: bool = True
 
     # Theme
@@ -57,9 +59,15 @@ class AppConfig:
 
     # Select Options (spec_05)
     boolean_style: str = "coalesce_bool_or"  # "coalesce_bool_or" | "x_empty" | "sim_nao" | "1_0"
-    column_naming: str = "pergunta_label"    # "pergunta_label" | "label_only" | "label_sufixo"
+    column_naming: str = "label_only"        # "pergunta_label" | "label_only" | "label_sufixo"
     include_observations: bool = True
     include_metadata: bool = False
+    include_all_blocks: bool = True
+    include_cabecalho: bool = True
+    include_paciente: bool = True
+    include_profissional: bool = True
+    include_atendimento: bool = True
+    select_jasper_options: dict[str, Any] = field(default_factory=dict)
 
     # Regex (spec_06)
     use_custom_regex: bool = False
@@ -98,7 +106,10 @@ class AppConfig:
                         parsed = json.loads(val)
                         kwargs[f.name] = dict(parsed) if isinstance(parsed, dict) else {}
                     elif isinstance(val, dict):
-                        kwargs[f.name] = {str(k): str(v) for k, v in val.items()}
+                        if f.name == "log_module_levels":
+                            kwargs[f.name] = {str(k): str(v) for k, v in val.items()}
+                        else:
+                            kwargs[f.name] = {str(k): v for k, v in val.items()}
                 else:
                     kwargs[f.name] = val
             except (ValueError, TypeError, json.JSONDecodeError):
@@ -306,6 +317,47 @@ class ConfigService:
             token: Identificador numérico da inscrição.
         """
         self._subscribers.pop(token, None)
+
+    def get_select_jasper_options(self) -> dict[str, Any]:
+        """Retorna o dicionário consolidado de opções SELECT Jasper persistidas."""
+        cfg = self._config
+        stored = cfg.select_jasper_options if isinstance(cfg.select_jasper_options, dict) else {}
+        return {
+            "boolean_style": str(stored.get("boolean_style", cfg.boolean_style) or "coalesce_bool_or"),
+            "column_naming": str(stored.get("column_naming", cfg.column_naming) or "label_only"),
+            "include_obs": bool(stored.get("include_obs", cfg.include_observations)),
+            "include_metadata": bool(stored.get("include_metadata", cfg.include_metadata)),
+            "include_all_blocks": bool(stored.get("include_all_blocks", cfg.include_all_blocks)),
+            "include_cabecalho": bool(stored.get("include_cabecalho", cfg.include_cabecalho)),
+            "include_paciente": bool(stored.get("include_paciente", cfg.include_paciente)),
+            "include_profissional": bool(stored.get("include_profissional", cfg.include_profissional)),
+            "include_atendimento": bool(stored.get("include_atendimento", cfg.include_atendimento)),
+        }
+
+    def save_select_jasper_options(self, options: dict[str, Any]) -> None:
+        """Persiste as opções SELECT Jasper no `AppConfig`, `QSettings` e `config.json`."""
+        normalized = {
+            "boolean_style": str(options.get("boolean_style", self._config.boolean_style) or "coalesce_bool_or"),
+            "column_naming": str(options.get("column_naming", self._config.column_naming) or "label_only"),
+            "include_obs": bool(options.get("include_obs", options.get("include_observations", True))),
+            "include_metadata": bool(options.get("include_metadata", False)),
+            "include_all_blocks": bool(options.get("include_all_blocks", True)),
+            "include_cabecalho": bool(options.get("include_cabecalho", True)),
+            "include_paciente": bool(options.get("include_paciente", True)),
+            "include_profissional": bool(options.get("include_profissional", True)),
+            "include_atendimento": bool(options.get("include_atendimento", True)),
+        }
+        self._config.boolean_style = normalized["boolean_style"]
+        self._config.column_naming = normalized["column_naming"]
+        self._config.include_observations = normalized["include_obs"]
+        self._config.include_metadata = normalized["include_metadata"]
+        self._config.include_all_blocks = normalized["include_all_blocks"]
+        self._config.include_cabecalho = normalized["include_cabecalho"]
+        self._config.include_paciente = normalized["include_paciente"]
+        self._config.include_profissional = normalized["include_profissional"]
+        self._config.include_atendimento = normalized["include_atendimento"]
+        self._config.select_jasper_options = dict(normalized)
+        self.save(self._config)
 
     def _notify(self, key: str, value: Any) -> None:
         """Notifica os callbacks inscritos para a chave informada."""

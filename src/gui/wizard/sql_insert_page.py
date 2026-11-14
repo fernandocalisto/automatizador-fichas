@@ -35,6 +35,7 @@ from src.core.sql_insert import (
 )
 
 if TYPE_CHECKING:
+    from src.services.config_service import ConfigService
     from src.services.theme_service import ThemeService
 
 logger = logging.getLogger("sql_insert")
@@ -88,12 +89,14 @@ class SqlInsertPage(QWidget):
         on_sql_generated: Callable[[str], None] | None = None,
         on_back_to_landing: Callable[[], None] | None = None,
         theme_service: ThemeService | None = None,
+        config_service: ConfigService | None = None,
     ) -> None:
         super().__init__(parent)
         self.shared_json: dict[str, Any] = shared_json if shared_json is not None else {}
         self.on_sql_generated = on_sql_generated
         self.on_back_to_landing = on_back_to_landing
         self._theme_service = theme_service
+        self._config_service = config_service
 
         self.generated_sql: str = ""
         self.current_sql_file: Path | None = None
@@ -163,6 +166,7 @@ class SqlInsertPage(QWidget):
             self,
             read_only=False,
             theme_service=self._theme_service,
+            config_service=self._config_service,
         )
         self.preview_text.setAccessibleName("Editor SQL INSERT")
         self.preview_text.cursorPositionChanged.connect(self._on_cursor_changed)

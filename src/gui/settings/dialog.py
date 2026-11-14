@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -37,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 import src.resources.resources_rc  # noqa: F401
+from src.gui.components.update_dialog import UpdateDialog
 from src.gui.settings.pages import (
     EditorPage,
     GeneralPage,
@@ -46,6 +48,7 @@ from src.gui.settings.pages import (
 )
 from src.services.config_service import ConfigService
 from src.services.help_service import HelpService
+from src.services.update_service import UpdateService
 from src.utils.resource_path import resource_path
 
 if TYPE_CHECKING:
@@ -88,11 +91,15 @@ class SettingsDialog(QDialog):
         theme_service: ThemeService | None = None,
         help_service: HelpService | None = None,
         parent: QWidget | None = None,
+        update_service: UpdateService | None = None,
+        current_version: str = "v0.2.0",
     ) -> None:
         super().__init__(parent)
         self.config_service = config_service or ConfigService()
         self.theme_service = theme_service
         self.help_service = help_service or HelpService()
+        self.update_service = update_service or UpdateService(self.config_service, parent=self)
+        self.current_version = current_version
 
         self.setWindowTitle("Configurações — Automatizador de Fichas")
         self.setAccessibleName("Diálogo de Configurações")
@@ -100,6 +107,7 @@ class SettingsDialog(QDialog):
         self.resize(760, 560)
 
         self._build_ui()
+        self.general_page.check_updates_requested.connect(self._on_check_updates_now)
         self.load_all_pages()
 
     def _build_ui(self) -> None:
@@ -240,3 +248,46 @@ class SettingsDialog(QDialog):
     def _on_ok_clicked(self) -> None:
         self.apply_settings()
         self.accept()
+
+    def _on_check_updates_now(self) -> None:
+        """Executa verificação manual de atualizações e informa o resultado."""
+        btn = self.general_page.btn_check_updates_now
+        btn.setEnabled(False)
+        btn.setText("Verificando...")
+        btn.repaint()
+        try:
+            info = self.update_service.check_for_updates(
+                current_version=self.current_version,
+                force=True,
+            )
+            self.general_page.set_last_update_check_text(
+                self.config_service.config.last_update_check
+            )
+        except Exception as exc:
+            logger.warning("Falha ao verificar atualizações manualmente: %s", exc)
+            QMessageBox.warning(
+                self,
+                "Verificar Atualizações",
+                f"Não foi possível verificar atualizações:\n{exc}",
+            )
+            return
+        finally:
+            btn.setEnabled(True)
+            btn.setText("Verificar Agora")
+
+        if info is None:
+            QMessageBox.information(
+                self,
+                "Verificar Atualizações",
+                f"Você já está na versão mais recente ({self.current_version}).",
+            )
+            return
+
+        dlg = UpdateDialog(
+            update_info=info,
+            current_version=self.current_version,
+            update_service=self.update_service,
+            config_service=self.config_service,
+            parent=self,
+        )
+        dlg.exec()

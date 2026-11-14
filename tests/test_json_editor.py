@@ -1,22 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-Testes unitários e de integração para a especificação atualizada (spec_json_editor.md):
+Testes unitários e de integração para a interface PySide6 (`spec_json_editor.md`):
 - src/utils/resource_path.py e SKILL.md embutido
 - src/utils/json_utils.py (uppercase_target_fields, validação de estrutura)
-- src/gui/landing.py (Tela Inicial, download de SKILL.md, tooltip, arquivo/clipboard)
-- src/gui/json_editor_tab.py (Aba 1: Validar & Formatar, Salvar JSON como…, Voltar)
-- src/gui/perguntas_tab.py (Aba 2: Accordion expansível, edição UPPERCASE e checkboxes)
-- src/main.py (MainApp, dicionário JSON compartilhado in-place entre as abas)
+- src/gui/wizard/landing_page.py (Tela Inicial, download de SKILL.md, tooltip, arquivo/clipboard)
+- src/gui/wizard/json_editor_page.py (Página 1: Validar & Formatar, Salvar JSON como…, Voltar)
+- src/gui/wizard/questions_page.py (Página 2: Accordion expansível, edição UPPERCASE e checkboxes)
+- src/main.py (MainApp/MainWindow, dicionário JSON compartilhado in-place entre as páginas)
 """
 
 import json
 from pathlib import Path
-from tkinter import messagebox
 import pytest
+from PySide6.QtWidgets import QMessageBox
 
-from src.gui.json_editor_tab import JsonEditorTab
-from src.gui.landing import SKILL_TOOLTIP_TEXT, LandingFrame
-from src.gui.perguntas_tab import PerguntasTab
+from src.gui.wizard.json_editor_page import JsonEditorPage
+from src.gui.wizard.landing_page import SKILL_TOOLTIP_TEXT, LandingPage
+from src.gui.wizard.questions_page import QuestionsPage
 from src.main import MainApp
 from src.utils.json_utils import (
     apply_uppercase_to_text_fields,
@@ -121,19 +121,12 @@ def test_load_and_save_json_file_utf8(tmp_path: Path) -> None:
     assert reloaded["perguntas"][0]["titulo"] is True
 
 
-def test_landing_skill_download_and_tooltip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    infos: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        messagebox, "showinfo", lambda title, msg: infos.append((title, msg))
-    )
-
+def test_landing_skill_download_and_tooltip(tmp_path: Path) -> None:
     app = MainApp()
     app.withdraw()
     try:
         assert app.current_view == "landing"
-        landing: LandingFrame = app.landing_frame
+        landing: LandingPage = app.landing_page
 
         # Verifica texto do tooltip do botão Baixar Skill
         assert "Como usar:" in landing.skill_tooltip.text
@@ -150,7 +143,7 @@ def test_landing_skill_download_and_tooltip(
         assert landing.download_skill(destination_path=dest_skill) is True
         assert dest_skill.exists()
         assert "Extrator de Ficha Clinica Salutem" in dest_skill.read_text(encoding="utf-8")
-        assert len(infos) == 1
+        assert "Skill salva com sucesso" in landing.status_var.get()
     finally:
         app.destroy()
 
@@ -160,7 +153,7 @@ def test_full_workflow_landing_to_tabs_and_shared_json(
 ) -> None:
     erros: list[tuple[str, str]] = []
     monkeypatch.setattr(
-        messagebox, "showerror", lambda title, msg: erros.append((title, msg))
+        QMessageBox, "critical", lambda _parent, title, msg: erros.append((title, msg))
     )
 
     app = MainApp()
@@ -168,19 +161,19 @@ def test_full_workflow_landing_to_tabs_and_shared_json(
     try:
         # 1. Inicia na tela inicial
         assert app.current_view == "landing"
-        assert app.notebook.index("end") == 4
+        assert app.central_stack.count() == 5
 
         # 2. Tenta carregar JSON inválido na Landing -> permanece na Landing e exibe erro
         bad_json_path = tmp_path / "invalido.json"
         bad_json_path.write_text('{"template": {erro_sintaxe}', encoding="utf-8")
-        assert app.landing_frame.load_json_from_path(bad_json_path) is False
+        assert app.landing_page.load_json_from_path(bad_json_path) is False
         assert app.current_view == "landing"
         assert len(erros) == 1
 
         # 3. Tenta carregar JSON sem estrutura de ficha clínica -> erro claro
         incomplete_path = tmp_path / "incompleto.json"
         incomplete_path.write_text('{"foo": "bar"}', encoding="utf-8")
-        assert app.landing_frame.load_json_from_path(incomplete_path) is False
+        assert app.landing_page.load_json_from_path(incomplete_path) is False
         assert app.current_view == "landing"
         assert len(erros) == 2
 
@@ -227,12 +220,12 @@ def test_full_workflow_landing_to_tabs_and_shared_json(
         }
         valid_path.write_text(json.dumps(sample_data, ensure_ascii=False), encoding="utf-8")
 
-        assert app.landing_frame.load_json_from_path(valid_path) is True
+        assert app.landing_page.load_json_from_path(valid_path) is True
         assert app.current_view == "notebook"
 
-        # Garante que o dicionário compartilhado é exatamente a mesma instância nas duas abas
-        assert app.json_editor_tab.shared_json is app.json_data
-        assert app.perguntas_tab.shared_json is app.json_data
+        # Garante que o dicionário compartilhado é exatamente a mesma instância nas páginas
+        assert app.json_editor_page.shared_json is app.json_data
+        assert app.questions_page.shared_json is app.json_data
 
         assert app.json_data["template"]["nome"] == "FICHA CIRURGIA GERAL"
         assert app.json_data["perguntas"][0]["nome"] == "EQUIPE CIRÚRGICA"
@@ -241,11 +234,11 @@ def test_full_workflow_landing_to_tabs_and_shared_json(
             == "CIRURGIÃO PRINCIPAL:"
         )
 
-        # 5. Interação na Aba 2 (Perguntas & Respostas): expandir, editar texto (UPPERCASE) e checkboxes
-        perguntas_tab: PerguntasTab = app.perguntas_tab
-        assert len(perguntas_tab.question_items) == 2
+        # 5. Interação na Página 2 (Perguntas & Respostas): expandir, editar texto (UPPERCASE) e checkboxes
+        perguntas_page: QuestionsPage = app.questions_page
+        assert len(perguntas_page.question_items) == 2
 
-        q1_card = perguntas_tab.question_items[0]
+        q1_card = perguntas_page.question_items[0]
         assert q1_card.is_expanded is True  # Primeira pergunta expandida automaticamente
         assert len(q1_card.answer_rows) == 1
 
@@ -272,42 +265,76 @@ def test_full_workflow_landing_to_tabs_and_shared_json(
         assert app.json_data["perguntas"][0]["respostas"][0]["campo_obrigatorio"] is True
         assert app.json_data["perguntas"][0]["respostas"][0]["importa_historico"] is True
 
-        # Verifica que o texto da Aba 1 (Editar JSON) já reflete as edições da Aba 2
-        editor_text = app.json_editor_tab.get_editor_text()
+        # Verifica que o texto da Página 1 (Editar JSON) já reflete as edições da Página 2
+        editor_text = app.json_editor_page.get_editor_text()
         assert '"EQUIPE MÉDICA ATUALIZADA"' in editor_text
         assert '"CIRURGIÃO TITULAR:"' in editor_text
 
         # Expande a pergunta 2 e edita sua resposta
-        q2_card = perguntas_tab.question_items[1]
+        q2_card = perguntas_page.question_items[1]
         assert q2_card.is_expanded is False
         q2_card.expand()
         assert q2_card.is_expanded is True
         q2_card.answer_rows[0].label_var.set("grampeador linear")
-        perguntas_tab.apply_changes()
+        perguntas_page.apply_changes()
         assert (
             app.json_data["perguntas"][1]["respostas"][0]["label"]
             == "GRAMPEADOR LINEAR"
         )
 
-        # 6. Edição na Aba 1 (Editar JSON) -> Validar & Formatar reflete na Aba 2
-        editor_tab: JsonEditorTab = app.json_editor_tab
-        edited_from_tab1 = json.loads(editor_tab.get_editor_text())
+        # 6. Edição na Página 1 (Editar JSON) -> Validar & Formatar reflete na Página 2
+        editor_page: JsonEditorPage = app.json_editor_page
+        edited_from_tab1 = json.loads(editor_page.get_editor_text())
         edited_from_tab1["perguntas"][0]["respostas"][0]["label"] = "anestesista chefe:"
-        editor_tab.set_editor_text(json.dumps(edited_from_tab1, ensure_ascii=False, indent=2))
-        assert editor_tab.validate_and_format() is True
+        editor_page.set_editor_text(json.dumps(edited_from_tab1, ensure_ascii=False, indent=2))
+        assert editor_page.validate_and_format() is True
 
         assert (
             app.json_data["perguntas"][0]["respostas"][0]["label"]
             == "ANESTESISTA CHEFE:"
         )
         assert (
-            perguntas_tab.question_items[0].answer_rows[0].label_var.get()
+            perguntas_page.question_items[0].answer_rows[0].label_var.get()
             == "ANESTESISTA CHEFE:"
         )
 
         # 7. Testar botão "Voltar à Tela Inicial"
-        perguntas_tab.btn_back.invoke()
+        perguntas_page.btn_back.invoke()
         assert app.current_view == "landing"
         assert app.get_json_data() is None
     finally:
         app.destroy()
+
+
+def test_wizard_page_shortcuts_and_packaging_files() -> None:
+    app = MainApp()
+    app.withdraw()
+    try:
+        assert len(app.page_shortcuts) == 5
+        assert [sc.key().toString() for sc in app.page_shortcuts] == [
+            f"Ctrl+{i}" for i in range(1, 6)
+        ]
+        for idx in reversed(range(5)):
+            app.page_shortcuts[idx].activated.emit()
+            assert app.central_stack.currentIndex() == idx
+    finally:
+        app.destroy()
+
+    project_root = Path(__file__).resolve().parent.parent
+    spec_path = project_root / "build.spec"
+    workflow_path = project_root / ".github" / "workflows" / "build.yml"
+    ps1_path = project_root / "scripts" / "build_local.ps1"
+
+    assert spec_path.exists()
+    assert workflow_path.exists()
+    assert ps1_path.exists()
+
+    spec_text = spec_path.read_text(encoding="utf-8")
+    assert "PySide6.QtWidgets" in spec_text
+    assert '"tkinter"' in spec_text
+
+    workflow_text = workflow_path.read_text(encoding="utf-8")
+    assert "requirements.txt" in workflow_text
+    assert "pytest" in workflow_text
+    assert "build.spec" in workflow_text
+    assert "--hidden-import=tkinter" not in workflow_text

@@ -27,6 +27,7 @@ from PySide6.QtGui import (
     QSyntaxHighlighter,
     QTextCharFormat,
     QTextDocument,
+    QTextOption,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -51,6 +52,7 @@ from src.utils.json_utils import (
 )
 
 if TYPE_CHECKING:
+    from src.services.config_service import ConfigService
     from src.services.theme_service import ThemeService
 
 logger = logging.getLogger("gui.wizard.json_editor")
@@ -160,12 +162,15 @@ class JsonEditorPage(QWidget):
         on_json_changed: Callable[[dict[str, Any]], None] | None = None,
         on_back_to_landing: Callable[[], None] | None = None,
         theme_service: ThemeService | None = None,
+        config_service: ConfigService | None = None,
     ) -> None:
         super().__init__(parent)
         self.shared_json: dict[str, Any] = shared_json if shared_json is not None else {}
         self.on_json_changed = on_json_changed
         self.on_back_to_landing = on_back_to_landing
         self._theme_service = theme_service
+        self._config_service = config_service
+        self._config_tokens: list[int] = []
 
         self.current_file: Path | None = None
         self.original_data: dict[str, Any] | None = (
@@ -185,10 +190,59 @@ class JsonEditorPage(QWidget):
                 lambda _: self.apply_theme_from_service(self._theme_service)  # type: ignore[arg-type]
             )
 
+        self._apply_editor_config()
+        self._bind_config_service()
+        self.destroyed.connect(self._cleanup_config_subscriptions)
+
         if self.shared_json:
             self.refresh_from_shared()
         else:
             self._update_counts()
+
+    def _bind_config_service(self) -> None:
+        if self._config_service is None or not hasattr(self._config_service, "subscribe"):
+            return
+        for key in ("tab_size", "show_whitespace", "font_family", "font_size"):
+            token = self._config_service.subscribe(key, lambda _v: self._on_editor_config_changed())
+            self._config_tokens.append(token)
+
+    def _cleanup_config_subscriptions(self) -> None:
+        if self._config_service is not None and hasattr(self._config_service, "unsubscribe"):
+            for token in self._config_tokens:
+                try:
+                    self._config_service.unsubscribe(token)
+                except Exception:
+                    pass
+        self._config_tokens.clear()
+
+    def _on_editor_config_changed(self) -> None:
+        try:
+            self._apply_editor_config()
+        except RuntimeError:
+            self._cleanup_config_subscriptions()
+
+    def _apply_editor_config(self) -> None:
+        if self._config_service is None or not hasattr(self._config_service, "config"):
+            return
+        cfg = self._config_service.config
+        font_family = str(getattr(cfg, "font_family", "JetBrains Mono") or "JetBrains Mono")
+        font_size = int(getattr(cfg, "font_size", 11) or 11)
+        font = QFont(font_family, font_size)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.text_area.setFont(font)
+
+        tab_size = max(1, int(getattr(cfg, "tab_size", 4) or 4))
+        space_width = max(1, self.text_area.fontMetrics().horizontalAdvance(" "))
+        self.text_area.setTabStopDistance(float(tab_size * space_width))
+
+        option = self.text_area.document().defaultTextOption()
+        flags = option.flags()
+        if bool(getattr(cfg, "show_whitespace", False)):
+            flags |= QTextOption.Flag.ShowTabsAndSpaces
+        else:
+            flags &= ~QTextOption.Flag.ShowTabsAndSpaces
+        option.setFlags(flags)
+        self.text_area.document().setDefaultTextOption(option)
 
     @property
     def json_data(self) -> dict[str, Any] | None:

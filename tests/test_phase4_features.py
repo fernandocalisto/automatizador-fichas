@@ -76,7 +76,10 @@ def _sample_ficha() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def test_spec_05_documentation_exists() -> None:
     repo_root = Path(__file__).resolve().parent.parent
-    spec_path = repo_root.parent / "Automatiza Ficha - Exemplos" / "spec_05_select_options.md"
+    examples_dir = repo_root.parent / "Automatiza Ficha - Exemplos"
+    if not examples_dir.exists():
+        pytest.skip("Pasta externa 'Automatiza Ficha - Exemplos' ausente no ambiente de CI")
+    spec_path = examples_dir / "spec_05_select_options.md"
     assert spec_path.exists(), f"Spec não encontrada em: {spec_path}"
     content = spec_path.read_text(encoding="utf-8")
     assert "select_jasper_options" in content

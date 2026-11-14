@@ -77,19 +77,8 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "Automatizador de Fichas v${{ steps.version.outputs.version }}"
-          body: |
-            ## Automatizador de Fichas v${{ steps.version.outputs.version }}
-
-            ### Principais Novidades
-            - **Nova Interface PySide6**: `MainWindow` moderna com `QSplashScreen`, navegação em 5 etapas (`Ctrl+1..5`), `QDockWidget` de logs/validação, `StatusBar` interativa e notificações `Toast`.
-            - **Sistema de Temas Dual**: 4 temas de aplicação (`Claro`, `Escuro`, `Alto Contraste`, `Sistema`) + 5 temas de editor SQL (`VSCode`, `Monokai`, `Dracula`, `GitHub`, `Solarized`).
-            - **Editor SQL Nativo (`SqlEditorWidget`)**: realce PostgreSQL + Jasper (`$P{}`, `$X{}`, `$P!{}`), numeração de linhas (`LineNumberArea`), busca/substituição (`Ctrl+F`, `Ctrl+H`, `F3`, `Shift+F3`) e sincronização em tempo real com as configurações.
-            - **Opções Avançadas do SELECT Jasper**: 4 estilos booleanos, 3 modos de nomenclatura de colunas (`label_only` padrão), controle de `_obs`, metadados e blocos adicionais (`Cabeçalho`, `Paciente`, `Profissional`, `Atendimento`) com preview em tempo real e persistência entre sessões.
-            - **11 Tipos de Campo Salutem Unificados**: suporte completo a `BOOLEANO`, `BOOLEANO_RADIO`, `COMBO`, `COMBO_MULTI`, `TEXTO`, `TEXTO_LONGO`, `DATA`, `HORA`, `NUMERICO`, `TITULO` e `CID`.
-            - **Auto-Updater GitHub Releases**: verificação automática a cada 24h no startup ou manual em *Configurações → Geral*, visualização de Release Notes em Markdown e atualização automatizada do executável.
-
-            Consulte o [CHANGELOG.md](https://github.com/fernandocalisto/automatizador-fichas/blob/main/CHANGELOG.md) para a lista completa de alterações.
-          generate_release_notes: true
+          body_path: CHANGELOG.md
+          generate_release_notes: false
           draft: false
           prerelease: false
           files: |

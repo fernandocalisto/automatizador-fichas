@@ -1,0 +1,12 @@
+[project]
+name = "salutem-ficha-studio"
+version = "1.0.0-alpha.1"
+description = "Salutem Ficha Studio — Extração IA, Form Builder, PostgreSQL & JasperReports Studio Web"
+readme = "README.md"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend", "."]
+asyncio_mode = "auto"
+addopts = "-q --tb=short"

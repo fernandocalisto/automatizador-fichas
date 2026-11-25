@@ -7,27 +7,35 @@ import base64
 import getpass
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import platform
+import re
 import secrets
+import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 import keyring
+import psycopg
 from keyring.errors import KeyringError, PasswordDeleteError
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.config import APP_NAME, get_data_dir
+from backend.app.core.sql_insert import validate_postgres_syntax
 from backend.app.db.sqlite_store import SQLiteStore, utc_now_iso
+from backend.app.services.workspace_service import WorkspaceService
 
 KEYRING_SERVICE_NAME = "SalutemFichaStudio"
 VAULT_FILENAME = ".vault.json"
 VALID_SSL_MODES = frozenset(
     {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 )
+_TEMPLATE_ID_NOTICE_RE = re.compile(r"ID\s+gerado:\s*(\d+)", re.IGNORECASE)
 
 SslMode = Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
 
@@ -48,6 +56,19 @@ CREATE TABLE IF NOT EXISTS db_profiles (
 
 CREATE INDEX IF NOT EXISTS idx_db_profiles_default
     ON db_profiles(is_default DESC, name ASC);
+
+CREATE TABLE IF NOT EXISTS db_dry_run_tokens (
+    token TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    sql_sha256 TEXT NOT NULL,
+    simulated_template_id INTEGER NULL,
+    created_at TEXT NOT NULL,
+    consumed_at TEXT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_db_dry_run_tokens_lookup
+    ON db_dry_run_tokens(project_id, profile_id, sql_sha256);
 """
 
 
@@ -610,6 +631,7 @@ class PostgresService:
         self._require_profile_row(profile_id)
         self._delete_password(profile_id)
         with self.store.connection() as conn:
+            conn.execute("DELETE FROM db_dry_run_tokens WHERE profile_id = ?", (profile_id,))
             cursor = conn.execute("DELETE FROM db_profiles WHERE id = ?", (profile_id,))
             deleted = cursor.rowcount > 0
         self._sync_profiles_setting_mirror()
@@ -633,3 +655,398 @@ class PostgresService:
             "db_pass": password,
             "read_only": bool(row["read_only"]),
         }
+
+    # -------------------------------------------------------------------------
+    # PostgreSQL Connection, Notices & Token Signing Helpers
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def compute_sql_sha256(sql_text: str) -> str:
+        """Compute canonical SHA-256 hex digest of stripped SQL text."""
+        normalized = sql_text.strip() if isinstance(sql_text, str) else ""
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def _token_signing_key(self) -> bytes:
+        secret_row = self.store.get_setting("_dry_run_hmac_secret")
+        if isinstance(secret_row, str) and len(secret_row) >= 32:
+            return secret_row.encode("utf-8")
+        generated = secrets.token_hex(32)
+        self.store.set_settings({"_dry_run_hmac_secret": generated})
+        return generated.encode("utf-8")
+
+    def _sign_dry_run_binding(
+        self,
+        token_nonce: str,
+        project_id: str,
+        profile_id: str,
+        sql_sha256: str,
+    ) -> str:
+        payload = f"{token_nonce}:{project_id}:{profile_id}:{sql_sha256}".encode("utf-8")
+        sig = hmac.new(self._token_signing_key(), payload, hashlib.sha256).hexdigest()
+        return f"{token_nonce}.{sig}"
+
+    def _verify_and_get_dry_run_token(
+        self,
+        *,
+        dry_run_token: str,
+        project_id: str,
+        profile_id: str,
+        sql_sha256: str,
+    ) -> dict[str, Any]:
+        if not isinstance(dry_run_token, str) or "." not in dry_run_token.strip():
+            raise DryRunRequiredError(
+                "Invalid or missing dry_run_token. Execute Dry-Run before committing."
+            )
+        cleaned_token = dry_run_token.strip()
+        token_nonce, _ = cleaned_token.split(".", 1)
+        expected_token = self._sign_dry_run_binding(
+            token_nonce,
+            project_id,
+            profile_id,
+            sql_sha256,
+        )
+        if not hmac.compare_digest(expected_token, cleaned_token):
+            raise DryRunRequiredError(
+                "Dry-Run verification failed: SQL text, project_id, or profile_id was modified after Dry-Run."
+            )
+
+        self._ensure_tables()
+        with self.store.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM db_dry_run_tokens WHERE token = ?",
+                (cleaned_token,),
+            ).fetchone()
+
+        if row is None:
+            raise DryRunRequiredError(
+                "Dry-Run token not found in studio store. Execute Dry-Run before committing."
+            )
+        record = dict(row)
+        if record.get("consumed_at") is not None:
+            raise DryRunRequiredError(
+                "Dry-Run token has already been consumed. Run Dry-Run again for a new commit."
+            )
+        if (
+            str(record["project_id"]) != project_id
+            or str(record["profile_id"]) != profile_id
+            or str(record["sql_sha256"]) != sql_sha256
+        ):
+            raise DryRunRequiredError(
+                "Dry-Run token does not match the provided project, profile, or SQL SHA-256."
+            )
+        return record
+
+    @staticmethod
+    @contextmanager
+    def _cursor_context(conn: Any) -> Iterator[Any]:
+        cur = conn.cursor()
+        if hasattr(cur, "__enter__") and hasattr(cur, "__exit__"):
+            with cur as active_cur:
+                yield active_cur
+        else:
+            try:
+                yield cur
+            finally:
+                if hasattr(cur, "close"):
+                    cur.close()
+
+    @staticmethod
+    def _extract_notice_message(diag: Any) -> str:
+        if isinstance(diag, str):
+            return diag.strip()
+        primary = getattr(diag, "message_primary", None) or getattr(diag, "message", None)
+        if primary:
+            return str(primary).strip()
+        return str(diag).strip()
+
+    @classmethod
+    def _parse_template_id_from_notices(cls, notices: list[str]) -> int | None:
+        parsed_id: int | None = None
+        for notice in notices:
+            match = _TEMPLATE_ID_NOTICE_RE.search(notice)
+            if match:
+                parsed_id = int(match.group(1))
+        return parsed_id
+
+    def _open_pg_connection(self, profile_id: str) -> Any:
+        row = self._require_profile_row(profile_id)
+        password = self._load_password(profile_id)
+        conn_kwargs: dict[str, Any] = {
+            "host": str(row["host"]),
+            "port": int(row["port"]),
+            "dbname": str(row["dbname"]),
+            "user": str(row["user"]),
+            "password": password if password else None,
+            "sslmode": str(row["sslmode"] or "prefer"),
+            "autocommit": False,
+        }
+        if self._connection_factory is None:
+            return psycopg.connect(**conn_kwargs, connect_timeout=10)
+
+        try:
+            return self._connection_factory(**conn_kwargs)
+        except TypeError:
+            sig = inspect.signature(self._connection_factory)
+            params = list(sig.parameters.values())
+            if len(params) == 0:
+                return self._connection_factory()
+            if len(params) == 1:
+                return self._connection_factory(conn_kwargs)
+            raise
+
+    # -------------------------------------------------------------------------
+    # Connectivity Test, Transactional Dry-Run & Commit
+    # -------------------------------------------------------------------------
+
+    def test_connection(self, profile_id: str) -> DbConnectionTestResult:
+        """Test PostgreSQL connectivity, measure round-trip latency (ms), and read server version."""
+        profile = self.get_profile(profile_id)
+        started = time.perf_counter()
+        conn: Any = None
+        try:
+            conn = self._open_pg_connection(profile_id)
+            with self._cursor_context(conn) as cur:
+                cur.execute("SELECT version(), current_database(), current_user;")
+                row = cur.fetchone()
+            latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+
+            server_version: str | None = None
+            current_db: str | None = None
+            current_usr: str | None = None
+            if row is not None:
+                if isinstance(row, dict):
+                    server_version = str(row.get("version") or "")
+                    current_db = str(row.get("current_database") or "")
+                    current_usr = str(row.get("current_user") or "")
+                else:
+                    server_version = str(row[0]) if len(row) > 0 and row[0] is not None else None
+                    current_db = str(row[1]) if len(row) > 1 and row[1] is not None else None
+                    current_usr = str(row[2]) if len(row) > 2 and row[2] is not None else None
+
+            return DbConnectionTestResult(
+                profile_id=profile_id,
+                ok=True,
+                latency_ms=latency_ms,
+                server_version=server_version,
+                current_database=current_db,
+                current_user=current_usr,
+                read_only=profile.read_only,
+                message="PostgreSQL connection succeeded.",
+            )
+        except Exception as exc:
+            latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+            return DbConnectionTestResult(
+                profile_id=profile_id,
+                ok=False,
+                latency_ms=latency_ms,
+                read_only=profile.read_only,
+                message="PostgreSQL connection failed.",
+                error=str(exc),
+            )
+        finally:
+            if conn is not None:
+                try:
+                    if hasattr(conn, "rollback"):
+                        conn.rollback()
+                except Exception:
+                    pass
+                finally:
+                    if hasattr(conn, "close"):
+                        conn.close()
+
+    def dry_run_insert(
+        self,
+        project_id: str,
+        profile_id: str,
+        sql_text: str,
+    ) -> DryRunInsertResult:
+        """
+        Execute `sql_text` inside a non-autocommit PostgreSQL transaction, capture `RAISE NOTICE`
+        diagnostics (including `ID gerado: <id>`), ALWAYS call `conn.rollback()` in `finally`,
+        and persist a signed `dry_run_token` bound to `(project_id, profile_id, sha256(sql_text.strip()))`.
+        """
+        profile = self.get_profile(profile_id)
+        if profile.read_only:
+            raise ReadOnlyProfileError(
+                f"Profile '{profile.name}' ({profile_id}) has read_only=True; INSERT dry-run is forbidden."
+            )
+
+        valid, syntax_msg = validate_postgres_syntax(sql_text)
+        if not valid:
+            raise DbProfileValidationError(syntax_msg)
+
+        sql_sha256 = self.compute_sql_sha256(sql_text)
+        notices: list[str] = []
+
+        def _on_notice(diag: Any) -> None:
+            msg = self._extract_notice_message(diag)
+            if msg:
+                notices.append(msg)
+
+        started = time.perf_counter()
+        conn = self._open_pg_connection(profile_id)
+        try:
+            if hasattr(conn, "add_notice_handler"):
+                conn.add_notice_handler(_on_notice)
+            with self._cursor_context(conn) as cur:
+                cur.execute(sql_text)
+        except Exception as exc:
+            if isinstance(exc, PostgresServiceError):
+                raise
+            raise PostgresExecutionError(f"PostgreSQL Dry-Run failed: {exc}") from exc
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                if hasattr(conn, "close"):
+                    conn.close()
+
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        simulated_id = self._parse_template_id_from_notices(notices)
+
+        token_nonce = secrets.token_urlsafe(24)
+        dry_run_token = self._sign_dry_run_binding(
+            token_nonce,
+            project_id,
+            profile_id,
+            sql_sha256,
+        )
+
+        self._ensure_tables()
+        with self.store.connection() as sconn:
+            sconn.execute(
+                """
+                INSERT INTO db_dry_run_tokens (
+                    token, project_id, profile_id, sql_sha256, simulated_template_id, created_at, consumed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    dry_run_token,
+                    project_id,
+                    profile_id,
+                    sql_sha256,
+                    simulated_id,
+                    utc_now_iso(),
+                ),
+            )
+
+        return DryRunInsertResult(
+            ok=True,
+            project_id=project_id,
+            profile_id=profile_id,
+            rolled_back=True,
+            template_id=simulated_id,
+            simulated_template_id=simulated_id,
+            notices=notices,
+            sql_sha256=sql_sha256,
+            dry_run_token=dry_run_token,
+            latency_ms=latency_ms,
+            message="Dry-Run succeeded and transaction was safely rolled back.",
+        )
+
+    def commit_insert(
+        self,
+        project_id: str,
+        profile_id: str,
+        sql_text: str,
+        dry_run_token: str,
+        workspace_service: WorkspaceService | None = None,
+    ) -> CommitInsertResult:
+        """
+        Verify `read_only=False` and exact `(project_id, profile_id, sha256(sql_text.strip()))`
+        `dry_run_token` match, execute `sql_text` with `conn.commit()`, extract `template_id` from
+        PostgreSQL notices, version `sql_insert`, set `project.template_db_id`, and approve `gate2_sql_insert`.
+        """
+        profile = self.get_profile(profile_id)
+        if profile.read_only:
+            raise ReadOnlyProfileError(
+                f"Profile '{profile.name}' ({profile_id}) has read_only=True; COMMIT is forbidden."
+            )
+
+        sql_sha256 = self.compute_sql_sha256(sql_text)
+        self._verify_and_get_dry_run_token(
+            dry_run_token=dry_run_token,
+            project_id=project_id,
+            profile_id=profile_id,
+            sql_sha256=sql_sha256,
+        )
+
+        valid, syntax_msg = validate_postgres_syntax(sql_text)
+        if not valid:
+            raise DbProfileValidationError(syntax_msg)
+
+        notices: list[str] = []
+
+        def _on_notice(diag: Any) -> None:
+            msg = self._extract_notice_message(diag)
+            if msg:
+                notices.append(msg)
+
+        started = time.perf_counter()
+        conn = self._open_pg_connection(profile_id)
+        try:
+            if hasattr(conn, "add_notice_handler"):
+                conn.add_notice_handler(_on_notice)
+            with self._cursor_context(conn) as cur:
+                cur.execute(sql_text)
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            if isinstance(exc, PostgresServiceError):
+                raise
+            raise PostgresExecutionError(f"PostgreSQL COMMIT failed: {exc}") from exc
+        finally:
+            if hasattr(conn, "close"):
+                conn.close()
+
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        template_id = self._parse_template_id_from_notices(notices)
+
+        cleaned_token = dry_run_token.strip()
+        with self.store.connection() as sconn:
+            sconn.execute(
+                "UPDATE db_dry_run_tokens SET consumed_at = ? WHERE token = ?",
+                (utc_now_iso(), cleaned_token),
+            )
+
+        artifact_version: int | None = None
+        resolved_ws = workspace_service or WorkspaceService(store=self.store)
+        project_exists = self.store.get_project(project_id) is not None
+
+        if project_exists or workspace_service is not None:
+            id_suffix = f" (ID gerado: {template_id})" if template_id is not None else ""
+            saved_resp = resolved_ws.save_artifact(
+                project_id,
+                "sql_insert",
+                sql_text,
+                summary=f"Committed SQL INSERT to PostgreSQL profile '{profile.name}'{id_suffix}",
+                created_by="user",
+            )
+            artifact_version = saved_resp.artifact.version_num
+            if template_id is not None:
+                self.store.update_project(project_id, template_db_id=template_id)
+            self.store.upsert_gate(
+                project_id,
+                "gate2_sql_insert",
+                "approved",
+                decided_by="user",
+                notes=f"Committed to PostgreSQL profile '{profile.name}'{id_suffix}",
+            )
+
+        return CommitInsertResult(
+            ok=True,
+            committed=True,
+            project_id=project_id,
+            profile_id=profile_id,
+            template_id=template_id,
+            notices=notices,
+            sql_sha256=sql_sha256,
+            artifact_version=artifact_version,
+            gate2_status="approved",
+            latency_ms=latency_ms,
+            message="SQL INSERT committed successfully.",
+        )
+

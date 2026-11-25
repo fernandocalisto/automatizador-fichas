@@ -21,9 +21,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import harnesses_and_tools, projects, subreports, system
+from backend.app.api import (
+    database,
+    harnesses_and_tools,
+    jasper_preview,
+    projects,
+    subreports,
+    system,
+)
 from backend.app.config import APP_NAME, APP_VERSION, FRONTEND_DIST_DIR
 from backend.app.db.sqlite_store import SQLiteStore
+from backend.app.services.jasper_daemon import JasperDaemonService
+from backend.app.services.postgres_service import PostgresService
 from backend.app.services.subreport_service import SubreportService
 from backend.app.services.workspace_service import WorkspaceService
 
@@ -220,6 +229,14 @@ def _render_dev_status_html(
         <strong>/api/skills</strong>
         <span>Skills Salutem embutidas</span>
       </a>
+      <a class="btn" href="/api/db/profiles">
+        <strong>/api/db/profiles</strong>
+        <span>Perfis PostgreSQL &amp; Vault</span>
+      </a>
+      <a class="btn" href="/api/jasper/health">
+        <strong>/api/jasper/health</strong>
+        <span>Jasper Daemon JVM</span>
+      </a>
     </nav>
 
     <div class="footer">
@@ -236,18 +253,29 @@ def create_app(
     store: SQLiteStore | None = None,
     workspace_service: WorkspaceService | None = None,
     subreport_service: SubreportService | None = None,
+    postgres_service: PostgresService | None = None,
+    jasper_daemon: JasperDaemonService | None = None,
     frontend_dist_dir: Path | None = None,
 ) -> FastAPI:
     """Create and configure the Salutem Ficha Studio FastAPI application."""
     resolved_store = store or SQLiteStore()
     resolved_workspace = workspace_service or WorkspaceService(store=resolved_store)
     resolved_subreports = subreport_service or SubreportService()
+    resolved_postgres = postgres_service or PostgresService(store=resolved_store)
     dist_dir = frontend_dist_dir if frontend_dist_dir is not None else FRONTEND_DIST_DIR
 
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         app_instance.state.store.init_db()
-        yield
+        try:
+            yield
+        finally:
+            active_daemon = getattr(app_instance.state, "jasper_daemon", None)
+            if active_daemon is not None and hasattr(active_daemon, "stop"):
+                try:
+                    active_daemon.stop()
+                except Exception:
+                    pass
 
     app_instance = FastAPI(
         title=APP_NAME,
@@ -259,6 +287,9 @@ def create_app(
     app_instance.state.store = resolved_store
     app_instance.state.workspace_service = resolved_workspace
     app_instance.state.subreport_service = resolved_subreports
+    app_instance.state.postgres_service = resolved_postgres
+    if jasper_daemon is not None:
+        app_instance.state.jasper_daemon = jasper_daemon
 
     app_instance.add_middleware(
         CORSMiddleware,
@@ -272,6 +303,8 @@ def create_app(
     app_instance.include_router(subreports.router)
     app_instance.include_router(system.router)
     app_instance.include_router(harnesses_and_tools.router)
+    app_instance.include_router(database.router)
+    app_instance.include_router(jasper_preview.router)
 
     if (dist_dir / "assets").is_dir():
         app_instance.mount(

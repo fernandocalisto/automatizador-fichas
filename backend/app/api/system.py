@@ -137,3 +137,12 @@ def update_settings(
 def list_skills() -> list[SkillInfo]:
     """List available embedded clinical extraction and JRXML layout skills."""
     return discover_embedded_skills()
+
+
+@router.get("/jasper/health")
+def get_jasper_daemon_health(request: Request) -> dict[str, Any]:
+    """Start (if needed) and verify the warm Java JasperReports daemon health."""
+    from backend.app.services.jasper_daemon import get_jasper_daemon
+
+    daemon = getattr(request.app.state, "jasper_daemon", None) or get_jasper_daemon()
+    return daemon.health()

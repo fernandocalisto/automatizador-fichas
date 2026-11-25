@@ -12,6 +12,8 @@ import java.io.OutputStreamWriter;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Callable;
 
@@ -110,6 +112,19 @@ public class Main implements Callable<Integer> {
                     + "Use @arquivo.json para ler de um arquivo.")
     private String params;
 
+    @Option(names = "--mock-data", paramLabel = "<json>", order = 11,
+            description = "Array JSON de objetos com linhas mock para preenchimento sem banco, "
+                    + "ex.: '[{\"pac_nome\": \"Maria\"}]'. Use @arquivo.json para ler de um arquivo.")
+    private String mockData;
+
+    @Option(names = "--subreport-dir", paramLabel = "<dir>", order = 12,
+            description = "Diretório base para sub-relatórios (sobrescreve SUBREPORT_DIR e caminho_relatorio).")
+    private String subreportDir;
+
+    /** Campos opcionais para invocação programática (modo daemon HTTP). */
+    private Map<String, Object> paramsMap;
+    private List<Map<String, Object>> mockRows;
+
     /** Stdout real (UTF-8), reservada para o JSON de saída. */
     private static PrintStream jsonOut;
 
@@ -200,6 +215,80 @@ public class Main implements Callable<Integer> {
 
     public String getParams() {
         return params;
+    }
+
+    public String getMockData() {
+        return mockData;
+    }
+
+    public String getSubreportDir() {
+        return subreportDir;
+    }
+
+    public Map<String, Object> getParamsMap() {
+        return paramsMap;
+    }
+
+    public List<Map<String, Object>> getMockRows() {
+        return mockRows;
+    }
+
+    // ------------------------------------------------------------------ setters (programmatic / daemon)
+
+    public void setAction(String action) {
+        this.action = action;
+    }
+
+    public void setFormat(String format) {
+        this.format = format;
+    }
+
+    public void setInput(String input) {
+        this.input = input;
+    }
+
+    public void setOutput(String output) {
+        this.output = output;
+    }
+
+    public void setDbUrl(String dbUrl) {
+        this.dbUrl = dbUrl;
+    }
+
+    public void setDbUser(String dbUser) {
+        this.dbUser = dbUser;
+    }
+
+    public void setDbPass(String dbPass) {
+        this.dbPass = dbPass;
+    }
+
+    public void setCustomDriverJar(String customDriverJar) {
+        this.customDriverJar = customDriverJar;
+    }
+
+    public void setCustomDriverClass(String customDriverClass) {
+        this.customDriverClass = customDriverClass;
+    }
+
+    public void setParams(String params) {
+        this.params = params;
+    }
+
+    public void setMockData(String mockData) {
+        this.mockData = mockData;
+    }
+
+    public void setSubreportDir(String subreportDir) {
+        this.subreportDir = subreportDir;
+    }
+
+    public void setParamsMap(Map<String, Object> paramsMap) {
+        this.paramsMap = paramsMap;
+    }
+
+    public void setMockRows(List<Map<String, Object>> mockRows) {
+        this.mockRows = mockRows;
     }
 
     /** Lê as versões do recurso filtrado pelo Maven ({@code jasper-cli.properties}). */

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gerador de Consulta SQL SELECT para Jasper Reports (Padrão Ouro) (src/core/sql_select.py).
+Gerador de Consulta SQL SELECT para Jasper Reports (Padrão Ouro) (`backend/app/core/sql_select.py`).
 
-Implementa `generate_select_jasper()` conforme `spec_sql_select.md` e `gerar_select_jasper.py`:
-- Lê o modelo base (`select_padrao_ouro_jasper.sql`), extrai CABEÇALHO e RODAPÉ via regex
-  (`----- PERGUNTAS -----` e `----- PACIENTE`), mantendo-os intactos
+Implementa `generate_select_jasper()` e `extract_select_fields_metadata()`:
+- Lê o modelo base (`select_padrao_ouro_jasper.sql` em `SQL_TEMPLATES_DIR`), extrai CABEÇALHO e RODAPÉ
+  via regex (`----- PERGUNTAS -----` e `----- PACIENTE`), mantendo-os intactos
 - Gera as projeções agregadas (`max(case when ...)`, `coalesce(bool_or(...), false)`) a partir do JSON
 - Normaliza labels para identificadores SQL válidos (`normalizar_slug`, snake_case ASCII)
 - Resolve colisões de aliases com sufixo de tipo (`sufixo_tipo`) ou contador incremental
 - Expande respostas com `label` vazio e `quantidade_linhas > 1` (`p{idx_p}_r{idx_r}`)
 - Adiciona projeção `{alias}_obs` quando `observacao: true` (na pergunta ou resposta) e `tipo_campo != 'TEXTO'`
-- Reutiliza `validate_postgres_syntax()` e `apply_syntax_highlighting()`.
+- Suporta `param_syntax`: `"jasper"` (`where fc.id = $P{id}`, padrão) ou `"salutem"` (`where fc.id = ${id}`)
+- Extrai metadados ordenados 1:1 dos `<field>` dinâmicos via `extract_select_fields_metadata()`.
 """
 
 from __future__ import annotations
@@ -22,20 +23,33 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from src.core.sql_insert import (
-    POSTGRES_FUNCTIONS,
-    POSTGRES_KEYWORDS,
-    TIPOS_VALIDOS,
-    apply_syntax_highlighting,
-    validate_postgres_syntax,
-)
-from src.utils.resource_path import resource_path
+try:
+    from backend.app.config import SQL_TEMPLATES_DIR
+    from backend.app.core.sql_insert import (
+        POSTGRES_FUNCTIONS,
+        POSTGRES_KEYWORDS,
+        TIPOS_VALIDOS,
+        validate_postgres_syntax,
+    )
+except ModuleNotFoundError:  # pragma: no cover
+    from app.config import SQL_TEMPLATES_DIR  # type: ignore[no-redef]
+    from app.core.sql_insert import (  # type: ignore[no-redef]
+        POSTGRES_FUNCTIONS,
+        POSTGRES_KEYWORDS,
+        TIPOS_VALIDOS,
+        validate_postgres_syntax,
+    )
 
 MODEL_RESOURCE_NAME = "select_padrao_ouro_jasper.sql"
 
 _MODEL_SECTION_REGEX = re.compile(
     r"^(.*?[ \t]*-----\s*PERGUNTAS\s*-----).*?(^[ \t]*-----\s*PACIENTE.*)$",
     re.DOTALL | re.MULTILINE,
+)
+
+_WHERE_ID_PARAM_REGEX = re.compile(
+    r"(\bwhere\s+fc\.id\s*=\s*)(?:\$\{id\}|\$P\{id\})",
+    re.IGNORECASE,
 )
 
 
@@ -145,28 +159,49 @@ def sufixo_tipo(tipo_campo: str) -> str:
     return tipo.lower()[:4] if tipo else "txt"
 
 
-def gerar_secao_perguntas(
+def _resolve_java_class(tipo_campo: str, boolean_style: str, is_obs: bool) -> str:
+    """Mapeia o tipo SQL projetado para a classe Java do `<field>` no JasperReports."""
+    if is_obs:
+        return "java.lang.String"
+    tipo = str(tipo_campo or "").strip().upper()
+    b_style = str(boolean_style or "coalesce_bool_or").strip().lower()
+    if tipo in ("BOOLEANO", "BOOLEANO_RADIO") and b_style == "coalesce_bool_or":
+        return "java.lang.Boolean"
+    if tipo == "NUMERICO":
+        return "java.lang.Double"
+    return "java.lang.String"
+
+
+def _build_question_plan(
     dados_json: dict[str, Any],
     options: dict[str, Any] | None = None,
-) -> str:
-    """Gera o bloco SQL com as colunas agregadas de perguntas e respostas."""
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """
+    Constrói simultaneamente as linhas SQL da seção `----- PERGUNTAS -----`
+    e os metadados ordenados 1:1 dos `<field>` dinâmicos.
+    """
     opts = options or {}
     include_obs: bool = bool(
         opts.get("include_obs", opts.get("include_observations", True))
     )
     include_metadata: bool = bool(opts.get("include_metadata", False))
     only_non_title: bool = bool(opts.get("only_non_title", False))
-    boolean_style: str = str(opts.get("boolean_style", "coalesce_bool_or") or "coalesce_bool_or")
+    boolean_style: str = str(
+        opts.get("boolean_style", "coalesce_bool_or") or "coalesce_bool_or"
+    ).strip().lower()
     column_naming: str = str(opts.get("column_naming", "label_only") or "label_only")
 
     linhas: list[str] = [
         "        ----- PERGUNTAS -----",
         "",
     ]
-
+    fields_metadata: list[dict[str, Any]] = []
     aliases_usados: set[str] = set()
 
     perguntas = dados_json.get("perguntas", [])
+    if not isinstance(perguntas, list):
+        raise ValueError("Estrutura JSON inválida: a chave 'perguntas' (lista) é obrigatória.")
+
     for idx_p, p in enumerate(perguntas, start=1):
         if not isinstance(p, dict):
             raise ValueError(f"Pergunta na posição {idx_p} inválida: esperado um objeto JSON.")
@@ -245,7 +280,11 @@ def gerar_secao_perguntas(
             alias = base_alias
             if alias in aliases_usados:
                 suf = sufixo_tipo(tipo)
-                cand = f"{base_alias}_{suf}" if not base_alias.endswith(f"_{suf}") else f"{base_alias}_2"
+                cand = (
+                    f"{base_alias}_{suf}"
+                    if not base_alias.endswith(f"_{suf}")
+                    else f"{base_alias}_2"
+                )
                 if cand not in aliases_usados:
                     alias = cand
                 else:
@@ -259,6 +298,14 @@ def gerar_secao_perguntas(
                 idx_p, idx_r, tipo, alias, boolean_style=boolean_style
             )
             linhas.append(projecao)
+            fields_metadata.append(
+                {
+                    "name": alias,
+                    "java_class": _resolve_java_class(tipo, boolean_style, is_obs=False),
+                    "source_type": tipo,
+                    "is_obs": False,
+                }
+            )
 
             # Se tiver observação ativa (observacao: true) e NÃO for do tipo TEXTO, puxa também o valor_texto com alias _obs
             tem_observacao = (
@@ -278,15 +325,57 @@ def gerar_secao_perguntas(
                     f"then c.valor_texto end) as {alias_obs},"
                 )
                 linhas.append(proj_obs)
+                fields_metadata.append(
+                    {
+                        "name": alias_obs,
+                        "java_class": _resolve_java_class(tipo, boolean_style, is_obs=True),
+                        "source_type": tipo,
+                        "is_obs": True,
+                    }
+                )
 
         linhas.append("")
 
+    return linhas, fields_metadata
+
+
+def gerar_secao_perguntas(
+    dados_json: dict[str, Any],
+    options: dict[str, Any] | None = None,
+) -> str:
+    """Gera o bloco SQL com as colunas agregadas de perguntas e respostas."""
+    linhas, _ = _build_question_plan(dados_json, options=options)
     return "\n".join(linhas)
 
 
+def extract_select_fields_metadata(
+    json_data: dict[str, Any],
+    options: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Retorna a lista ordenada 1:1 dos `<field>` dinâmicos correspondentes a `gerar_secao_perguntas()`:
+    `[{"name": alias, "java_class": ..., "source_type": tipo_campo, "is_obs": bool}]`.
+    """
+    if not isinstance(json_data, dict) or not json_data:
+        raise ValueError(
+            "JSON inválido ou vazio: esperado um objeto contendo 'template' e 'perguntas'."
+        )
+    if "template" not in json_data or not isinstance(json_data.get("template"), dict):
+        raise ValueError(
+            "Estrutura JSON inválida: a chave 'template' (objeto) é obrigatória."
+        )
+    if "perguntas" not in json_data or not isinstance(json_data.get("perguntas"), list):
+        raise ValueError(
+            "Estrutura JSON inválida: a chave 'perguntas' (lista) é obrigatória."
+        )
+
+    _, fields_metadata = _build_question_plan(json_data, options=options)
+    return fields_metadata
+
+
 def load_default_model_sql() -> str:
-    """Carrega o conteúdo do arquivo modelo `select_padrao_ouro_jasper.sql` via `resource_path`."""
-    model_path = resource_path(MODEL_RESOURCE_NAME)
+    """Carrega o conteúdo do arquivo modelo `select_padrao_ouro_jasper.sql` via `SQL_TEMPLATES_DIR`."""
+    model_path = SQL_TEMPLATES_DIR / MODEL_RESOURCE_NAME
     if not model_path.exists():
         raise FileNotFoundError(
             f"Arquivo modelo não encontrado em: {model_path}"
@@ -304,6 +393,21 @@ def _strip_last_projection_comma(block_text: str) -> str:
         lines[idx] = re.sub(r",\s*$", "", lines[idx])
         break
     return "\n".join(lines)
+
+
+def _apply_param_syntax(sql_text: str, param_syntax: str = "jasper") -> str:
+    """
+    Normaliza o parâmetro do filtro `where fc.id = ...` conforme a sintaxe alvo:
+    - `"jasper"` (padrão): `where fc.id = $P{id}` (para `<queryString>` do `.jrxml`)
+    - `"salutem"`: `where fc.id = ${id}` (sintaxe de interpolação interna do Salutem)
+    """
+    mode = str(param_syntax or "jasper").strip().lower()
+    if mode not in ("jasper", "salutem"):
+        raise ValueError(
+            f"Opção 'param_syntax' inválida: '{param_syntax}'. Valores aceitos: 'jasper', 'salutem'."
+        )
+    token = "$P{id}" if mode == "jasper" else "${id}"
+    return _WHERE_ID_PARAM_REGEX.sub(lambda m: f"{m.group(1)}{token}", sql_text)
 
 
 def _assemble_select_blocks(
@@ -379,7 +483,7 @@ def generate_select_jasper(
     """
     Recebe o dicionário JSON de ficha clínica e o conteúdo (ou caminho) do modelo SQL
     `select_padrao_ouro_jasper.sql`, substituindo a seção `----- PERGUNTAS -----`
-    e respeitando as opções de blocos e formatação em `options`.
+    e respeitando as opções de blocos e formatação em `options` (incluindo `param_syntax`).
 
     Não modifica `json_data`.
     """
@@ -397,6 +501,9 @@ def generate_select_jasper(
         raise ValueError(
             "Estrutura JSON inválida: a chave 'perguntas' (lista) é obrigatória."
         )
+
+    opts = options or {}
+    param_syntax = str(opts.get("param_syntax", "jasper") or "jasper")
 
     if model_sql is None:
         conteudo_modelo = load_default_model_sql()
@@ -428,9 +535,9 @@ def generate_select_jasper(
     cabecalho = re.sub(r"\n?[ \t]*-----\s*PERGUNTAS\s*-----\s*$", "", cabecalho)
     rodape = match.group(2)
 
-    secao_perguntas = gerar_secao_perguntas(json_data, options=options)
-
-    return _assemble_select_blocks(cabecalho, secao_perguntas, rodape, options=options)
+    secao_perguntas = gerar_secao_perguntas(json_data, options=opts)
+    assembled = _assemble_select_blocks(cabecalho, secao_perguntas, rodape, options=opts)
+    return _apply_param_syntax(assembled, param_syntax=param_syntax)
 
 
 def find_unknown_field_types(json_data: dict[str, Any]) -> list[str]:
@@ -472,7 +579,7 @@ __all__ = [
     "POSTGRES_FUNCTIONS",
     "POSTGRES_KEYWORDS",
     "TIPOS_VALIDOS",
-    "apply_syntax_highlighting",
+    "extract_select_fields_metadata",
     "find_unknown_field_types",
     "generate_select_jasper",
     "gerar_projecao_resposta",

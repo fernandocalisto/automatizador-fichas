@@ -16,6 +16,8 @@ Suporta os 3 cenários oficiais de homologação visual da Etapa 2:
 
 from __future__ import annotations
 
+import re
+import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Literal
 
@@ -27,7 +29,9 @@ except ModuleNotFoundError:  # pragma: no cover
     from app.jrxml.scaffolder import STANDARD_SALUTEM_FIELDS  # type: ignore[no-redef]
 
 ScenarioType = Literal["full", "stress", "blank"]
+PreviewRewriteMode = Literal["offline", "db_hybrid"]
 VALID_SCENARIOS: tuple[str, ...] = ("full", "stress", "blank")
+VALID_PREVIEW_MODES: tuple[str, ...] = ("offline", "db_hybrid")
 
 # PNG 1x1 transparente em Base64 (seguro caso assinatura seja exibida como String ou decodificada em <image>)
 _TRANSPARENT_PNG_B64 = (
@@ -718,9 +722,403 @@ def generate_fictitious_row(
     return row
 
 
+# -----------------------------------------------------------------------------
+# Subreports Mock Offline & Reescrita Híbrida/Offline de JRXML (Etapa 2)
+# -----------------------------------------------------------------------------
+
+_SUBREPORT_BLOCK_RE = re.compile(r"(<subreport\b[^>]*>)(.*?)(</subreport>)", re.DOTALL)
+_CONN_EXPR_RE = re.compile(r"<connectionExpression\b[^>]*>.*?</connectionExpression>", re.DOTALL)
+_QUERY_STRING_RE = re.compile(r"<queryString\b[^>]*>.*?</queryString>", re.DOTALL)
+_SIMPLE_SQL_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+
+def _safe_cdata(text: str) -> str:
+    """Protege eventual sequência `]]>` dentro de blocos CDATA."""
+    return text.replace("]]>", "]]]]><![CDATA[>")
+
+
+def _xml_attr_escape(value: str) -> str:
+    """Escapa caracteres especiais em valores de atributos XML."""
+    return (
+        value.replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _det_uuid(seed: str) -> str:
+    """Gera UUID canônico determinístico (`8-4-4-4-12`) único por elemento de subreport mock."""
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"salutem.ficha.studio.mock.{seed}"))
+
+
+def _build_header_mock_subreport(
+    *,
+    report_name: str,
+    width: int,
+    height: int,
+    is_landscape: bool,
+    unit_name: str,
+) -> str:
+    orientation_attr = ' orientation="Landscape"' if is_landscape else ""
+    seed_prefix = f"{report_name}:{width}x{height}:{unit_name}"
+    inner_w = width - 16
+    esc_unit = _safe_cdata(unit_name.strip() or "HOSPITAL SALUTEM — AMBIENTE DE VALIDAÇÃO")
+
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            '<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports '
+            'http://jasperreports.sourceforge.net/xsd/jasperreport.xsd" '
+            f'name="{_xml_attr_escape(report_name)}"{orientation_attr} '
+            f'pageWidth="{width}" pageHeight="{height}" columnWidth="{width}" '
+            'leftMargin="0" rightMargin="0" topMargin="0" bottomMargin="0" '
+            'whenNoDataType="AllSectionsNoDetail" '
+            f'uuid="{_det_uuid(seed_prefix + ":root")}">'
+        ),
+        '\t<parameter name="caminho_relatorio" class="java.lang.String"/>',
+        "\t<title>",
+        f'\t\t<band height="{height}" splitType="Stretch">',
+        "\t\t\t<rectangle>",
+        f'\t\t\t\t<reportElement x="0" y="0" width="{width}" height="{height}" uuid="{_det_uuid(seed_prefix + ":border")}"/>',
+        "\t\t\t\t<graphicElement>",
+        '\t\t\t\t\t<pen lineWidth="0.5" lineColor="#000000"/>',
+        "\t\t\t\t</graphicElement>",
+        "\t\t\t</rectangle>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="8" y="4" width="{inner_w}" height="22" uuid="{_det_uuid(seed_prefix + ":title")}"/>',
+        '\t\t\t\t<textElement textAlignment="Center" verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="10" isBold="true"/>',
+        "\t\t\t\t</textElement>",
+        f"\t\t\t\t<text><![CDATA[{esc_unit}]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="8" y="26" width="{inner_w}" height="15" uuid="{_det_uuid(seed_prefix + ":subtitle")}"/>',
+        '\t\t\t\t<textElement textAlignment="Center" verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="8" isItalic="true"/>',
+        "\t\t\t\t</textElement>",
+        "\t\t\t\t<text><![CDATA[SISTEMA SALUTEM — PRÉ-VISUALIZAÇÃO OFFLINE (DADOS FICTÍCIOS)]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t</band>",
+        "\t</title>",
+        "</jasperReport>",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_patient_mock_subreport(patient_info: dict[str, Any] | None = None) -> str:
+    info = dict(patient_info or {})
+    pac_nome = str(info.get("pac_nome") or info.get("nome") or "MARIA CLARA DE OLIVEIRA SANTOS")
+    pac_pront = str(info.get("pac_pront") or info.get("prontuario") or "50821")
+    atend_id = str(info.get("atendimento_id") or "10042")
+    pac_nasc = str(info.get("pac_nasc") or info.get("nasc") or "12/04/1985 (41a)")
+    pac_sexo = str(info.get("pac_sexo") or info.get("sexo") or "FEMININO")
+    pac_cns = str(info.get("pac_cns") or info.get("cns") or "704801684920341")
+    pac_mae = str(info.get("pac_mae") or info.get("mae") or "ANA PAULA DE OLIVEIRA")
+    pac_cpf = str(info.get("pac_cpf") or info.get("cpf") or "348.912.608-45")
+    pac_log = str(
+        info.get("pac_log")
+        or info.get("endereco")
+        or "AV. DR. PEIXOTO DE CASTRO, 1420 - VILA ZÉLIA"
+    )
+    pac_mun = str(info.get("pac_mun") or info.get("municipio") or "LORENA")
+    pac_uf = str(info.get("pac_uf") or info.get("uf") or "SP")
+
+    row1 = _safe_cdata(f"PACIENTE: {pac_nome}   |   PRONTUÁRIO: {pac_pront}   |   ATEND.: {atend_id}")
+    row2 = _safe_cdata(f"DATA NASC.: {pac_nasc}   |   SEXO: {pac_sexo}   |   CNS: {pac_cns}")
+    row3 = _safe_cdata(f"NOME DA MÃE: {pac_mae}   |   CPF: {pac_cpf}")
+    row4 = _safe_cdata(f"ENDEREÇO: {pac_log} — {pac_mun}/{pac_uf}")
+
+    seed_prefix = f"dados_paciente:{pac_nome}:{atend_id}"
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            '<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports '
+            'http://jasperreports.sourceforge.net/xsd/jasperreport.xsd" '
+            'name="dados_paciente" pageWidth="555" pageHeight="77" columnWidth="555" '
+            'leftMargin="0" rightMargin="0" topMargin="0" bottomMargin="0" '
+            'whenNoDataType="AllSectionsNoDetail" '
+            f'uuid="{_det_uuid(seed_prefix + ":root")}">'
+        ),
+        '\t<parameter name="atendimento_id" class="java.lang.Long"/>',
+        "\t<title>",
+        '\t\t<band height="77" splitType="Stretch">',
+        "\t\t\t<rectangle>",
+        f'\t\t\t\t<reportElement x="0" y="0" width="555" height="77" uuid="{_det_uuid(seed_prefix + ":border")}"/>',
+        "\t\t\t\t<graphicElement>",
+        '\t\t\t\t\t<pen lineWidth="0.5" lineColor="#000000"/>',
+        "\t\t\t\t</graphicElement>",
+        "\t\t\t</rectangle>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="6" y="2" width="543" height="18" uuid="{_det_uuid(seed_prefix + ":r1")}"/>',
+        '\t\t\t\t<textElement verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="8" isBold="true"/>',
+        "\t\t\t\t</textElement>",
+        f"\t\t\t\t<text><![CDATA[{row1}]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="6" y="20" width="543" height="18" uuid="{_det_uuid(seed_prefix + ":r2")}"/>',
+        '\t\t\t\t<textElement verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="8"/>',
+        "\t\t\t\t</textElement>",
+        f"\t\t\t\t<text><![CDATA[{row2}]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="6" y="38" width="543" height="18" uuid="{_det_uuid(seed_prefix + ":r3")}"/>',
+        '\t\t\t\t<textElement verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="8"/>',
+        "\t\t\t\t</textElement>",
+        f"\t\t\t\t<text><![CDATA[{row3}]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="6" y="56" width="543" height="19" uuid="{_det_uuid(seed_prefix + ":r4")}"/>',
+        '\t\t\t\t<textElement verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="8"/>',
+        "\t\t\t\t</textElement>",
+        f"\t\t\t\t<text><![CDATA[{row4}]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t</band>",
+        "\t</title>",
+        "</jasperReport>",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _build_footer_mock_subreport(unit_name: str) -> str:
+    seed_prefix = f"rodape_retrato:{unit_name}"
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            '<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports '
+            'http://jasperreports.sourceforge.net/xsd/jasperreport.xsd" '
+            'name="rodape_retrato" pageWidth="555" pageHeight="17" columnWidth="555" '
+            'leftMargin="0" rightMargin="0" topMargin="0" bottomMargin="0" '
+            'whenNoDataType="AllSectionsNoDetail" '
+            f'uuid="{_det_uuid(seed_prefix + ":root")}">'
+        ),
+        '\t<parameter name="caminho_relatorio" class="java.lang.String"/>',
+        "\t<title>",
+        '\t\t<band height="17" splitType="Stretch">',
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="0" y="0" width="385" height="17" uuid="{_det_uuid(seed_prefix + ":left")}"/>',
+        "\t\t\t\t<box>",
+        '\t\t\t\t\t<topPen lineWidth="0.5" lineStyle="Solid" lineColor="#000000"/>',
+        "\t\t\t\t</box>",
+        '\t\t\t\t<textElement textAlignment="Left" verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="7"/>',
+        "\t\t\t\t</textElement>",
+        "\t\t\t\t<text><![CDATA[Salutem Ficha Studio — Pré-visualização de Validação Visual (Sem Valor Legal)]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t\t<staticText>",
+        f'\t\t\t\t<reportElement x="385" y="0" width="170" height="17" uuid="{_det_uuid(seed_prefix + ":right")}"/>',
+        "\t\t\t\t<box>",
+        '\t\t\t\t\t<topPen lineWidth="0.5" lineStyle="Solid" lineColor="#000000"/>',
+        "\t\t\t\t</box>",
+        '\t\t\t\t<textElement textAlignment="Right" verticalAlignment="Middle">',
+        '\t\t\t\t\t<font size="7" isItalic="true"/>',
+        "\t\t\t\t</textElement>",
+        "\t\t\t\t<text><![CDATA[Ambiente Homologação Offline]]></text>",
+        "\t\t\t</staticText>",
+        "\t\t</band>",
+        "\t</title>",
+        "</jasperReport>",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_offline_mock_subreports_jrxml(
+    unit_name: str = "HOSPITAL SALUTEM — AMBIENTE DE VALIDAÇÃO",
+    patient_info: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """
+    Gera os 4 subreports padrão Salutem em `.jrxml` puro sem dependência de tabelas SQL,
+    renderizando banners de hospital, paciente e rodapé em `<title><band height="...">`:
+    - `cabecalho_retrato.jrxml` (`555x45`)
+    - `cabecalho_paisagem.jrxml` (`800x45`, `orientation="Landscape"`)
+    - `dados_paciente.jrxml` (`555x77`)
+    - `rodape_retrato.jrxml` (`555x17`)
+    """
+    return {
+        "cabecalho_retrato.jrxml": _build_header_mock_subreport(
+            report_name="cabecalho_retrato",
+            width=555,
+            height=45,
+            is_landscape=False,
+            unit_name=unit_name,
+        ),
+        "cabecalho_paisagem.jrxml": _build_header_mock_subreport(
+            report_name="cabecalho_paisagem",
+            width=800,
+            height=45,
+            is_landscape=True,
+            unit_name=unit_name,
+        ),
+        "dados_paciente.jrxml": _build_patient_mock_subreport(patient_info=patient_info),
+        "rodape_retrato.jrxml": _build_footer_mock_subreport(unit_name=unit_name),
+    }
+
+
+def _sql_escape_literal(value: str) -> str:
+    """Escapa aspas simples conforme padrão SQL ANSI/PostgreSQL (`'` -> `''`)."""
+    return value.replace("'", "''")
+
+
+def _format_pg_typed_literal(value: Any, java_class: str) -> str:
+    """Formata um valor Python como literal PostgreSQL explicitamente tipado (`::boolean`, `::varchar`, etc.)."""
+    jclass = (java_class or "java.lang.String").strip()
+
+    if jclass in _BOOLEAN_JAVA_CLASSES:
+        if value is None:
+            return "NULL::boolean"
+        return "true::boolean" if _coerce_to_java_class(value, jclass) else "false::boolean"
+
+    if jclass in ("java.lang.Long", "long", "java.math.BigInteger"):
+        if value is None:
+            return "NULL::bigint"
+        return f"{int(_coerce_to_java_class(value, jclass))}::bigint"
+
+    if jclass in ("java.lang.Integer", "int"):
+        if value is None:
+            return "NULL::integer"
+        return f"{int(_coerce_to_java_class(value, jclass))}::integer"
+
+    if jclass in ("java.lang.Short", "short", "java.lang.Byte"):
+        if value is None:
+            return "NULL::smallint"
+        return f"{int(_coerce_to_java_class(value, jclass))}::smallint"
+
+    if jclass == "java.math.BigDecimal":
+        if value is None:
+            return "NULL::numeric"
+        return f"{float(_coerce_to_java_class(value, jclass))}::numeric"
+
+    if jclass in _FLOAT_JAVA_CLASSES:
+        if value is None:
+            return "NULL::double precision"
+        return f"{float(_coerce_to_java_class(value, jclass))}::double precision"
+
+    if jclass in ("java.sql.Date", "java.util.Date"):
+        if value is None:
+            return "NULL::date"
+        coerced = _coerce_to_java_class(value, jclass)
+        return f"'{_sql_escape_literal(str(coerced))}'::date"
+
+    if jclass == "java.sql.Timestamp":
+        if value is None:
+            return "NULL::timestamp"
+        return f"'{_sql_escape_literal(str(value).strip())}'::timestamp"
+
+    if jclass == "java.sql.Time":
+        if value is None:
+            return "NULL::time"
+        return f"'{_sql_escape_literal(str(value).strip())}'::time"
+
+    if value is None:
+        return "NULL::varchar"
+    return f"'{_sql_escape_literal(str(value))}'::varchar"
+
+
+def _format_pg_alias(field_name: str) -> str:
+    if _SIMPLE_SQL_IDENT_RE.match(field_name):
+        return field_name
+    escaped = field_name.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _build_hybrid_select_sql(
+    declared_fields: list[tuple[str, str]],
+    mock_row: dict[str, Any],
+) -> str:
+    """Constrói `SELECT <literais PostgreSQL tipados>` na ordem exata dos `<field>` declarados."""
+    if not declared_fields:
+        return "SELECT 1::integer AS dummy_row"
+
+    projections: list[str] = []
+    for fname, fclass in declared_fields:
+        if fname in mock_row:
+            raw_val = mock_row[fname]
+        else:
+            raw_val = False if fclass in _BOOLEAN_JAVA_CLASSES else None
+        lit = _format_pg_typed_literal(raw_val, fclass)
+        alias = _format_pg_alias(fname)
+        projections.append(f"    {lit} AS {alias}")
+
+    return "SELECT\n" + ",\n".join(projections)
+
+
+def prepare_preview_jrxml(
+    jrxml_text: str,
+    *,
+    mode: PreviewRewriteMode,
+    mock_row: dict[str, Any],
+) -> str:
+    """
+    Gera uma cópia efêmera do `.jrxml` preparada para pré-visualização (sem jamais mutar o original):
+    - `"offline"`: substitui `<connectionExpression>` dentro de cada `<subreport>` por
+      `<dataSourceExpression><![CDATA[new net.sf.jasperreports.engine.JREmptyDataSource(1)]]></dataSourceExpression>`.
+    - `"db_hybrid"`: mantém `<connectionExpression>` nos `<subreport>` (para que os `.jasper` reais
+      consultem o PostgreSQL) e substitui `<queryString>` do relatório principal por um `SELECT` de
+      literais PostgreSQL tipados para todos os `<field>` declarados na ordem exata.
+    """
+    if mode not in ("offline", "db_hybrid"):
+        raise ValueError(
+            f"Modo de reescrita inválido '{mode}': esperado 'offline' ou 'db_hybrid'."
+        )
+
+    declared_fields = parse_jrxml_declared_fields(jrxml_text)
+    cleaned = jrxml_text.lstrip("\ufeff")
+
+    if mode == "offline":
+        empty_ds_tag = (
+            "<dataSourceExpression>"
+            "<![CDATA[new net.sf.jasperreports.engine.JREmptyDataSource(1)]]>"
+            "</dataSourceExpression>"
+        )
+
+        def _rewrite_subreport(match: re.Match[str]) -> str:
+            open_tag, inner, close_tag = match.group(1), match.group(2), match.group(3)
+            new_inner = _CONN_EXPR_RE.sub(lambda _: empty_ds_tag, inner)
+            return f"{open_tag}{new_inner}{close_tag}"
+
+        rewritten = _SUBREPORT_BLOCK_RE.sub(_rewrite_subreport, cleaned)
+        ET.fromstring(rewritten)
+        return rewritten
+
+    # mode == "db_hybrid"
+    hybrid_sql = _build_hybrid_select_sql(declared_fields, mock_row)
+    new_query_block = f"<queryString>\n\t\t<![CDATA[{_safe_cdata(hybrid_sql)}]]>\n\t</queryString>"
+
+    if _QUERY_STRING_RE.search(cleaned):
+        rewritten = _QUERY_STRING_RE.sub(lambda _: new_query_block, cleaned, count=1)
+    else:
+        insert_anchor = re.search(
+            r"(^[ \t]*<(?:field|background|title|pageHeader|columnHeader|detail)\b)",
+            cleaned,
+            re.MULTILINE,
+        )
+        if insert_anchor:
+            pos = insert_anchor.start()
+            rewritten = f"{cleaned[:pos]}\t{new_query_block}\n{cleaned[pos:]}"
+        else:
+            rewritten = cleaned.replace("</jasperReport>", f"\t{new_query_block}\n</jasperReport>", 1)
+
+    ET.fromstring(rewritten)
+    return rewritten
+
+
 __all__ = [
+    "PreviewRewriteMode",
     "ScenarioType",
+    "VALID_PREVIEW_MODES",
     "VALID_SCENARIOS",
+    "build_offline_mock_subreports_jrxml",
     "generate_fictitious_row",
     "parse_jrxml_declared_fields",
+    "prepare_preview_jrxml",
 ]

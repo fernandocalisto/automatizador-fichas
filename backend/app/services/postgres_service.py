@@ -36,6 +36,36 @@ VALID_SSL_MODES = frozenset(
     {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 )
 _TEMPLATE_ID_NOTICE_RE = re.compile(r"ID\s+gerado:\s*(\d+)", re.IGNORECASE)
+_JASPER_ID_PARAM_RE = re.compile(r"\$P!?\{\s*id\s*\}|\$\{\s*id\s*\}", re.IGNORECASE)
+_LEADING_SQL_COMMENTS_RE = re.compile(
+    r"^\s*(?:(?:--[^\n]*\n)|(?:/\*[\s\S]*?\*/)\s*)*",
+    re.MULTILINE,
+)
+
+PG_OID_TO_JAVA_MAP: dict[int, tuple[str, str]] = {
+    16: ("bool", "java.lang.Boolean"),
+    17: ("bytea", "byte[]"),
+    18: ("char", "java.lang.String"),
+    19: ("name", "java.lang.String"),
+    20: ("int8", "java.lang.Long"),
+    21: ("int2", "java.lang.Integer"),
+    23: ("int4", "java.lang.Integer"),
+    25: ("text", "java.lang.String"),
+    26: ("oid", "java.lang.Long"),
+    114: ("json", "java.lang.String"),
+    700: ("float4", "java.lang.Float"),
+    701: ("float8", "java.lang.Double"),
+    1042: ("bpchar", "java.lang.String"),
+    1043: ("varchar", "java.lang.String"),
+    1082: ("date", "java.sql.Date"),
+    1083: ("time", "java.sql.Time"),
+    1114: ("timestamp", "java.sql.Timestamp"),
+    1184: ("timestamptz", "java.sql.Timestamp"),
+    1266: ("timetz", "java.sql.Time"),
+    1700: ("numeric", "java.math.BigDecimal"),
+    2950: ("uuid", "java.lang.String"),
+    3802: ("jsonb", "java.lang.String"),
+}
 
 SslMode = Literal["disable", "allow", "prefer", "require", "verify-ca", "verify-full"]
 
@@ -1049,4 +1079,238 @@ class PostgresService:
             latency_ms=latency_ms,
             message="SQL INSERT committed successfully.",
         )
+
+    # -------------------------------------------------------------------------
+    # JasperReports SELECT Metadata Inspector & Sample Atendimento Lookup
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def map_pg_oid_to_java(type_oid: int | None) -> tuple[str, str]:
+        """Map a PostgreSQL `pg_type` OID to `(pg_type_name, java_class_name)` for JRXML fields."""
+        if type_oid is None:
+            return ("unknown", "java.lang.String")
+        return PG_OID_TO_JAVA_MAP.get(int(type_oid), (f"oid_{int(type_oid)}", "java.lang.String"))
+
+    @staticmethod
+    def _strip_trailing_semicolons(sql_text: str) -> str:
+        stripped = sql_text.strip()
+        while stripped.endswith(";"):
+            stripped = stripped[:-1].rstrip()
+        return stripped
+
+    @classmethod
+    def _ensure_read_only_select_sql(cls, sql_select: str) -> str:
+        valid, syntax_msg = validate_postgres_syntax(sql_select)
+        if not valid:
+            raise DbProfileValidationError(syntax_msg)
+
+        cleaned = cls._strip_trailing_semicolons(sql_select)
+        body_after_comments = _LEADING_SQL_COMMENTS_RE.sub("", cleaned).lstrip()
+        first_word_match = re.match(r"^([A-Za-z_]+)", body_after_comments)
+        first_kw = first_word_match.group(1).upper() if first_word_match else ""
+        if first_kw not in {"SELECT", "WITH"}:
+            raise DbProfileValidationError(
+                f"Expected a SELECT or WITH query for metadata inspection, got '{first_kw or '<empty>'}'."
+            )
+        return cleaned
+
+    @staticmethod
+    def _prepare_select_for_inspection(
+        cleaned_sql: str,
+        sample_id: int,
+    ) -> tuple[str, tuple[int, ...] | None, int]:
+        """
+        Tokenize SQL so `--` / `/* */` comments are stripped and `'...'` / `"..."` literals
+        are preserved without false-positive `$P{id}` parameter matches, while escaping literal `%`.
+        """
+        segments: list[tuple[str, str]] = []
+        code_buf: list[str] = []
+        i = 0
+        n = len(cleaned_sql)
+
+        def _flush_code() -> None:
+            if code_buf:
+                segments.append(("code", "".join(code_buf)))
+                code_buf.clear()
+
+        while i < n:
+            ch = cleaned_sql[i]
+            # Line comment (-- ...)
+            if ch == "-" and i + 1 < n and cleaned_sql[i + 1] == "-":
+                _flush_code()
+                while i < n and cleaned_sql[i] != "\n":
+                    i += 1
+                if i < n and cleaned_sql[i] == "\n":
+                    segments.append(("ws", "\n"))
+                    i += 1
+                continue
+
+            # Block comment (/* ... */)
+            if ch == "/" and i + 1 < n and cleaned_sql[i + 1] == "*":
+                _flush_code()
+                i += 2
+                newlines = 0
+                while i < n:
+                    if cleaned_sql[i] == "\n":
+                        newlines += 1
+                    if cleaned_sql[i] == "*" and i + 1 < n and cleaned_sql[i + 1] == "/":
+                        i += 2
+                        break
+                    i += 1
+                segments.append(("ws", "\n" * newlines if newlines else " "))
+                continue
+
+            # Single-quoted string literal ('...') or double-quoted identifier ("...")
+            if ch in ("'", '"'):
+                _flush_code()
+                quote = ch
+                start = i
+                i += 1
+                while i < n:
+                    if cleaned_sql[i] == quote:
+                        if i + 1 < n and cleaned_sql[i + 1] == quote:
+                            i += 2
+                            continue
+                        i += 1
+                        break
+                    i += 1
+                segments.append(("literal", cleaned_sql[start:i]))
+                continue
+
+            code_buf.append(ch)
+            i += 1
+
+        _flush_code()
+
+        placeholder_count = sum(
+            len(list(_JASPER_ID_PARAM_RE.finditer(text)))
+            for kind, text in segments
+            if kind == "code"
+        )
+
+        if placeholder_count == 0:
+            rebuilt = "".join(text for _, text in segments).strip()
+            return rebuilt, None, 0
+
+        out_parts: list[str] = []
+        for kind, text in segments:
+            if kind == "ws":
+                out_parts.append(text)
+            elif kind == "literal":
+                out_parts.append(text.replace("%", "%%"))
+            else:
+                escaped_code = text.replace("%", "%%")
+                out_parts.append(_JASPER_ID_PARAM_RE.sub("%s", escaped_code))
+
+        params = tuple([int(sample_id)] * placeholder_count)
+        return "".join(out_parts).strip(), params, placeholder_count
+
+    def inspect_select_query(
+        self,
+        profile_id: str,
+        sql_select: str,
+        sample_id: int = 0,
+    ) -> InspectSelectResult:
+        """
+        Replace Jasper parameter placeholders (`$P{id}`, `$P!{id}`, `${id}`) with `%s`,
+        execute `SELECT * FROM (<sql>) AS _salutem_inspect LIMIT 0` inside a rolled-back
+        transaction, and return column names, PostgreSQL OIDs, and mapped Java classes.
+        """
+        self.get_profile(profile_id)
+        cleaned_sql = self._ensure_read_only_select_sql(sql_select)
+        parameterized_sql, params, placeholder_count = self._prepare_select_for_inspection(
+            cleaned_sql,
+            sample_id=sample_id,
+        )
+
+        wrapped_query = f"SELECT * FROM (\n{parameterized_sql}\n) AS _salutem_inspect LIMIT 0"
+
+        started = time.perf_counter()
+        columns: list[SelectColumnMeta] = []
+        conn = self._open_pg_connection(profile_id)
+        try:
+            with self._cursor_context(conn) as cur:
+                if params is not None:
+                    cur.execute(wrapped_query, params)
+                else:
+                    cur.execute(wrapped_query)
+
+                desc = getattr(cur, "description", None) or []
+                for col in desc:
+                    col_name = (
+                        str(col.name)
+                        if hasattr(col, "name")
+                        else str(col[0])
+                    )
+                    raw_oid = (
+                        col.type_code
+                        if hasattr(col, "type_code")
+                        else (col[1] if len(col) > 1 else None)
+                    )
+                    type_oid = int(raw_oid) if raw_oid is not None else None
+                    null_ok = getattr(
+                        col,
+                        "null_ok",
+                        col[6] if isinstance(col, tuple) and len(col) > 6 else None,
+                    )
+                    pg_type, java_class = self.map_pg_oid_to_java(type_oid)
+                    columns.append(
+                        SelectColumnMeta(
+                            name=col_name,
+                            type_oid=type_oid,
+                            pg_type=pg_type,
+                            java_class=java_class,
+                            nullable=bool(null_ok) if null_ok is not None else None,
+                        )
+                    )
+        except Exception as exc:
+            if isinstance(exc, PostgresServiceError):
+                raise
+            raise PostgresExecutionError(f"SELECT query inspection failed: {exc}") from exc
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                if hasattr(conn, "close"):
+                    conn.close()
+
+        latency_ms = round((time.perf_counter() - started) * 1000.0, 2)
+        return InspectSelectResult(
+            ok=True,
+            profile_id=profile_id,
+            columns=columns,
+            sample_id_used=int(sample_id),
+            parameter_placeholders_replaced=placeholder_count,
+            latency_ms=latency_ms,
+            message=f"Inspected {len(columns)} column(s) with LIMIT 0.",
+        )
+
+    def find_sample_atendimento_id(self, profile_id: str) -> int | None:
+        """Look up the latest `id` from `public.atendimento` for live Jasper preview testing."""
+        self.get_profile(profile_id)
+        conn = self._open_pg_connection(profile_id)
+        try:
+            with self._cursor_context(conn) as cur:
+                cur.execute("SELECT id FROM public.atendimento ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+            if row is None:
+                return None
+            if isinstance(row, dict):
+                val = row.get("id")
+            else:
+                val = row[0] if len(row) > 0 else None
+            return int(val) if val is not None else None
+        except Exception as exc:
+            if isinstance(exc, PostgresServiceError):
+                raise
+            raise PostgresExecutionError(
+                f"Failed to look up sample atendimento ID: {exc}"
+            ) from exc
+        finally:
+            try:
+                conn.rollback()
+            finally:
+                if hasattr(conn, "close"):
+                    conn.close()
+
 

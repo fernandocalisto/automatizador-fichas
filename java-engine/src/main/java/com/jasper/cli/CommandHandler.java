@@ -116,7 +116,7 @@ public class CommandHandler {
     private OutputPayload compile() throws CliException {
         Path input = requireInput("jrxml");
         Path output = resolveOutput(input, "jasper");
-        JasperProcessor jp = new JasperProcessor(input);
+        JasperProcessor jp = new JasperProcessor(input, resolveSubreportDir());
         JasperReport report = jp.compileToFile(input, output);
         return OutputPayload.success(OutputPayload.ACTION_COMPILE)
                 .outputFile(output.toString())
@@ -132,7 +132,7 @@ public class CommandHandler {
     }
 
     public OutputPayload handleDecompile(Path input, Path output) throws CliException {
-        JasperProcessor jp = new JasperProcessor(input);
+        JasperProcessor jp = new JasperProcessor(input, resolveSubreportDir());
         JasperReport report = jp.decompileReport(input, output);
         return OutputPayload.success(OutputPayload.ACTION_DECOMPILE)
                 .outputFile(output.toString())
@@ -145,7 +145,7 @@ public class CommandHandler {
     private OutputPayload fill() throws CliException {
         Path input = requireInput("jrxml", "jasper");
         Path output = resolveOutput(input, "jrprint");
-        JasperProcessor jp = new JasperProcessor(input);
+        JasperProcessor jp = new JasperProcessor(input, resolveSubreportDir());
         FillResult r = fillReport(jp, input);
         jp.saveJrprint(r.print, output);
         return r.describe(OutputPayload.success("fill"))
@@ -160,7 +160,7 @@ public class CommandHandler {
         }
         Path input = requireInput("jrxml", "jasper", "jrprint");
         Path output = resolveOutput(input, format);
-        JasperProcessor jp = new JasperProcessor(input);
+        JasperProcessor jp = new JasperProcessor(input, resolveSubreportDir());
 
         OutputPayload out = OutputPayload.success("export");
         JasperPrint print;
@@ -186,7 +186,7 @@ public class CommandHandler {
 
     private OutputPayload inspectParams() throws CliException {
         Path input = requireInput("jrxml", "jasper");
-        JasperProcessor jp = new JasperProcessor(input);
+        JasperProcessor jp = new JasperProcessor(input, resolveSubreportDir());
         JRReport report = "jrxml".equals(JasperProcessor.extension(input))
                 ? jp.loadDesign(input)
                 : jp.loadReport(input);
@@ -197,11 +197,11 @@ public class CommandHandler {
 
     private OutputPayload inspectQuery() throws CliException {
         Path input = requireInput("jrxml", "jasper");
-        JasperProcessor jp = new JasperProcessor(input);
+        JasperProcessor jp = new JasperProcessor(input, resolveSubreportDir());
         JRReport report = "jrxml".equals(JasperProcessor.extension(input))
                 ? jp.loadDesign(input)
                 : jp.loadReport(input);
-        Map<String, Object> rawParams = parseParams(opts.getParams());
+        Map<String, Object> rawParams = resolveRawParams();
         try (Connection conn = openConnection(true)) {
             List<Map<String, Object>> columns = jp.inspectQuery(report, rawParams, conn);
             OutputPayload out = OutputPayload.success("inspect-query")
@@ -224,7 +224,8 @@ public class CommandHandler {
         JasperPrint print;
         JasperReport report;
         boolean compiled;
-        boolean usedConnection;
+        String dataSource;
+        Integer mockRowCount;
         String subreportDir;
         List<String> unknownParameters;
 
@@ -232,8 +233,11 @@ public class CommandHandler {
             out.pages(print.getPages() != null ? print.getPages().size() : 0)
                     .meta("reportName", report.getName())
                     .meta("compiledOnTheFly", compiled)
-                    .meta("dataSource", usedConnection ? "jdbc" : "empty")
+                    .meta("dataSource", dataSource)
                     .meta("subreportDir", subreportDir);
+            if (mockRowCount != null) {
+                out.meta("mockRowCount", mockRowCount);
+            }
             if (!unknownParameters.isEmpty()) {
                 out.meta("unknownParameters", unknownParameters);
             }
@@ -242,7 +246,8 @@ public class CommandHandler {
     }
 
     private FillResult fillReport(JasperProcessor jp, Path input) throws CliException {
-        Map<String, Object> rawParams = parseParams(opts.getParams());
+        Map<String, Object> rawParams = resolveRawParams();
+        List<Map<String, Object>> mockRows = resolveMockRows();
 
         FillResult r = new FillResult();
         r.compiled = "jrxml".equals(JasperProcessor.extension(input));
@@ -252,9 +257,16 @@ public class CommandHandler {
         r.subreportDir = jp.getSubreportDir();
 
         Connection conn = openConnection(false);
-        r.usedConnection = conn != null;
+        if (conn != null) {
+            r.dataSource = "jdbc";
+        } else if (mockRows != null) {
+            r.dataSource = "mock";
+            r.mockRowCount = mockRows.size();
+        } else {
+            r.dataSource = "empty";
+        }
         try {
-            r.print = jp.fill(r.report, params, conn);
+            r.print = jp.fill(r.report, params, conn, mockRows);
         } finally {
             closeQuietly(conn);
         }
@@ -281,24 +293,38 @@ public class CommandHandler {
                 opts.getCustomDriverJar(), opts.getCustomDriverClass());
     }
 
+    private Map<String, Object> resolveRawParams() throws CliException {
+        if (opts.getParamsMap() != null) {
+            return new LinkedHashMap<>(opts.getParamsMap());
+        }
+        return parseParams(opts.getParams());
+    }
+
+    private List<Map<String, Object>> resolveMockRows() throws CliException {
+        if (opts.getMockRows() != null) {
+            return opts.getMockRows();
+        }
+        return parseMockRows(opts.getMockData());
+    }
+
+    private Path resolveSubreportDir() throws CliException {
+        if (DatabaseHelper.isBlank(opts.getSubreportDir())) {
+            return null;
+        }
+        Path dir = toPath(opts.getSubreportDir(), "--subreport-dir");
+        if (!Files.exists(dir) || !Files.isDirectory(dir)) {
+            throw new CliException(ErrorType.IO_ERROR,
+                    "Diretório de sub-relatórios não encontrado ou inválido: " + dir);
+        }
+        return dir;
+    }
+
     /** Interpreta {@code --params}: JSON inline ou {@code @caminho/arquivo.json}. */
     static Map<String, Object> parseParams(String raw) throws CliException {
         if (raw == null || raw.trim().isEmpty()) {
             return new LinkedHashMap<>();
         }
-        String json = raw.trim();
-        if (json.startsWith("@")) {
-            Path file = toPath(json.substring(1), "--params");
-            try {
-                json = new String(Files.readAllBytes(file), StandardCharsets.UTF_8).trim();
-                if (json.startsWith("\uFEFF")) {
-                    json = json.substring(1);
-                }
-            } catch (IOException e) {
-                throw new CliException(ErrorType.IO_ERROR,
-                        "Não foi possível ler o arquivo de parâmetros: " + file, e);
-            }
-        }
+        String json = readInlineOrFileJson(raw, "--params", "parâmetros");
         try {
             JsonNode node = JSON.readTree(json);
             if (node == null || !node.isObject()) {
@@ -312,6 +338,53 @@ public class CommandHandler {
             throw new CliException(ErrorType.INVALID_ARGUMENT,
                     "JSON inválido em --params: " + e.getOriginalMessage(), e);
         }
+    }
+
+    /** Interpreta {@code --mock-data}: array JSON inline ou {@code @caminho/arquivo.json}. */
+    static List<Map<String, Object>> parseMockRows(String raw) throws CliException {
+        if (raw == null || raw.trim().isEmpty()) {
+            return null;
+        }
+        String json = readInlineOrFileJson(raw, "--mock-data", "dados mock");
+        try {
+            JsonNode node = JSON.readTree(json);
+            if (node == null || !node.isArray()) {
+                throw new CliException(ErrorType.INVALID_ARGUMENT,
+                        "--mock-data deve ser um array JSON de objetos, ex.: [{\"pac_nome\": \"Maria\"}]");
+            }
+            List<Map<String, Object>> rows = new ArrayList<>(node.size());
+            for (int i = 0; i < node.size(); i++) {
+                JsonNode item = node.get(i);
+                if (item == null || !item.isObject()) {
+                    throw new CliException(ErrorType.INVALID_ARGUMENT,
+                            "Cada elemento de --mock-data deve ser um objeto JSON (índice " + i + ").");
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> row = JSON.convertValue(item, LinkedHashMap.class);
+                rows.add(row);
+            }
+            return rows;
+        } catch (JsonProcessingException e) {
+            throw new CliException(ErrorType.INVALID_ARGUMENT,
+                    "JSON inválido em --mock-data: " + e.getOriginalMessage(), e);
+        }
+    }
+
+    private static String readInlineOrFileJson(String raw, String option, String label) throws CliException {
+        String json = raw.trim();
+        if (json.startsWith("@")) {
+            Path file = toPath(json.substring(1), option);
+            try {
+                json = new String(Files.readAllBytes(file), StandardCharsets.UTF_8).trim();
+                if (json.startsWith("\uFEFF")) {
+                    json = json.substring(1);
+                }
+            } catch (IOException e) {
+                throw new CliException(ErrorType.IO_ERROR,
+                        "Não foi possível ler o arquivo de " + label + ": " + file, e);
+            }
+        }
+        return json;
     }
 
     private Path requireInput(String... allowedExtensions) throws CliException {

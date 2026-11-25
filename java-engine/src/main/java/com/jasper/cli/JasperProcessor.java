@@ -14,13 +14,17 @@ import net.sf.jasperreports.engine.JasperFillManager;
 import net.sf.jasperreports.engine.JasperPrint;
 import net.sf.jasperreports.engine.JasperReport;
 import net.sf.jasperreports.engine.SimpleJasperReportsContext;
+import net.sf.jasperreports.engine.data.JRMapCollectionDataSource;
 import net.sf.jasperreports.engine.design.JasperDesign;
 import net.sf.jasperreports.engine.util.JRLoader;
 import net.sf.jasperreports.engine.util.JRSaver;
 import net.sf.jasperreports.engine.util.JRXmlWriteHelper;
 import net.sf.jasperreports.engine.xml.JRXmlLoader;
 import net.sf.jasperreports.engine.xml.JRXmlWriter;
+import net.sf.jasperreports.repo.DefaultRepositoryService;
+import net.sf.jasperreports.repo.FileRepositoryPersistenceServiceFactory;
 import net.sf.jasperreports.repo.FileRepositoryService;
+import net.sf.jasperreports.repo.PersistenceServiceFactory;
 import net.sf.jasperreports.repo.RepositoryService;
 
 import java.io.BufferedWriter;
@@ -82,6 +86,7 @@ import java.util.regex.Pattern;
 public final class JasperProcessor {
 
     public static final String SUBREPORT_DIR = "SUBREPORT_DIR";
+    public static final String CAMINHO_RELATORIO = "caminho_relatorio";
     public static final Locale DEFAULT_LOCALE = new Locale("pt", "BR");
 
     /**
@@ -128,20 +133,46 @@ public final class JasperProcessor {
 
     private final SimpleJasperReportsContext context;
     private final Path baseDir;
+    private final Path subreportDirOverride;
 
     /**
      * @param reportFile arquivo de entrada ({@code .jrxml}, {@code .jasper} ou {@code .jrprint})
      */
     public JasperProcessor(Path reportFile) {
+        this(reportFile, null);
+    }
+
+    /**
+     * @param reportFile           arquivo de entrada ({@code .jrxml}, {@code .jasper} ou {@code .jrprint})
+     * @param subreportDirOverride diretório opcional para sobrescrever {@code SUBREPORT_DIR} e {@code caminho_relatorio}
+     */
+    public JasperProcessor(Path reportFile, Path subreportDirOverride) {
         Path abs = reportFile.toAbsolutePath().normalize();
         this.baseDir = abs.getParent();
+        this.subreportDirOverride = subreportDirOverride != null
+                ? subreportDirOverride.toAbsolutePath().normalize()
+                : null;
         this.context = new SimpleJasperReportsContext(DefaultJasperReportsContext.getInstance());
         // Preview tolerante: fontes ausentes na JVM não abortam o preenchimento/exportação.
         context.setProperty("net.sf.jasperreports.awt.ignore.missing.font", "true");
-        if (baseDir != null) {
-            context.setExtensions(RepositoryService.class, Collections.singletonList(
-                    new FileRepositoryService(context, baseDir.toString(), true)));
+        List<RepositoryService> repos = new ArrayList<>(3);
+        if (this.subreportDirOverride != null) {
+            repos.add(new FileRepositoryService(context, this.subreportDirOverride.toString(), true));
         }
+        if (this.baseDir != null && !this.baseDir.equals(this.subreportDirOverride)) {
+            repos.add(new FileRepositoryService(context, this.baseDir.toString(), true));
+        }
+        repos.add(new DefaultRepositoryService(context));
+        context.setExtensions(RepositoryService.class, repos);
+
+        List<PersistenceServiceFactory> persistenceFactories = new ArrayList<>();
+        persistenceFactories.add(FileRepositoryPersistenceServiceFactory.getInstance());
+        List<PersistenceServiceFactory> defaults = DefaultJasperReportsContext.getInstance()
+                .getExtensions(PersistenceServiceFactory.class);
+        if (defaults != null) {
+            persistenceFactories.addAll(defaults);
+        }
+        context.setExtensions(PersistenceServiceFactory.class, persistenceFactories);
     }
 
     // ================================================================== compilação / carga
@@ -525,18 +556,95 @@ public final class JasperProcessor {
 
     /**
      * Preenche o relatório. Sem conexão, usa um {@link JREmptyDataSource} de 1 registro
-     * (modo "mock"), útil para validar layout sem banco.
+     * (modo "empty"), útil para validar layout sem banco.
      */
     public JasperPrint fill(JasperReport report, Map<String, Object> params, Connection conn) throws CliException {
+        return fill(report, params, conn, null);
+    }
+
+    /**
+     * Preenche o relatório via JDBC, {@link JRMapCollectionDataSource} (quando {@code mockRows != null}
+     * e {@code conn == null}) ou {@link JREmptyDataSource} de 1 registro.
+     */
+    public JasperPrint fill(
+            JasperReport report,
+            Map<String, Object> params,
+            Connection conn,
+            List<Map<String, Object>> mockRows) throws CliException {
         try {
             JasperFillManager fm = JasperFillManager.getInstance(context);
-            return conn != null
-                    ? fm.fill(report, params, conn)
-                    : fm.fill(report, params, new JREmptyDataSource(1));
+            if (conn != null) {
+                return fm.fill(report, params, conn);
+            }
+            if (mockRows != null) {
+                Collection<Map<String, ?>> coercedRows = coerceMockRows(report, mockRows);
+                return fm.fill(report, params, new JRMapCollectionDataSource(coercedRows));
+            }
+            return fm.fill(report, params, new JREmptyDataSource(1));
+        } catch (CliException e) {
+            throw e;
         } catch (JRException | RuntimeException | LinkageError e) {
             throw CliException.wrap(e, ErrorType.FILL_ERROR,
                     "Falha ao preencher o relatório " + report.getName());
         }
+    }
+
+    /**
+     * Coage cada linha de {@code mockRows} contra {@link JasperReport#getFields()} ({@link JRField#getValueClass()}).
+     */
+    public Collection<Map<String, ?>> coerceMockRows(
+            JasperReport report,
+            List<Map<String, Object>> mockRows) throws CliException {
+        if (mockRows == null || mockRows.isEmpty()) {
+            return Collections.emptyList();
+        }
+        Map<String, JRField> declaredFields = new LinkedHashMap<>();
+        Map<String, String> lowerToCanonical = new HashMap<>();
+        JRField[] fields = report.getFields();
+        if (fields != null) {
+            for (JRField f : fields) {
+                declaredFields.put(f.getName(), f);
+                lowerToCanonical.putIfAbsent(f.getName().toLowerCase(Locale.ROOT), f.getName());
+            }
+        }
+
+        List<Map<String, ?>> coerced = new ArrayList<>(mockRows.size());
+        for (int rowIdx = 0; rowIdx < mockRows.size(); rowIdx++) {
+            Map<String, Object> rawRow = mockRows.get(rowIdx);
+            Map<String, Object> outRow = new LinkedHashMap<>();
+            for (String fieldName : declaredFields.keySet()) {
+                outRow.put(fieldName, null);
+            }
+            if (rawRow != null) {
+                for (Map.Entry<String, Object> entry : rawRow.entrySet()) {
+                    String rawKey = entry.getKey();
+                    if (rawKey == null) {
+                        continue;
+                    }
+                    Object rawVal = entry.getValue();
+                    JRField field = declaredFields.get(rawKey);
+                    String targetKey = rawKey;
+                    if (field == null) {
+                        String canonical = lowerToCanonical.get(rawKey.toLowerCase(Locale.ROOT));
+                        if (canonical != null && !rawRow.containsKey(canonical)) {
+                            field = declaredFields.get(canonical);
+                            targetKey = canonical;
+                        }
+                    }
+                    Class<?> targetClass = field != null ? safeFieldValueClass(field) : null;
+                    Object convertedVal = convertField(
+                            "mockRows[" + rowIdx + "]." + targetKey,
+                            rawVal,
+                            targetClass);
+                    outRow.put(targetKey, convertedVal);
+                    if (!targetKey.equals(rawKey)) {
+                        outRow.put(rawKey, convertedVal);
+                    }
+                }
+            }
+            coerced.add(outRow);
+        }
+        return coerced;
     }
 
     public void exportPdf(JasperPrint print, Path destination) throws CliException {
@@ -582,8 +690,15 @@ public final class JasperProcessor {
             out.put(name, convert(name, e.getValue(), target));
         }
 
-        if (!out.containsKey(SUBREPORT_DIR) && baseDir != null) {
-            out.put(SUBREPORT_DIR, getSubreportDir());
+        String resolvedSubreportDir = getSubreportDir();
+        if (resolvedSubreportDir != null) {
+            if (!out.containsKey(SUBREPORT_DIR) || out.get(SUBREPORT_DIR) == null) {
+                out.put(SUBREPORT_DIR, resolvedSubreportDir);
+            }
+            if ((!out.containsKey(CAMINHO_RELATORIO) || out.get(CAMINHO_RELATORIO) == null)
+                    && (declared.containsKey(CAMINHO_RELATORIO) || subreportDirOverride != null)) {
+                out.put(CAMINHO_RELATORIO, resolvedSubreportDir);
+            }
         }
         if (!out.containsKey(JRParameter.REPORT_LOCALE)) {
             out.put(JRParameter.REPORT_LOCALE, DEFAULT_LOCALE);
@@ -591,17 +706,27 @@ public final class JasperProcessor {
         return out;
     }
 
-    /** Diretório do relatório com separador {@code /} e barra final. */
+    /** Diretório efetivo de sub-relatórios com separador {@code /} e barra final. */
     public String getSubreportDir() {
-        if (baseDir == null) {
+        Path effective = subreportDirOverride != null ? subreportDirOverride : baseDir;
+        if (effective == null) {
             return null;
         }
-        String dir = baseDir.toString().replace('\\', '/');
+        String dir = effective.toString().replace('\\', '/');
         return dir.endsWith("/") ? dir : dir + "/";
     }
 
     /** Converte um valor JSON para a classe esperada pelo parâmetro. */
     static Object convert(String name, Object value, Class<?> target) throws CliException {
+        return convertValue("parâmetro '" + name + "'", value, target);
+    }
+
+    /** Converte um valor JSON para a classe esperada por um campo de mockRows. */
+    static Object convertField(String fieldRef, Object value, Class<?> target) throws CliException {
+        return convertValue("campo '" + fieldRef + "'", value, target);
+    }
+
+    private static Object convertValue(String label, Object value, Class<?> target) throws CliException {
         if (value == null || target == null || target == Object.class || target.isInstance(value)) {
             return value;
         }
@@ -650,9 +775,9 @@ public final class JasperProcessor {
                 return reflected;
             }
         } catch (RuntimeException e) {
-            throw paramError(name, value, target, e);
+            throw conversionError(label, value, target, e);
         }
-        throw paramError(name, value, target, null);
+        throw conversionError(label, value, target, null);
     }
 
     // ================================================================== inspeção
@@ -1062,15 +1187,23 @@ public final class JasperProcessor {
         }
     }
 
+    private static Class<?> safeFieldValueClass(JRField f) {
+        try {
+            return f.getValueClass();
+        } catch (RuntimeException | LinkageError e) {
+            return null; // classe não carregável: repassa o valor bruto
+        }
+    }
+
     private static void putIfNotNull(Map<String, Object> m, String k, Object v) {
         if (v != null) {
             m.put(k, v);
         }
     }
 
-    private static CliException paramError(String name, Object value, Class<?> target, Throwable cause) {
+    private static CliException conversionError(String label, Object value, Class<?> target, Throwable cause) {
         return new CliException(ErrorType.PARAMETER_ERROR,
-                "Não foi possível converter o parâmetro '" + name + "' (valor: " + value + ") para "
+                "Não foi possível converter o " + label + " (valor: " + value + ") para "
                         + target.getName() + (cause != null ? ": " + CliException.messageOf(cause) : "."),
                 cause);
     }

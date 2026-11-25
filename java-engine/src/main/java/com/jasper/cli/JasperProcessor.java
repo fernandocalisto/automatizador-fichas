@@ -1,0 +1,1263 @@
+package com.jasper.cli;
+
+import net.sf.jasperreports.engine.DefaultJasperReportsContext;
+import net.sf.jasperreports.engine.JREmptyDataSource;
+import net.sf.jasperreports.engine.JRException;
+import net.sf.jasperreports.engine.JRExpression;
+import net.sf.jasperreports.engine.JRField;
+import net.sf.jasperreports.engine.JRParameter;
+import net.sf.jasperreports.engine.JRQuery;
+import net.sf.jasperreports.engine.JRReport;
+import net.sf.jasperreports.engine.JasperCompileManager;
+import net.sf.jasperreports.engine.JasperExportManager;
+import net.sf.jasperreports.engine.JasperFillManager;
+import net.sf.jasperreports.engine.JasperPrint;
+import net.sf.jasperreports.engine.JasperReport;
+import net.sf.jasperreports.engine.SimpleJasperReportsContext;
+import net.sf.jasperreports.engine.design.JasperDesign;
+import net.sf.jasperreports.engine.util.JRLoader;
+import net.sf.jasperreports.engine.util.JRSaver;
+import net.sf.jasperreports.engine.util.JRXmlWriteHelper;
+import net.sf.jasperreports.engine.xml.JRXmlLoader;
+import net.sf.jasperreports.engine.xml.JRXmlWriter;
+import net.sf.jasperreports.repo.FileRepositoryService;
+import net.sf.jasperreports.repo.RepositoryService;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
+import java.io.Writer;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.JDBCType;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.sql.Time;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.time.format.ResolverStyle;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Centraliza as chamadas ao JasperReports ({@link JasperCompileManager},
+ * {@link JasperFillManager} e {@link JasperExportManager}) e a preparação dos parâmetros.
+ *
+ * <p>Cada instância é vinculada ao diretório do relatório de entrada: esse diretório é
+ * registrado como repositório de arquivos (para resolver sub-relatórios e imagens com
+ * caminhos relativos) e é injetado em {@code SUBREPORT_DIR}.</p>
+ */
+public final class JasperProcessor {
+
+    public static final String SUBREPORT_DIR = "SUBREPORT_DIR";
+    public static final Locale DEFAULT_LOCALE = new Locale("pt", "BR");
+
+    /**
+     * Ordem lógica canônica dos elementos filhos diretos de {@code <jasperReport>}.
+     */
+    public static final List<String> REPORT_ELEMENT_ORDER = Collections.unmodifiableList(Arrays.asList(
+            "property",
+            "propertyExpression",
+            "import",
+            "template",
+            "reportFont",
+            "style",
+            "subDataset",
+            "scriptlet",
+            "parameter",
+            "queryString",
+            "field",
+            "sortField",
+            "variable",
+            "filterExpression",
+            "group",
+            "background",
+            "title",
+            "pageHeader",
+            "columnHeader",
+            "detail",
+            "columnFooter",
+            "pageFooter",
+            "lastPageFooter",
+            "summary",
+            "noData"
+    ));
+
+    private static final DateTimeFormatter[] DATE_TIME_FORMATS = {
+            DateTimeFormatter.ISO_LOCAL_DATE_TIME,
+            strict("uuuu-MM-dd HH:mm[:ss][.SSS]"),
+            strict("dd/MM/uuuu HH:mm[:ss]"),
+    };
+    private static final DateTimeFormatter[] DATE_FORMATS = {
+            DateTimeFormatter.ISO_LOCAL_DATE,
+            strict("dd/MM/uuuu"),
+    };
+    private static final DateTimeFormatter TIME_FORMAT = strict("HH:mm[:ss][.SSS]");
+
+    private final SimpleJasperReportsContext context;
+    private final Path baseDir;
+
+    /**
+     * @param reportFile arquivo de entrada ({@code .jrxml}, {@code .jasper} ou {@code .jrprint})
+     */
+    public JasperProcessor(Path reportFile) {
+        Path abs = reportFile.toAbsolutePath().normalize();
+        this.baseDir = abs.getParent();
+        this.context = new SimpleJasperReportsContext(DefaultJasperReportsContext.getInstance());
+        // Preview tolerante: fontes ausentes na JVM não abortam o preenchimento/exportação.
+        context.setProperty("net.sf.jasperreports.awt.ignore.missing.font", "true");
+        if (baseDir != null) {
+            context.setExtensions(RepositoryService.class, Collections.singletonList(
+                    new FileRepositoryService(context, baseDir.toString(), true)));
+        }
+    }
+
+    // ================================================================== compilação / carga
+
+    /** Lê o {@code .jrxml} sem compilar (usado na inspeção de parâmetros). */
+    public JasperDesign loadDesign(Path jrxml) throws CliException {
+        try {
+            return JRXmlLoader.load(jrxml.toFile());
+        } catch (JRException | RuntimeException e) {
+            throw CliException.wrap(e, ErrorType.COMPILATION_ERROR,
+                    "JRXML inválido (" + jrxml.getFileName() + ")");
+        }
+    }
+
+    /** Compila um {@code .jrxml} em memória. */
+    public JasperReport compile(Path jrxml) throws CliException {
+        JasperDesign design = loadDesign(jrxml);
+        ensureSupportedLanguage(design);
+        try {
+            return JasperCompileManager.getInstance(context).compile(design);
+        } catch (JRException | RuntimeException | LinkageError e) {
+            throw CliException.wrap(e, ErrorType.COMPILATION_ERROR,
+                    "Falha ao compilar o relatório " + jrxml.getFileName());
+        }
+    }
+
+    /** Compila um {@code .jrxml} e grava o {@code .jasper} resultante. */
+    public JasperReport compileToFile(Path jrxml, Path destination) throws CliException {
+        JasperReport report = compile(jrxml);
+        save(report, destination, "Falha ao gravar o arquivo compilado");
+        return report;
+    }
+
+    /**
+     * Descompila um arquivo {@code .jasper} para {@code .jrxml} usando {@link JRXmlWriter},
+     * preservando codificação UTF-8 (sem BOM), indentação de 2 espaços e ordem lógica de elementos.
+     */
+    public JasperReport decompileReport(Path inputPath, Path outputPath) throws CliException {
+        String ext = extension(inputPath);
+        if (!"jasper".equals(ext)) {
+            throw new CliException(ErrorType.INVALID_ARGUMENT,
+                    "A ação 'decompile' aceita apenas .jasper em --input (recebido: "
+                            + inputPath.getFileName() + ").");
+        }
+        Object obj = loadObject(inputPath, "Não foi possível ler o arquivo .jasper "
+                + "(arquivo corrompido ou compilado com versão incompatível do JasperReports)");
+        if (!(obj instanceof JasperReport)) {
+            throw new CliException(ErrorType.INVALID_ARGUMENT,
+                    "O arquivo não contém um relatório compilado: " + inputPath);
+        }
+        JasperReport jasperReport = (JasperReport) obj;
+        ensureParentDir(outputPath);
+        try {
+            String rawXml = writeReportXmlWithTwoSpaceIndent(jasperReport);
+            String formattedXml = formatDecompiledJrxml(rawXml);
+            try (OutputStream fos = Files.newOutputStream(outputPath);
+                 Writer osw = new BufferedWriter(new OutputStreamWriter(fos, StandardCharsets.UTF_8))) {
+                osw.write(formattedXml);
+                osw.flush();
+            }
+            return jasperReport;
+        } catch (IOException | RuntimeException | LinkageError e) {
+            throw CliException.wrap(e, ErrorType.IO_ERROR,
+                    "Falha ao descompilar o relatório " + inputPath.getFileName());
+        }
+    }
+
+    private String writeReportXmlWithTwoSpaceIndent(JasperReport jasperReport) {
+        JRXmlWriter xmlWriter = new JRXmlWriter(context) {
+            @Override
+            protected void useWriter(JRXmlWriteHelper writer, String version) {
+                JRXmlWriteHelper twoSpaceHelper = new JRXmlWriteHelper(writer.getUnderlyingWriter()) {
+                    @Override
+                    protected char[] getIndent(int level) {
+                        if (level <= 0) {
+                            return new char[0];
+                        }
+                        char[] indentChars = new char[level * 2];
+                        Arrays.fill(indentChars, ' ');
+                        return indentChars;
+                    }
+                };
+                super.useWriter(twoSpaceHelper, version);
+            }
+        };
+        return xmlWriter.write(jasperReport, "UTF-8");
+    }
+
+    /**
+     * Normaliza o XML gerado pelo {@link JRXmlWriter}:
+     * <ul>
+     *   <li>Remove eventual BOM UTF-8;</li>
+     *   <li>Converte eventuais tabulações de indentação fora de blocos {@code <![CDATA[...]]>} para 2 espaços;</li>
+     *   <li>Garante a ordem lógica dos elementos filhos diretos de {@code <jasperReport>}.</li>
+     * </ul>
+     */
+    static String formatDecompiledJrxml(String rawXml) {
+        if (rawXml == null || rawXml.isEmpty()) {
+            return "";
+        }
+        String xml = rawXml.startsWith("\uFEFF") ? rawXml.substring(1) : rawXml;
+        xml = normalizeIndentationOutsideCdata(xml);
+        xml = reorderReportTopLevelElements(xml);
+        if (!xml.endsWith("\n")) {
+            xml = xml + "\n";
+        }
+        return xml;
+    }
+
+    private static String normalizeIndentationOutsideCdata(String xml) {
+        StringBuilder out = new StringBuilder(xml.length());
+        int idx = 0;
+        final String cdataStart = "<![CDATA[";
+        final String cdataEnd = "]]>";
+        while (idx < xml.length()) {
+            int nextCdata = xml.indexOf(cdataStart, idx);
+            if (nextCdata < 0) {
+                appendNormalizedSegment(out, xml.substring(idx));
+                break;
+            }
+            appendNormalizedSegment(out, xml.substring(idx, nextCdata));
+            int endCdata = xml.indexOf(cdataEnd, nextCdata + cdataStart.length());
+            if (endCdata < 0) {
+                out.append(xml.substring(nextCdata));
+                break;
+            }
+            out.append(xml, nextCdata, endCdata + cdataEnd.length());
+            idx = endCdata + cdataEnd.length();
+        }
+        return out.toString();
+    }
+
+    private static void appendNormalizedSegment(StringBuilder out, String segment) {
+        String normalized = segment.replace("\r\n", "\n").replace('\r', '\n');
+        int i = 0;
+        int len = normalized.length();
+        boolean atLineStart = out.length() == 0 || out.charAt(out.length() - 1) == '\n';
+        while (i < len) {
+            char c = normalized.charAt(i);
+            if (c == '\n') {
+                out.append('\n');
+                atLineStart = true;
+                i++;
+            } else if (atLineStart && c == '\t') {
+                out.append("  ");
+                i++;
+            } else if (atLineStart && c == ' ') {
+                out.append(' ');
+                i++;
+            } else {
+                atLineStart = false;
+                out.append(c);
+                i++;
+            }
+        }
+    }
+
+    private static final class TopLevelElementBlock {
+        final String tagName;
+        final int orderKey;
+        final String rawText;
+
+        TopLevelElementBlock(String tagName, int orderKey, String rawText) {
+            this.tagName = tagName;
+            this.orderKey = orderKey;
+            this.rawText = rawText;
+        }
+    }
+
+    private static int elementOrderIndex(String tagName) {
+        String localName = tagName;
+        int colon = localName.indexOf(':');
+        if (colon >= 0) {
+            localName = localName.substring(colon + 1);
+        }
+        int idx = REPORT_ELEMENT_ORDER.indexOf(localName);
+        return idx >= 0 ? idx : REPORT_ELEMENT_ORDER.size();
+    }
+
+    private static String reorderReportTopLevelElements(String xml) {
+        int rootStart = xml.indexOf("<jasperReport");
+        if (rootStart < 0) {
+            return xml;
+        }
+        int rootOpenEnd = findTagEnd(xml, rootStart);
+        if (rootOpenEnd < 0 || (rootOpenEnd > rootStart && xml.charAt(rootOpenEnd - 1) == '/')) {
+            return xml;
+        }
+        int bodyStart = rootOpenEnd + 1;
+        if (bodyStart < xml.length() && xml.charAt(bodyStart) == '\n') {
+            bodyStart++;
+        }
+        int rootCloseStart = xml.lastIndexOf("</jasperReport>");
+        if (rootCloseStart <= bodyStart) {
+            return xml;
+        }
+
+        List<TopLevelElementBlock> blocks = new ArrayList<>();
+        int pos = bodyStart;
+        while (pos < rootCloseStart) {
+            int lineStart = pos;
+            while (pos < rootCloseStart && (xml.charAt(pos) == ' ' || xml.charAt(pos) == '\t' || xml.charAt(pos) == '\n')) {
+                if (xml.charAt(pos) == '\n') {
+                    lineStart = pos + 1;
+                }
+                pos++;
+            }
+            if (pos >= rootCloseStart) {
+                break;
+            }
+            if (xml.charAt(pos) != '<') {
+                return xml;
+            }
+            if (xml.startsWith("<!--", pos)) {
+                int commentEnd = xml.indexOf("-->", pos + 4);
+                if (commentEnd < 0) {
+                    return xml;
+                }
+                pos = commentEnd + 3;
+                if (pos < rootCloseStart && xml.charAt(pos) == '\n') {
+                    pos++;
+                }
+                continue;
+            }
+            String tagName = readTagName(xml, pos + 1);
+            if (tagName.isEmpty()) {
+                return xml;
+            }
+            int elementEnd = findMatchingElementEnd(xml, pos, rootCloseStart);
+            if (elementEnd < 0) {
+                return xml;
+            }
+            if (elementEnd < rootCloseStart && xml.charAt(elementEnd) == '\n') {
+                elementEnd++;
+            }
+            blocks.add(new TopLevelElementBlock(
+                    tagName,
+                    elementOrderIndex(tagName),
+                    xml.substring(lineStart, elementEnd)
+            ));
+            pos = elementEnd;
+        }
+
+        boolean needsReorder = false;
+        for (int i = 1; i < blocks.size(); i++) {
+            if (blocks.get(i).orderKey < blocks.get(i - 1).orderKey) {
+                needsReorder = true;
+                break;
+            }
+        }
+        if (!needsReorder) {
+            return xml;
+        }
+
+        blocks.sort(Comparator.comparingInt(b -> b.orderKey));
+        StringBuilder sb = new StringBuilder(xml.length());
+        sb.append(xml, 0, bodyStart);
+        for (TopLevelElementBlock b : blocks) {
+            sb.append(b.rawText);
+            if (!b.rawText.endsWith("\n")) {
+                sb.append('\n');
+            }
+        }
+        sb.append(xml.substring(rootCloseStart));
+        return sb.toString();
+    }
+
+    private static int findTagEnd(String xml, int tagStart) {
+        char quote = 0;
+        for (int i = tagStart; i < xml.length(); i++) {
+            char c = xml.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '>') {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String readTagName(String xml, int start) {
+        int i = start;
+        while (i < xml.length()) {
+            char c = xml.charAt(i);
+            if (Character.isWhitespace(c) || c == '>' || c == '/') {
+                break;
+            }
+            i++;
+        }
+        return xml.substring(start, i);
+    }
+
+    private static int findMatchingElementEnd(String xml, int start, int limit) {
+        int depth = 0;
+        int i = start;
+        while (i < limit) {
+            if (xml.startsWith("<![CDATA[", i)) {
+                int endCdata = xml.indexOf("]]>", i + 9);
+                if (endCdata < 0) {
+                    return -1;
+                }
+                i = endCdata + 3;
+                continue;
+            }
+            if (xml.startsWith("<!--", i)) {
+                int endComment = xml.indexOf("-->", i + 4);
+                if (endComment < 0) {
+                    return -1;
+                }
+                i = endComment + 3;
+                continue;
+            }
+            if (xml.charAt(i) == '<') {
+                if (i + 1 < limit && xml.charAt(i + 1) == '/') {
+                    int closeEnd = findTagEnd(xml, i);
+                    if (closeEnd < 0) {
+                        return -1;
+                    }
+                    depth--;
+                    if (depth == 0) {
+                        return closeEnd + 1;
+                    }
+                    i = closeEnd + 1;
+                    continue;
+                }
+                int tagEnd = findTagEnd(xml, i);
+                if (tagEnd < 0) {
+                    return -1;
+                }
+                boolean selfClosing = xml.charAt(tagEnd - 1) == '/';
+                if (!selfClosing) {
+                    depth++;
+                } else if (depth == 0) {
+                    return tagEnd + 1;
+                }
+                i = tagEnd + 1;
+                continue;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    /** Obtém um {@link JasperReport} a partir de {@code .jrxml} (compilando) ou {@code .jasper}. */
+    public JasperReport loadReport(Path input) throws CliException {
+        String ext = extension(input);
+        if ("jrxml".equals(ext)) {
+            return compile(input);
+        }
+        if ("jasper".equals(ext)) {
+            Object obj = loadObject(input, "Não foi possível ler o arquivo .jasper "
+                    + "(arquivo corrompido ou compilado com versão incompatível do JasperReports)");
+            if (!(obj instanceof JasperReport)) {
+                throw new CliException(ErrorType.INVALID_ARGUMENT,
+                        "O arquivo não contém um relatório compilado: " + input);
+            }
+            JasperReport report = (JasperReport) obj;
+            ensureSupportedLanguage(report);
+            return report;
+        }
+        throw new CliException(ErrorType.INVALID_ARGUMENT,
+                "Extensão não suportada para --input: '" + input.getFileName()
+                        + "'. Use .jrxml ou .jasper.");
+    }
+
+    /** Carrega um {@code .jrprint} previamente preenchido. */
+    public JasperPrint loadPrint(Path jrprint) throws CliException {
+        Object obj = loadObject(jrprint, "Não foi possível ler o arquivo .jrprint");
+        if (!(obj instanceof JasperPrint)) {
+            throw new CliException(ErrorType.INVALID_ARGUMENT,
+                    "O arquivo não contém um relatório preenchido (.jrprint): " + jrprint);
+        }
+        return (JasperPrint) obj;
+    }
+
+    // ================================================================== preenchimento / exportação
+
+    /**
+     * Preenche o relatório. Sem conexão, usa um {@link JREmptyDataSource} de 1 registro
+     * (modo "mock"), útil para validar layout sem banco.
+     */
+    public JasperPrint fill(JasperReport report, Map<String, Object> params, Connection conn) throws CliException {
+        try {
+            JasperFillManager fm = JasperFillManager.getInstance(context);
+            return conn != null
+                    ? fm.fill(report, params, conn)
+                    : fm.fill(report, params, new JREmptyDataSource(1));
+        } catch (JRException | RuntimeException | LinkageError e) {
+            throw CliException.wrap(e, ErrorType.FILL_ERROR,
+                    "Falha ao preencher o relatório " + report.getName());
+        }
+    }
+
+    public void exportPdf(JasperPrint print, Path destination) throws CliException {
+        ensureParentDir(destination);
+        try {
+            JasperExportManager.getInstance(context).exportToPdfFile(print, destination.toString());
+        } catch (JRException | RuntimeException | LinkageError e) {
+            throw CliException.wrap(e, ErrorType.EXPORT_ERROR, "Falha ao exportar o PDF");
+        }
+    }
+
+    public void saveJrprint(JasperPrint print, Path destination) throws CliException {
+        save(print, destination, "Falha ao gravar o arquivo .jrprint");
+    }
+
+    // ================================================================== parâmetros
+
+    /**
+     * Converte os parâmetros recebidos via JSON para os tipos declarados no relatório e
+     * injeta {@code SUBREPORT_DIR} e {@code REPORT_LOCALE} (se não informados).
+     *
+     * @param report  relatório (define as classes esperadas)
+     * @param raw     valores vindos do JSON (pode ser vazio)
+     * @param unknown recebe os nomes que não estão declarados no relatório
+     */
+    public Map<String, Object> buildParameters(JasperReport report, Map<String, Object> raw,
+                                               List<String> unknown) throws CliException {
+        Map<String, JRParameter> declared = new HashMap<>();
+        for (JRParameter p : report.getParameters()) {
+            declared.put(p.getName(), p);
+        }
+
+        Map<String, Object> out = new HashMap<>();
+        for (Map.Entry<String, Object> e : raw.entrySet()) {
+            String name = e.getKey();
+            JRParameter p = declared.get(name);
+            Class<?> target = null;
+            if (p == null) {
+                unknown.add(name);
+            } else {
+                target = safeValueClass(p);
+            }
+            out.put(name, convert(name, e.getValue(), target));
+        }
+
+        if (!out.containsKey(SUBREPORT_DIR) && baseDir != null) {
+            out.put(SUBREPORT_DIR, getSubreportDir());
+        }
+        if (!out.containsKey(JRParameter.REPORT_LOCALE)) {
+            out.put(JRParameter.REPORT_LOCALE, DEFAULT_LOCALE);
+        }
+        return out;
+    }
+
+    /** Diretório do relatório com separador {@code /} e barra final. */
+    public String getSubreportDir() {
+        if (baseDir == null) {
+            return null;
+        }
+        String dir = baseDir.toString().replace('\\', '/');
+        return dir.endsWith("/") ? dir : dir + "/";
+    }
+
+    /** Converte um valor JSON para a classe esperada pelo parâmetro. */
+    static Object convert(String name, Object value, Class<?> target) throws CliException {
+        if (value == null || target == null || target == Object.class || target.isInstance(value)) {
+            return value;
+        }
+        try {
+            if (value instanceof String && ((String) value).trim().isEmpty() && target != String.class) {
+                return null;
+            }
+            if (target == String.class) {
+                return String.valueOf(value);
+            }
+            if (Number.class.isAssignableFrom(target)) {
+                return toNumber(value, target);
+            }
+            if (target == Boolean.class) {
+                return toBoolean(value);
+            }
+            if (target == Character.class) {
+                String s = String.valueOf(value);
+                if (s.length() == 1) {
+                    return s.charAt(0);
+                }
+            }
+            if (Date.class.isAssignableFrom(target)) {
+                return toDate(value, target);
+            }
+            if (target == LocalDate.class) {
+                return toLocalDateTime(value).toLocalDate();
+            }
+            if (target == LocalDateTime.class) {
+                return toLocalDateTime(value);
+            }
+            if (target == LocalTime.class) {
+                return toLocalTime(value);
+            }
+            if (target == Locale.class) {
+                return Locale.forLanguageTag(String.valueOf(value).trim().replace('_', '-'));
+            }
+            if (target == TimeZone.class) {
+                return TimeZone.getTimeZone(String.valueOf(value).trim());
+            }
+            if (Collection.class.isAssignableFrom(target)) {
+                return toCollection(value, target);
+            }
+            Object reflected = viaStringFactory(String.valueOf(value), target);
+            if (reflected != null) {
+                return reflected;
+            }
+        } catch (RuntimeException e) {
+            throw paramError(name, value, target, e);
+        }
+        throw paramError(name, value, target, null);
+    }
+
+    // ================================================================== inspeção
+
+    /** Descreve parâmetros (exceto os de sistema), campos e query de um relatório/design. */
+    public static Map<String, Object> describe(JRReport report) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("reportName", report.getName());
+        meta.put("language", report.getLanguage());
+
+        List<Map<String, Object>> params = new ArrayList<>();
+        JRParameter[] declared = report.getParameters();
+        if (declared != null) {
+            for (JRParameter p : declared) {
+                if (p.isSystemDefined()) {
+                    continue;
+                }
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("name", p.getName());
+                m.put("className", p.getValueClassName());
+                putIfNotNull(m, "description", p.getDescription());
+                JRExpression def = p.getDefaultValueExpression();
+                putIfNotNull(m, "defaultValue", def != null ? def.getText() : null);
+                m.put("isForPrompting", p.isForPrompting());
+                params.add(m);
+            }
+        }
+        meta.put("parameters", params);
+
+        List<Map<String, Object>> fields = new ArrayList<>();
+        JRField[] declaredFields = report.getFields();
+        if (declaredFields != null) {
+            for (JRField f : declaredFields) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("name", f.getName());
+                m.put("className", f.getValueClassName());
+                putIfNotNull(m, "description", f.getDescription());
+                fields.add(m);
+            }
+        }
+        meta.put("fields", fields);
+
+        JRQuery query = report.getQuery();
+        if (query != null) {
+            putIfNotNull(meta, "queryString", query.getText());
+            putIfNotNull(meta, "queryLanguage", query.getLanguage());
+        }
+        return meta;
+    }
+
+    /**
+     * Inspeciona os metadados JDBC reais das colunas da query SQL do relatório
+     * sem varrer os dados (usando {@link PreparedStatement#getMetaData()} ou {@code WHERE 1=0} / {@code setMaxRows(1)}).
+     */
+    public List<Map<String, Object>> inspectQuery(JRReport report, Map<String, Object> rawParams, Connection conn)
+            throws CliException {
+        JRQuery query = report.getQuery();
+        if (query == null || query.getText() == null || query.getText().trim().isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Map<String, JRParameter> declared = new HashMap<>();
+        if (report.getParameters() != null) {
+            for (JRParameter p : report.getParameters()) {
+                declared.put(p.getName(), p);
+            }
+        }
+
+        Map<String, Object> convertedParams = new HashMap<>();
+        if (rawParams != null) {
+            for (Map.Entry<String, Object> e : rawParams.entrySet()) {
+                JRParameter p = declared.get(e.getKey());
+                Class<?> target = p != null ? safeValueClass(p) : null;
+                convertedParams.put(e.getKey(), convert(e.getKey(), e.getValue(), target));
+            }
+        }
+
+        String rawSql = query.getText().trim();
+        while (rawSql.endsWith(";")) {
+            rawSql = rawSql.substring(0, rawSql.length() - 1).trim();
+        }
+
+        // 1. Substitui $P!{PARAM} por valor literal ou vazio
+        Pattern bangPattern = Pattern.compile("\\$P!\\{\\s*([^}]+?)\\s*\\}");
+        Matcher bangMatcher = bangPattern.matcher(rawSql);
+        StringBuffer sbBang = new StringBuffer();
+        while (bangMatcher.find()) {
+            String paramName = bangMatcher.group(1).trim();
+            Object val = convertedParams.get(paramName);
+            String replacement = val != null ? String.valueOf(val) : "";
+            bangMatcher.appendReplacement(sbBang, Matcher.quoteReplacement(replacement));
+        }
+        bangMatcher.appendTail(sbBang);
+
+        // 2. Substitui $X{IN|NOTIN|EQUAL|..., col, param} por condição booleana neutra (1=1)
+        Pattern xPattern = Pattern.compile("\\$X\\{[^}]*\\}");
+        String afterX = xPattern.matcher(sbBang.toString()).replaceAll("1=1");
+
+        // 3. Substitui $P{PARAM} por placeholder '?' registrando a ordem dos parâmetros
+        List<String> orderedParams = new ArrayList<>();
+        Pattern pPattern = Pattern.compile("\\$P\\{\\s*([^}]+?)\\s*\\}");
+        Matcher pMatcher = pPattern.matcher(afterX);
+        StringBuffer sbPrepared = new StringBuffer();
+        while (pMatcher.find()) {
+            orderedParams.add(pMatcher.group(1).trim());
+            pMatcher.appendReplacement(sbPrepared, "?");
+        }
+        pMatcher.appendTail(sbPrepared);
+        String preparedSql = sbPrepared.toString().trim();
+
+        // Tenta obter ResultSetMetaData em 3 estágios:
+        // (a) PreparedStatement.getMetaData() direto (sem execução)
+        // (b) Query envelopada com WHERE 1=0
+        // (c) Execução direta com setMaxRows(1)
+        SQLException lastException = null;
+
+        try (PreparedStatement ps = conn.prepareStatement(preparedSql)) {
+            bindInspectionParameters(ps, orderedParams, convertedParams, declared);
+            try {
+                ResultSetMetaData rsmd = ps.getMetaData();
+                if (rsmd != null && rsmd.getColumnCount() > 0) {
+                    return extractColumns(rsmd);
+                }
+            } catch (SQLException e) {
+                lastException = e;
+            }
+        } catch (SQLException e) {
+            lastException = e;
+        }
+
+        String wrappedSql = "SELECT * FROM (\n" + preparedSql + "\n) jasper_inspect_q WHERE 1 = 0";
+        try (PreparedStatement ps = conn.prepareStatement(wrappedSql)) {
+            bindInspectionParameters(ps, orderedParams, convertedParams, declared);
+            ps.setMaxRows(1);
+            try (ResultSet rs = ps.executeQuery()) {
+                ResultSetMetaData rsmd = rs.getMetaData();
+                if (rsmd != null) {
+                    return extractColumns(rsmd);
+                }
+            }
+        } catch (SQLException e) {
+            lastException = e;
+        }
+
+        try (PreparedStatement ps = conn.prepareStatement(preparedSql)) {
+            bindInspectionParameters(ps, orderedParams, convertedParams, declared);
+            ps.setMaxRows(1);
+            try (ResultSet rs = ps.executeQuery()) {
+                ResultSetMetaData rsmd = rs.getMetaData();
+                if (rsmd != null) {
+                    return extractColumns(rsmd);
+                }
+            }
+        } catch (SQLException e) {
+            lastException = e;
+        }
+
+        if (lastException != null) {
+            throw new CliException(ErrorType.SQL_ERROR,
+                    "Falha ao inspecionar metadados da query: " + CliException.describeSql(lastException),
+                    lastException);
+        }
+        return Collections.emptyList();
+    }
+
+    private static void bindInspectionParameters(
+            PreparedStatement ps,
+            List<String> orderedParams,
+            Map<String, Object> convertedParams,
+            Map<String, JRParameter> declared) throws SQLException {
+        for (int i = 0; i < orderedParams.size(); i++) {
+            int paramIdx = i + 1;
+            String name = orderedParams.get(i);
+            Object val = convertedParams.get(name);
+            if (val != null) {
+                if (val instanceof Date && !(val instanceof java.sql.Date)
+                        && !(val instanceof Timestamp) && !(val instanceof Time)) {
+                    ps.setTimestamp(paramIdx, new Timestamp(((Date) val).getTime()));
+                } else {
+                    ps.setObject(paramIdx, val);
+                }
+            } else {
+                JRParameter p = declared.get(name);
+                Class<?> cls = p != null ? safeValueClass(p) : null;
+                ps.setNull(paramIdx, sqlTypeForClass(cls));
+            }
+        }
+    }
+
+    private static int sqlTypeForClass(Class<?> cls) {
+        if (cls == null) {
+            return Types.VARCHAR;
+        }
+        if (cls == String.class) {
+            return Types.VARCHAR;
+        }
+        if (cls == Integer.class || cls == Short.class || cls == Byte.class) {
+            return Types.INTEGER;
+        }
+        if (cls == Long.class || cls == BigInteger.class) {
+            return Types.BIGINT;
+        }
+        if (cls == BigDecimal.class) {
+            return Types.NUMERIC;
+        }
+        if (cls == Double.class || cls == Float.class) {
+            return Types.DOUBLE;
+        }
+        if (cls == Boolean.class) {
+            return Types.BOOLEAN;
+        }
+        if (cls == java.sql.Date.class || cls == LocalDate.class) {
+            return Types.DATE;
+        }
+        if (cls == Time.class || cls == LocalTime.class) {
+            return Types.TIME;
+        }
+        if (Date.class.isAssignableFrom(cls) || cls == LocalDateTime.class) {
+            return Types.TIMESTAMP;
+        }
+        return Types.VARCHAR;
+    }
+
+    private static List<Map<String, Object>> extractColumns(ResultSetMetaData rsmd) throws SQLException {
+        int count = rsmd.getColumnCount();
+        List<Map<String, Object>> cols = new ArrayList<>(count);
+        for (int i = 1; i <= count; i++) {
+            String label = rsmd.getColumnLabel(i);
+            String name = (label != null && !label.trim().isEmpty()) ? label.trim() : rsmd.getColumnName(i);
+            int sqlType = rsmd.getColumnType(i);
+            String jdbcType = resolveJdbcTypeName(rsmd, i, sqlType);
+            int precision = safePrecision(rsmd, i);
+            int scale = safeScale(rsmd, i);
+            int nullable = safeNullable(rsmd, i);
+            String javaClass = resolveJasperJavaClass(rsmd, i, sqlType, precision, scale);
+
+            Map<String, Object> col = new LinkedHashMap<>();
+            col.put("name", name);
+            col.put("jdbcType", jdbcType);
+            col.put("precision", precision);
+            col.put("scale", scale);
+            col.put("nullable", nullable);
+            col.put("javaClass", javaClass);
+            cols.add(col);
+        }
+        return cols;
+    }
+
+    private static String resolveJdbcTypeName(ResultSetMetaData rsmd, int col, int sqlType) {
+        try {
+            return JDBCType.valueOf(sqlType).getName();
+        } catch (IllegalArgumentException ignored) {
+            try {
+                String typeName = rsmd.getColumnTypeName(col);
+                if (typeName != null && !typeName.trim().isEmpty()) {
+                    return typeName.trim().toUpperCase(Locale.ROOT);
+                }
+            } catch (SQLException ignoredSql) {
+                // fallback
+            }
+            return "OTHER";
+        }
+    }
+
+    private static int safePrecision(ResultSetMetaData rsmd, int col) {
+        try {
+            return Math.max(0, rsmd.getPrecision(col));
+        } catch (SQLException | RuntimeException e) {
+            return 0;
+        }
+    }
+
+    private static int safeScale(ResultSetMetaData rsmd, int col) {
+        try {
+            return Math.max(0, rsmd.getScale(col));
+        } catch (SQLException | RuntimeException e) {
+            return 0;
+        }
+    }
+
+    private static int safeNullable(ResultSetMetaData rsmd, int col) {
+        try {
+            return rsmd.isNullable(col);
+        } catch (SQLException | RuntimeException e) {
+            return ResultSetMetaData.columnNullableUnknown;
+        }
+    }
+
+    private static String resolveJasperJavaClass(
+            ResultSetMetaData rsmd, int col, int sqlType, int precision, int scale) {
+        switch (sqlType) {
+            case Types.CHAR:
+            case Types.VARCHAR:
+            case Types.LONGVARCHAR:
+            case Types.NCHAR:
+            case Types.NVARCHAR:
+            case Types.LONGNVARCHAR:
+            case Types.CLOB:
+            case Types.NCLOB:
+                return "java.lang.String";
+            case Types.INTEGER:
+            case Types.SMALLINT:
+            case Types.TINYINT:
+                return "java.lang.Integer";
+            case Types.BIGINT:
+                return "java.lang.Long";
+            case Types.NUMERIC:
+            case Types.DECIMAL:
+                if (scale == 0 && precision > 0 && precision <= 9) {
+                    return "java.lang.Integer";
+                }
+                if (scale == 0 && precision > 9 && precision <= 18) {
+                    return "java.lang.Long";
+                }
+                return "java.math.BigDecimal";
+            case Types.REAL:
+            case Types.FLOAT:
+                return "java.lang.Float";
+            case Types.DOUBLE:
+                return "java.lang.Double";
+            case Types.BOOLEAN:
+            case Types.BIT:
+                return "java.lang.Boolean";
+            case Types.DATE:
+                return "java.util.Date";
+            case Types.TIME:
+            case Types.TIME_WITH_TIMEZONE:
+                return "java.sql.Time";
+            case Types.TIMESTAMP:
+            case Types.TIMESTAMP_WITH_TIMEZONE:
+                return "java.sql.Timestamp";
+            default:
+                try {
+                    String cls = rsmd.getColumnClassName(col);
+                    if (cls != null && !cls.trim().isEmpty()) {
+                        return cls.trim();
+                    }
+                } catch (SQLException | RuntimeException ignored) {
+                    // fallback
+                }
+                return "java.lang.Object";
+        }
+    }
+
+    // ================================================================== utilitários
+
+    public static String extension(Path p) {
+        String n = p.getFileName() != null ? p.getFileName().toString() : "";
+        int i = n.lastIndexOf('.');
+        return i >= 0 ? n.substring(i + 1).toLowerCase(Locale.ROOT) : "";
+    }
+
+    /** Troca a extensão do arquivo (ex.: relatorio.jrxml -> relatorio.pdf). */
+    public static Path withExtension(Path p, String newExt) {
+        String n = p.getFileName().toString();
+        int i = n.lastIndexOf('.');
+        String base = i > 0 ? n.substring(0, i) : n;
+        return p.resolveSibling(base + "." + newExt);
+    }
+
+    private static void ensureSupportedLanguage(JRReport report) throws CliException {
+        String lang = report.getLanguage();
+        if (lang != null && !JRReport.LANGUAGE_JAVA.equalsIgnoreCase(lang.trim())) {
+            throw new CliException(ErrorType.COMPILATION_ERROR,
+                    "O relatório '" + report.getName() + "' usa language=\"" + lang + "\", que não é suportada "
+                            + "por este motor. Altere o atributo language do <jasperReport> para \"java\".");
+        }
+    }
+
+    private Object loadObject(Path file, String errorMessage) throws CliException {
+        try {
+            return JRLoader.loadObject(context, file.toFile());
+        } catch (JRException | RuntimeException | LinkageError e) {
+            throw new CliException(ErrorType.IO_ERROR,
+                    errorMessage + ": " + CliException.messageOf(e), e);
+        }
+    }
+
+    private static void save(Object obj, Path destination, String errorMessage) throws CliException {
+        ensureParentDir(destination);
+        try {
+            JRSaver.saveObject(obj, destination.toFile());
+        } catch (JRException | RuntimeException e) {
+            throw new CliException(ErrorType.IO_ERROR,
+                    errorMessage + " (" + destination + "): " + CliException.messageOf(e), e);
+        }
+    }
+
+    private static void ensureParentDir(Path destination) throws CliException {
+        Path parent = destination.toAbsolutePath().getParent();
+        if (parent == null) {
+            return;
+        }
+        try {
+            Files.createDirectories(parent);
+        } catch (Exception e) {
+            throw new CliException(ErrorType.IO_ERROR,
+                    "Não foi possível criar o diretório de saída: " + parent, e);
+        }
+    }
+
+    private static Class<?> safeValueClass(JRParameter p) {
+        try {
+            return p.getValueClass();
+        } catch (RuntimeException | LinkageError e) {
+            return null; // classe não carregável: repassa o valor bruto
+        }
+    }
+
+    private static void putIfNotNull(Map<String, Object> m, String k, Object v) {
+        if (v != null) {
+            m.put(k, v);
+        }
+    }
+
+    private static CliException paramError(String name, Object value, Class<?> target, Throwable cause) {
+        return new CliException(ErrorType.PARAMETER_ERROR,
+                "Não foi possível converter o parâmetro '" + name + "' (valor: " + value + ") para "
+                        + target.getName() + (cause != null ? ": " + CliException.messageOf(cause) : "."),
+                cause);
+    }
+
+    private static DateTimeFormatter strict(String pattern) {
+        return DateTimeFormatter.ofPattern(pattern).withResolverStyle(ResolverStyle.STRICT);
+    }
+
+    // ---------------------------------------------------------------- números
+
+    private static Object toNumber(Object value, Class<?> target) {
+        BigDecimal bd = toBigDecimal(value);
+        if (target == Integer.class) {
+            return bd.intValueExact();
+        }
+        if (target == Long.class) {
+            return bd.longValueExact();
+        }
+        if (target == Short.class) {
+            return bd.shortValueExact();
+        }
+        if (target == Byte.class) {
+            return bd.byteValueExact();
+        }
+        if (target == Double.class) {
+            return bd.doubleValue();
+        }
+        if (target == Float.class) {
+            return bd.floatValue();
+        }
+        if (target == BigInteger.class) {
+            return bd.toBigIntegerExact();
+        }
+        // BigDecimal, Number e demais subclasses genéricas
+        return bd;
+    }
+
+    private static BigDecimal toBigDecimal(Object v) {
+        if (v instanceof BigDecimal) {
+            return (BigDecimal) v;
+        }
+        if (v instanceof BigInteger) {
+            return new BigDecimal((BigInteger) v);
+        }
+        if (v instanceof Double || v instanceof Float) {
+            return BigDecimal.valueOf(((Number) v).doubleValue());
+        }
+        if (v instanceof Number) {
+            return BigDecimal.valueOf(((Number) v).longValue());
+        }
+        if (v instanceof Boolean) {
+            return (Boolean) v ? BigDecimal.ONE : BigDecimal.ZERO;
+        }
+        String s = String.valueOf(v).trim();
+        if (s.indexOf(',') >= 0) {
+            // Aceita formato brasileiro: "1.234,56" ou "10,5"
+            s = s.replace(".", "").replace(',', '.');
+        }
+        return new BigDecimal(s);
+    }
+
+    private static Boolean toBoolean(Object v) {
+        if (v instanceof Number) {
+            return ((Number) v).doubleValue() != 0d;
+        }
+        String s = String.valueOf(v).trim().toLowerCase(Locale.ROOT);
+        switch (s) {
+            case "true": case "t": case "1": case "s": case "sim": case "y": case "yes":
+                return Boolean.TRUE;
+            case "false": case "f": case "0": case "n": case "nao": case "não": case "no":
+                return Boolean.FALSE;
+            default:
+                throw new IllegalArgumentException("valor booleano não reconhecido");
+        }
+    }
+
+    // ---------------------------------------------------------------- datas
+
+    private static Object toDate(Object value, Class<?> target) {
+        if (target == Time.class) {
+            if (value instanceof Number) {
+                return new Time(((Number) value).longValue());
+            }
+            if (value instanceof Date) {
+                return new Time(((Date) value).getTime());
+            }
+            String s = String.valueOf(value).trim();
+            if (s.length() <= 12 && s.indexOf(':') > 0) {
+                return Time.valueOf(LocalTime.parse(s, TIME_FORMAT));
+            }
+            return new Time(toEpochMillis(value));
+        }
+        long ms = toEpochMillis(value);
+        if (target == Timestamp.class) {
+            return new Timestamp(ms);
+        }
+        if (target == java.sql.Date.class) {
+            return new java.sql.Date(ms);
+        }
+        return new Date(ms);
+    }
+
+    private static long toEpochMillis(Object value) {
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+        if (value instanceof Date) {
+            return ((Date) value).getTime();
+        }
+        String s = String.valueOf(value).trim();
+        if (s.matches("-?\\d{9,}")) {
+            return Long.parseLong(s);
+        }
+        try {
+            return OffsetDateTime.parse(s).toInstant().toEpochMilli(); // 2024-01-31T10:00:00Z / -03:00
+        } catch (DateTimeParseException ignored) {
+            // tenta formatos locais
+        }
+        return toLocalDateTime(s).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+    }
+
+    private static LocalDateTime toLocalDateTime(Object value) {
+        if (value instanceof Number || value instanceof Date) {
+            long ms = value instanceof Number ? ((Number) value).longValue() : ((Date) value).getTime();
+            return LocalDateTime.ofInstant(Instant.ofEpochMilli(ms), ZoneId.systemDefault());
+        }
+        String s = String.valueOf(value).trim();
+        for (DateTimeFormatter f : DATE_TIME_FORMATS) {
+            try {
+                return LocalDateTime.parse(s, f);
+            } catch (DateTimeParseException ignored) {
+                // próximo formato
+            }
+        }
+        for (DateTimeFormatter f : DATE_FORMATS) {
+            try {
+                return LocalDate.parse(s, f).atStartOfDay();
+            } catch (DateTimeParseException ignored) {
+                // próximo formato
+            }
+        }
+        try {
+            return LocalDateTime.ofInstant(OffsetDateTime.parse(s).toInstant(), ZoneId.systemDefault());
+        } catch (DateTimeParseException ignored) {
+            // cai no erro abaixo
+        }
+        throw new IllegalArgumentException("formato de data não reconhecido (use yyyy-MM-dd, "
+                + "yyyy-MM-dd HH:mm:ss, dd/MM/yyyy, ISO-8601 ou epoch em ms)");
+    }
+
+    private static LocalTime toLocalTime(Object value) {
+        String s = String.valueOf(value).trim();
+        try {
+            return LocalTime.parse(s, TIME_FORMAT);
+        } catch (DateTimeParseException e) {
+            return toLocalDateTime(value).toLocalTime();
+        }
+    }
+
+    // ---------------------------------------------------------------- coleções / reflexão
+
+    private static Collection<Object> toCollection(Object value, Class<?> target) {
+        Collection<Object> out = Set.class.isAssignableFrom(target) ? new LinkedHashSet<>() : new ArrayList<>();
+        if (value instanceof Collection) {
+            out.addAll((Collection<?>) value);
+        } else if (value.getClass().isArray()) {
+            Collections.addAll(out, (Object[]) value);
+        } else {
+            out.add(value);
+        }
+        return out;
+    }
+
+    private static Object viaStringFactory(String s, Class<?> target) {
+        try {
+            Method m = target.getMethod("valueOf", String.class);
+            if (Modifier.isStatic(m.getModifiers()) && target.isAssignableFrom(m.getReturnType())) {
+                return m.invoke(null, s.trim());
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // tenta construtor
+        }
+        try {
+            Constructor<?> c = target.getConstructor(String.class);
+            return c.newInstance(s);
+        } catch (ReflectiveOperationException ignored) {
+            return null;
+        }
+    }
+}

@@ -51,10 +51,11 @@ import java.util.concurrent.Callable;
                 "  test-conn       Testa a conexão JDBC e retorna a latência em ms.",
                 "  inspect-params  Lista parâmetros, campos e query de --input (.jrxml/.jasper).",
                 "  inspect-query   Executa a query do relatório no banco (LIMIT 0 / WHERE 1=0) e retorna metadados JDBC das colunas.",
+                "  serve           Inicia o daemon HTTP aquecido em 127.0.0.1 (--port 0 escolhe porta efêmera).",
                 "",
-                "Sem --db-url, fill/export usam uma fonte de dados vazia com 1 registro (modo mock).",
-                "Parâmetros injetados automaticamente: SUBREPORT_DIR (diretório de --input, com '/' final)",
-                "e REPORT_LOCALE (pt_BR), a menos que sejam informados em --params.",
+                "Sem --db-url, fill/export usam --mock-data (JRMapCollectionDataSource) ou 1 registro vazio.",
+                "Parâmetros injetados automaticamente: SUBREPORT_DIR / caminho_relatorio (diretório de --input",
+                "ou --subreport-dir, com '/' final) e REPORT_LOCALE (pt_BR), a menos que sejam informados em --params.",
                 "A senha também pode ser fornecida pela variável de ambiente " + CommandHandler.DB_PASS_ENV + ".",
                 "",
                 "Exemplos:",
@@ -72,7 +73,7 @@ import java.util.concurrent.Callable;
 public class Main implements Callable<Integer> {
 
     @Option(names = "--action", required = true, paramLabel = "<action>", order = 1,
-            description = "Obrigatório. compile | decompile | fill | export | test-conn | inspect-params | inspect-query")
+            description = "Obrigatório. compile | decompile | fill | export | test-conn | inspect-params | inspect-query | serve")
     private String action;
 
     @Option(names = "--format", defaultValue = "pdf", paramLabel = "<format>", order = 2,
@@ -121,6 +122,10 @@ public class Main implements Callable<Integer> {
             description = "Diretório base para sub-relatórios (sobrescreve SUBREPORT_DIR e caminho_relatorio).")
     private String subreportDir;
 
+    @Option(names = "--port", defaultValue = "0", paramLabel = "<port>", order = 13,
+            description = "Porta TCP em 127.0.0.1 para --action serve (padrão: ${DEFAULT-VALUE}, porta efêmera).")
+    private int port;
+
     /** Campos opcionais para invocação programática (modo daemon HTTP). */
     private Map<String, Object> paramsMap;
     private List<Map<String, Object>> mockRows;
@@ -164,6 +169,11 @@ public class Main implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
+        if (action != null && "serve".equalsIgnoreCase(action.trim())) {
+            PrintStream out = jsonOut != null ? jsonOut : System.out;
+            new DaemonServer(port, out).runBlocking();
+            return 0;
+        }
         OutputPayload payload = new CommandHandler(this).handle();
         emit(payload);
         return 0;
@@ -225,6 +235,10 @@ public class Main implements Callable<Integer> {
         return subreportDir;
     }
 
+    public int getPort() {
+        return port;
+    }
+
     public Map<String, Object> getParamsMap() {
         return paramsMap;
     }
@@ -281,6 +295,10 @@ public class Main implements Callable<Integer> {
 
     public void setSubreportDir(String subreportDir) {
         this.subreportDir = subreportDir;
+    }
+
+    public void setPort(int port) {
+        this.port = port;
     }
 
     public void setParamsMap(Map<String, Object> paramsMap) {

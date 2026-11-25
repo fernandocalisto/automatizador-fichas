@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Gerador de Script SQL PostgreSQL INSERT para Fichas Clínicas Salutem (src/core/sql_insert.py).
+Gerador de Script SQL PostgreSQL INSERT para Fichas Clínicas Salutem (backend/app/core/sql_insert.py).
 
 Implementa `generate_insert_sql()` conforme `spec_sql_perguntas.md` e `gerar_sql-v2.py`:
 - Bloco anônimo `DO $$ DECLARE v_template_id bigint; v_pergunta_id bigint; BEGIN ... END $$;`
-- Higienização de OCR (`HOMOGLIFOS_OCR`, `CORRECOES_OCR_EXATAS`, `PADROES_OCR_REGEX`)
+- Higienização de OCR (`HOMOGLIFOS_OCR`, `CORRECOES_OCR_EXATAS`, `PADROES_OCR_REGEX` e regras customizadas)
 - Conversão obrigatória para UPPERCASE em `template.nome`, `pergunta.nome` e `resposta.label`
 - `quantidade_pagina = 1` fixo, `layout = 'ficha-clinica'` (minúsculo), `orientacao` e `posicao_assinatura` em UPPERCASE
 - Validação estrita de `tipo_campo` contra os 11 valores válidos do Salutem
@@ -18,7 +18,21 @@ Implementa `generate_insert_sql()` conforme `spec_sql_perguntas.md` e `gerar_sql
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
+
+try:
+    from backend.app.core.custom_regex import (
+        CustomRegexRule,
+        apply_custom_regex_rules,
+        load_custom_regex_rules,
+    )
+except ModuleNotFoundError:  # pragma: no cover
+    from app.core.custom_regex import (  # type: ignore[no-redef]
+        CustomRegexRule,
+        apply_custom_regex_rules,
+        load_custom_regex_rules,
+    )
 
 TIPOS_VALIDOS = {
     "BOOLEANO",
@@ -101,14 +115,33 @@ def _obter_obrigatorio(resposta: dict[str, Any]) -> Any:
     return resposta.get("obrigatorio")
 
 
+def _resolve_custom_rules(
+    custom_regex_rules: list[Any] | None = None,
+    custom_regex_path: str | Path | None = None,
+) -> list[CustomRegexRule]:
+    """Resolve e combina regras customizadas de OCR a partir de arquivo e/ou lista em memória."""
+    combined: list[CustomRegexRule] = []
+    if custom_regex_path is not None:
+        combined.extend(load_custom_regex_rules(custom_regex_path))
+    if custom_regex_rules is not None:
+        if all(isinstance(r, CustomRegexRule) for r in custom_regex_rules):
+            combined.extend(custom_regex_rules)
+        else:
+            combined.extend(load_custom_regex_rules(custom_regex_rules))
+    return combined
+
+
 def limpar_ocr_texto(
     texto: str | None,
     forcar_maiusculo: bool = False,
     aplicar_ocr: bool = True,
+    custom_regex_rules: list[Any] | None = None,
+    custom_regex_path: str | Path | None = None,
 ) -> str:
     """
-    Higieniza artefatos de OCR (homóglifos gregos/cirílicos, espaços invisíveis e
-    erros ortográficos de digitalização) e aplica conversão opcional para MAIÚSCULAS.
+    Higieniza artefatos de OCR (homóglifos gregos/cirílicos, espaços invisíveis,
+    erros ortográficos de digitalização e regras customizadas) e aplica conversão
+    opcional para MAIÚSCULAS.
     """
     if texto is None:
         return ""
@@ -133,7 +166,17 @@ def limpar_ocr_texto(
         for padrao, substituto in PADROES_OCR_REGEX:
             limpo = padrao.sub(substituto, limpo)
 
-    # 5. Converte para MAIÚSCULAS quando exigido (nomes e labels)
+        # 5. Aplica regras customizadas de OCR (quando configuradas)
+        if custom_regex_rules is not None or custom_regex_path is not None:
+            regras = _resolve_custom_rules(
+                custom_regex_rules=custom_regex_rules,
+                custom_regex_path=custom_regex_path,
+            )
+            if regras:
+                limpo = apply_custom_regex_rules(limpo, regras)
+                limpo = re.sub(r"[ \t]+", " ", limpo).strip()
+
+    # 6. Converte para MAIÚSCULAS quando exigido (nomes e labels)
     if forcar_maiusculo:
         limpo = limpo.upper()
 
@@ -144,6 +187,8 @@ def sql_str(
     valor: Any,
     aplicar_ocr: bool = False,
     forcar_maiusculo: bool = False,
+    custom_regex_rules: list[Any] | None = None,
+    custom_regex_path: str | Path | None = None,
 ) -> str:
     """Formata string ou None para literal SQL com escape seguro de aspas simples."""
     if valor is None:
@@ -153,6 +198,8 @@ def sql_str(
             str(valor),
             forcar_maiusculo=forcar_maiusculo,
             aplicar_ocr=aplicar_ocr,
+            custom_regex_rules=custom_regex_rules,
+            custom_regex_path=custom_regex_path,
         )
     else:
         texto = str(valor)
@@ -223,6 +270,8 @@ def eh_lista_homogenea(
 def eh_serie_texto_vazio(
     respostas: list[dict[str, Any]],
     aplicar_ocr: bool = True,
+    custom_regex_rules: list[Any] | None = None,
+    custom_regex_path: str | Path | None = None,
 ) -> bool:
     """
     Verifica se a pergunta consiste em 1 resposta do tipo TEXTO com label vazio
@@ -234,7 +283,13 @@ def eh_serie_texto_vazio(
     qtd_linhas = int(r.get("quantidade_linhas", 1) if r.get("quantidade_linhas") is not None else 1)
     return (
         str(r.get("tipo_campo") or "").upper() == "TEXTO"
-        and limpar_ocr_texto(r.get("label", ""), aplicar_ocr=aplicar_ocr) == ""
+        and limpar_ocr_texto(
+            r.get("label", ""),
+            aplicar_ocr=aplicar_ocr,
+            custom_regex_rules=custom_regex_rules,
+            custom_regex_path=custom_regex_path,
+        )
+        == ""
         and qtd_linhas >= 1
     )
 
@@ -249,12 +304,14 @@ def generate_insert_sql(
 
     Parâmetros:
         json_data: Dicionário contendo 'template' (dict) e 'perguntas' (list).
-        options: Dicionário opcional de flags de configuração futura:
+        options: Dicionário opcional de flags de configuração:
             - clean_ocr (bool, default True)
             - force_uppercase (bool, default True)
             - use_generate_series (bool, default True)
             - use_unnest (bool, default True)
             - include_comments (bool, default True)
+            - custom_regex_rules (list[dict | CustomRegexRule] | None)
+            - custom_regex_path (str | Path | None)
 
     Levanta:
         ValueError: Se a estrutura do JSON for inválida ou se houver `tipo_campo` fora dos 11 válidos.
@@ -275,6 +332,13 @@ def generate_insert_sql(
     use_unnest_opt: bool = bool(opts.get("use_unnest", True))
     include_comments: bool = bool(opts.get("include_comments", True))
 
+    resolved_custom_rules: list[CustomRegexRule] | None = None
+    if opts.get("custom_regex_rules") is not None or opts.get("custom_regex_path") is not None:
+        resolved_custom_rules = _resolve_custom_rules(
+            custom_regex_rules=opts.get("custom_regex_rules"),
+            custom_regex_path=opts.get("custom_regex_path"),
+        )
+
     t = json_data.get("template", {})
     perguntas = json_data.get("perguntas", [])
 
@@ -286,16 +350,19 @@ def generate_insert_sql(
         str(raw_template_nome),
         forcar_maiusculo=force_upper,
         aplicar_ocr=clean_ocr,
+        custom_regex_rules=resolved_custom_rules,
     )
     nome = sql_str(
         raw_template_nome,
         aplicar_ocr=clean_ocr,
         forcar_maiusculo=force_upper,
+        custom_regex_rules=resolved_custom_rules,
     )
     descricao = sql_str(
         t.get("descricao"),
         aplicar_ocr=clean_ocr,
         forcar_maiusculo=False,
+        custom_regex_rules=resolved_custom_rules,
     )
     ativo = sql_bool(t.get("ativo"), True)
     layout = sql_str("ficha-clinica")  # Regra obrigatória: sempre 'ficha-clinica' (minúsculo)
@@ -355,6 +422,7 @@ def generate_insert_sql(
             p.get("nome", ""),
             forcar_maiusculo=force_upper,
             aplicar_ocr=clean_ocr,
+            custom_regex_rules=resolved_custom_rules,
         )
         p_nome = sql_str(p_nome_limpo)
         p_titulo = sql_bool(p.get("titulo"), False)
@@ -398,7 +466,11 @@ def generate_insert_sql(
                 )
 
         # PADRÃO 1: Pergunta com N linhas de TEXTO com label vazio -> generate_series
-        if use_gen_series and eh_serie_texto_vazio(respostas, aplicar_ocr=clean_ocr):
+        if use_gen_series and eh_serie_texto_vazio(
+            respostas,
+            aplicar_ocr=clean_ocr,
+            custom_regex_rules=resolved_custom_rules,
+        ):
             r = respostas[0]
             qtd = int(r.get("quantidade_linhas", 1) if r.get("quantidade_linhas") is not None else 1)
             obrig = sql_bool(_obter_obrigatorio(r), False)
@@ -436,6 +508,7 @@ def generate_insert_sql(
                     r.get("label", ""),
                     aplicar_ocr=clean_ocr,
                     forcar_maiusculo=force_upper,
+                    custom_regex_rules=resolved_custom_rules,
                 )
                 for r in respostas
             )
@@ -480,7 +553,7 @@ def generate_insert_sql(
                 valores_sql: list[str] = []
                 for idx_r, r in enumerate(respostas_expandidas, start=1):
                     valores_sql.append(
-                        f"        (v_pergunta_id, {sql_str(r.get('label', ''), aplicar_ocr=clean_ocr, forcar_maiusculo=force_upper)}, "
+                        f"        (v_pergunta_id, {sql_str(r.get('label', ''), aplicar_ocr=clean_ocr, forcar_maiusculo=force_upper, custom_regex_rules=resolved_custom_rules)}, "
                         f"{sql_str(str(r.get('tipo_campo')).strip().upper())}, "
                         f"{sql_bool(_obter_obrigatorio(r), False)}, "
                         f"{sql_bool(r.get('importa_historico'), False)}, "
@@ -502,14 +575,14 @@ def generate_insert_sql(
                 valores_sql = []
                 for idx_r, r in enumerate(respostas_expandidas, start=1):
                     valores_sql.append(
-                        f"        (v_pergunta_id, {sql_str(r.get('label', ''), aplicar_ocr=clean_ocr, forcar_maiusculo=force_upper)}, "
+                        f"        (v_pergunta_id, {sql_str(r.get('label', ''), aplicar_ocr=clean_ocr, forcar_maiusculo=force_upper, custom_regex_rules=resolved_custom_rules)}, "
                         f"{sql_str(str(r.get('tipo_campo')).strip().upper())}, "
                         f"{sql_bool(_obter_obrigatorio(r), False)}, "
                         f"{sql_bool(r.get('importa_historico'), False)}, "
                         f"{idx_r}, {sql_bool(r.get('observacao'), False)}, "
                         f"{sql_num(r.get('minimo'), 0)}, "
                         f"{sql_num(r.get('valor_numerico'))}, "
-                        f"{sql_str(r.get('valor_texto'), aplicar_ocr=clean_ocr) if r.get('valor_texto') is not None else 'NULL'}, "
+                        f"{sql_str(r.get('valor_texto'), aplicar_ocr=clean_ocr, custom_regex_rules=resolved_custom_rules) if r.get('valor_texto') is not None else 'NULL'}, "
                         f"{sql_bool(r.get('valor_booleano')) if r.get('valor_booleano') is not None else 'NULL'}, "
                         f"{sql_str(r.get('valor_data'))}, {sql_str(r.get('valor_hora'))}, "
                         f"{sql_str(r.get('cid_codigo'))}, {sql_str(r.get('procedimento_codigo'))}, "

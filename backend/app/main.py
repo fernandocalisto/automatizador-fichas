@@ -9,17 +9,19 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-# Ensure repository root is importable even when invoked as `uvicorn app.main:app` from `backend/`
+# Ensure repository root and backend/ are importable regardless of working directory
+_BACKEND_DIR = str(Path(__file__).resolve().parents[1])
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+for _p in (_BACKEND_DIR, _REPO_ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.api import projects, subreports, system
+from backend.app.api import harnesses_and_tools, projects, subreports, system
 from backend.app.config import APP_NAME, APP_VERSION, FRONTEND_DIST_DIR
 from backend.app.db.sqlite_store import SQLiteStore
 from backend.app.services.subreport_service import SubreportService
@@ -210,6 +212,14 @@ def _render_dev_status_html(
         <strong>/api/subreports</strong>
         <span>Invent&aacute;rio .jasper</span>
       </a>
+      <a class="btn" href="/api/harnesses">
+        <strong>/api/harnesses</strong>
+        <span>AGY, OpenCode, Claude, Codex</span>
+      </a>
+      <a class="btn" href="/api/skills">
+        <strong>/api/skills</strong>
+        <span>Skills Salutem embutidas</span>
+      </a>
     </nav>
 
     <div class="footer">
@@ -261,6 +271,7 @@ def create_app(
     app_instance.include_router(projects.router)
     app_instance.include_router(subreports.router)
     app_instance.include_router(system.router)
+    app_instance.include_router(harnesses_and_tools.router)
 
     if (dist_dir / "assets").is_dir():
         app_instance.mount(

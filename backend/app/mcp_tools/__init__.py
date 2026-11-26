@@ -9,7 +9,6 @@ from .artifact_tools import (
     save_validated_json,
     validate_and_compile_jrxml,
 )
-from .mcp_server import StudioMcpServer
 from .pdf_tools import (
     SALUTEM_BOTTOM_MARGIN,
     SALUTEM_LEFT_MARGIN,
@@ -68,3 +67,11 @@ __all__ = [
     "save_validated_json",
     "validate_and_compile_jrxml",
 ]
+
+
+def __getattr__(name: str):
+    if name == "StudioMcpServer":
+        from .mcp_server import StudioMcpServer
+
+        return StudioMcpServer
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

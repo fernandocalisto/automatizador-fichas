@@ -2,6 +2,37 @@
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
+## [1.0.0] - 2026-11-25
+
+### Fase 1 — Fundação Backend, Workspaces SQLite & Núcleo Salutem
+- **Arquitetura Web FastAPI (`backend/app/`)**: transição do aplicativo desktop PySide6 para a plataforma web local/containerizada **Salutem Ficha Studio**.
+- **Workspaces Persistentes em SQLite (WAL)**: gestão de projetos (modos `pdf`, `json` e `jrxml`), histórico imutável de revisões de artefatos com restauração, e máquina de estados dos 3 Gates (`gate1_json`, `gate2_sql_insert`, `gate3_jrxml`).
+- **Núcleo Salutem Migrado e Testado**: validação dos 11 tipos de campo, geradores determinísticos de SQL `INSERT` (`DO $$`) e `SELECT` Jasper Reports, além de catálogo de subreports padrão (`cabecalho_retrato`, `cabecalho_paisagem`, `dados_paciente`, `rodape_retrato`) com suporte a overrides customizados.
+- **Inspeção de PDF & API REST**: extração de metadados/geometria via `PyMuPDF`, endpoints `/api/health`, `/api/projects`, `/api/subreports`, `/api/settings` e documentação Swagger `/docs`.
+
+### Fase 2 — Harnesses IA, MCP, PostgreSQL Vault & Jasper Daemon JVM
+- **Orquestração de Harnesses IA & Skills Embutidas**: detecção e integração com `agy`, `opencode`, `claude` e `codex`, acompanhada das skills clínicas Salutem e servidor MCP para fluxo assistido com 2 Gates.
+- **Serviço PostgreSQL Seguro (`psycopg` v3 + Cofre)**: CRUD de perfis de banco de dados com senhas protegidas em cofre (`keyring` / `FICHA_STUDIO_VAULT_KEY`), teste de conexão com latência/versão, trava de perfil somente leitura, execução **Dry-Run** (rollback automático) e **Commit** transacional com captura de `template_db_id`.
+- **Jasper Daemon JVM (`java-engine/` -> `resources/bin/jasper-daemon.jar`)**: motor Java 17+ persistente para compilação `.jrxml`, diagnóstico de erros, geração de preview PDF em modo **Mock** ou **Live** (PostgreSQL), scaffold JRXML e exportação de pacote ZIP completo.
+
+### Fase 3 — Interface Web SPA (React 19 + TypeScript + Tailwind v4)
+- **Dashboard de Projetos, Visão Geral & Configurações**: criação de projetos via upload de PDF, JSON ou JRXML, controle visual dos 3 Gates, restauração de revisões, visualizador do PDF original e central de configurações (Perfis PostgreSQL, Subreports `.jasper`, Harnesses/Skills e Preferências).
+- **Form Builder Visual (DnD) & Editor JSON**: edição arrasta-e-solta (`@dnd-kit`) dos campos e seções sincronizada em tempo real com **Monaco Editor**.
+- **Workbench SQL & Banco de Dados**: editores `INSERT` e `SELECT` com opções avançadas de geração, seletor de perfil PostgreSQL, guarda visual de **Dry-Run / Commit** e inspetor de colunas.
+- **Jasper Studio Light**: editor `.jrxml` com diagnósticos e live-reload, visualizador **PDF.js** com seleção de regiões para anotações, alternância Mock/Live e download do pacote ZIP.
+- **Suíte Frontend (`Vitest` + Testing Library)**: cobertura automatizada dos fluxos de projetos, configurações, Form Builder, SQL/DB e Jasper Studio.
+
+### Fase 4 — Launchers Locais, Docker Multi-Stage & Documentação v1.0.0
+- **Launchers Windows PowerShell 5.1+**:
+  - `scripts/start_local.ps1`: validação de `.venv` e `java`, build automático da SPA (`frontend/dist`), seleção automática de porta livre, healthcheck `/api/health`, abertura automática do navegador e encerramento limpo com `Ctrl+C`.
+  - `scripts/dev.ps1`: inicialização paralela de `uvicorn --reload` e Vite dev server com URLs centralizadas e limpeza de árvore de processos ao sair.
+- **Empacotamento Docker Multi-Stage & Compose**:
+  - `Dockerfile` multi-stage (`node:22-alpine` + `python:3.13-slim-bookworm` com `openjdk-17-jre-headless`, fontes DejaVu/Liberation, `libpq5`, `curl`, usuário não-root `studio`, `/data` persistente e `HEALTHCHECK`).
+  - `.dockerignore` otimizado e `docker-compose.yml` com volume nomeado `studio_data:/data` e variável `FICHA_STUDIO_VAULT_KEY`.
+- **Documentação & Testes de Empacotamento**: `README.md` reescrito para `v1.0.0`, `CHANGELOG.md` consolidado e suíte `backend/tests/test_packaging_artifacts.py` garantindo os contratos de empacotamento e sintaxe dos launchers.
+
+---
+
 ## [0.2.0] - 2026-11-14
 
 ### Adicionado

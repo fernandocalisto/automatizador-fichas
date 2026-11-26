@@ -1,9 +1,9 @@
-# Estado Atual do Projeto — Salutem Ficha Studio (`v1.0.0`)
+# Estado Atual do Projeto — Salutem Ficha Studio (`v1.0.0` → Roadmap `v1.1–v1.3`)
 
 > **Última atualização:** 2026-11-26  
-> **Branch principal:** `main`  
+> **Branch principal:** `main` (`4437952`)  
 > **Release publicada:** [`v1.0.0`](https://github.com/fernandocalisto/automatizador-fichas/releases/tag/v1.0.0)  
-> **Status geral:** **Pronto para produção (Fases 1 a 4 + Release Readiness concluídas e validadas em CI/CD)**
+> **Status geral:** **Em produção local + pós-1.0.0 em `main` (Harnesses/MCP padronizados e auto-refresh sem F5); Roadmap `v1.1` → `v1.3` definido**
 
 ---
 
@@ -62,17 +62,30 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
   - `Dockerfile` multi-stage (`node:22-alpine` + `python:3.13-slim-bookworm` + `openjdk-17-jre-headless` + fontes), `.dockerignore` e `docker-compose.yml`.
   - `.github/workflows/build.yml` validando `backend-tests`, `frontend-tests`, `docker-validate` (build + `/api/health`) e publicando automaticamente o bundle portátil `.zip` na GitHub Release em tags `v*`.
 
+### Melhorias Pós-1.0.0 já entregues em `main` (`bc6212a`, `4437952`)
+- **AGY CLI + MCP nativo funcional**:
+  - `AgyHarness` configurado com `--dangerously-skip-permissions` por padrão (`AGY_SKIP_PERMISSIONS`) e provisionamento automático do plugin de workspace `.agents/plugins/salutem/` (`studio` → namespace `salutem_studio`, com `disabled: false`, `disabledTools: []`, `alwaysAllow` e remoção de pastas legadas duplicadas).
+  - `StudioMcpServer` hardened para pipes no Windows (`readline()` sem read-ahead buffer + `reconfigure(encoding="utf-8")`) e `annotations` MCP padrão nas 8 ferramentas em `studio_tools.py`.
+  - Proteção no parser e no orquestrador contra ferramentas presas em `"running"` e contra falsos `GATE_REQUEST` / *"Análise concluída"* em turnos abortados sem texto; detecção de revisões salvas diretamente via MCP sem duplicação.
+- **Padronização dos outros 3 Harnesses (MCP + permissões headless)**:
+  - **Claude Code (`claude_harness.py`)**: `--mcp-config`, `--dangerously-skip-permissions` (`CLAUDE_SKIP_PERMISSIONS`), prevenção do estouro de 32 KB no Windows (`WinError 206`) na fase `jrxml` enviando prompts longos via `.claude/studio_system_prompt.md` + `stdin`, e encerramento seguro de tools pendentes.
+  - **OpenAI Codex (`codex_harness.py`)**: `--skip-git-repo-check`, sandbox por Gate (`read-only` no Gate 1; `--dangerously-bypass-approvals-and-sandbox` no Gate 2 via `CODEX_SKIP_PERMISSIONS`), injeção do MCP via `-c mcp_servers.salutem_studio.*` e suporte a `file_change` no JSONL.
+  - **OpenCode (`opencode_harness.py`)**: materialização de `opencode.json` com MCP `salutem_studio` e permissões por Gate (excluído do scanner de artefatos clínicos).
+- **Atualização automática da interface sem F5**:
+  - Backend emite `latest_artifacts` nos eventos `workspace_sync` e `DONE`, e marca `exports/latest_preview.json` com `stale: true` + `jrxml_version`/`jrxml_sha256` ao salvar nova revisão `.jrxml`.
+  - Frontend propaga `onArtifactSynced` / `artifactSyncTick` e observa `project.latest_artifacts` em `FormBuilderView`, `SqlDbView`, `JasperStudioView` (recarregando Monaco + disparando re-renderização automática do Preview com a nova revisão) e `ProjectOverviewView` (revisões).
+
 ---
 
-## 3. Baseline de Qualidade & Verificação (`v1.0.0`)
+## 3. Baseline de Qualidade & Verificação (`main`)
 
 | Camada | Comando / Pipeline | Resultado Atual |
 | :--- | :--- | :--- |
-| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **117 passed** |
+| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **118 passed** |
 | **Frontend Typecheck** | `npm --prefix frontend run typecheck` | **0 erros** |
 | **Frontend Unit/Component** | `npm --prefix frontend test` | **11 arquivos, 49 passed** |
 | **Frontend Production Build** | `npm --prefix frontend run build` | **OK** (`frontend/dist/`) |
-| **CLI Real `agy.exe`** | `AgyHarness` + `--input-format stream-json --output-format stream-json` | **OK** (`text_delta`, `gate_request`, `done`, `conversation_id`, `usage`) |
+| **CLI Real `agy.exe`** | `AgyHarness` + `--input-format stream-json --output-format stream-json --dangerously-skip-permissions` | **OK** (streaming + MCP `salutem_studio`) |
 | **E2E Navegador** | FastAPI + JVM real (`v1.0.0`, 8 MCP tools, F5 hash, crop PNG + thumbnail, Claro/Escuro) | **OK** (0 erros de console) |
 | **GitHub Actions CI & Release** | [Run #45749319313](https://github.com/fernandocalisto/automatizador-fichas/actions/runs/45749319313) (`v1.0.0`) | **4/4 jobs verdes** + asset `salutem-ficha-studio-v1.0.0.zip` publicado |
 
@@ -85,6 +98,12 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
 .\scripts\start_local.ps1
 ```
 *(Sobe o FastAPI servindo `frontend/dist/` em `http://127.0.0.1:8000` e abre o navegador automaticamente.)*
+
+### Uso local em rede — LAN (Windows, porta `8000` em `0.0.0.0`)
+```powershell
+.\scripts\start_network.ps1
+```
+*(Expõe o Studio na porta `8000` para acesso na rede interna via `http://<IP-DA-REDE>:8000`.)*
 
 ### Desenvolvimento (Backend `--reload` + Vite HMR)
 ```powershell
@@ -102,15 +121,68 @@ docker compose up --build -d
 ```
 Exemplo de registro no `agy`:
 ```powershell
-agy mcp add salutem-ficha-studio .\.venv\Scripts\python.exe -- -m backend.app.mcp_tools.mcp_server
+agy mcp add salutem_studio .\.venv\Scripts\python.exe -- -m backend.app.mcp_tools.mcp_server
 ```
 
 ---
 
-## 5. Backlog Pós-1.0.0 (Melhorias Futuras Opcionais)
+## 5. Decisões Arquiteturais & Escopo Futuro (Roadmap `v1.1` → `v1.3`)
 
-- **UI de Regras OCR / Regex Customizadas**: expor o motor já pronto em `backend/app/core/custom_regex.py` como nova aba em `Configurações` para cadastro e teste de substituições OCR.
-- **Reuso de `--conversation` no `AgyHarness`**: persistir `conversation_id` por projeto/fase no SQLite para retomar sessões nativas do `agy` entre turnos subsequentes (reduzindo latência e tokens de contexto).
-- **Atualização de Actions no CI**: migrar `actions/checkout@v4`, `actions/setup-node@v4`, `actions/setup-java@v4` e `actions/upload-artifact@v4` para as versões nativas de Node 24 (`v5`/`v6`) para eliminar os avisos de deprecação do GitHub Actions.
-- **Code-splitting do bundle frontend**: dividir `monaco` / `pdfjs-dist` via `manualChunks` no `vite.config.ts` para reduzir o chunk principal (`index-*.js` ~575 kB).
-- **Limpeza de branches remotas/locais antigas**: remover branches de feature já mergeadas (`feat/v1-web-studio`, `feat/v1.0.0-release-readiness`, `feat/e3-*`, `feat/e4-*`) caso não sejam mais necessárias para referência.
+Decisões estratégicas alinhadas para evolução do Salutem Ficha Studio:
+
+- **Modelo de Implantação — Híbrido**: manter a experiência local zero-fricção no Windows (`scripts/start_local.ps1`, sem tela de login) e evoluir o modo servidor compartilhado em Docker/Linux na rede interna.
+- **Autenticação & Concorrência no Servidor**:
+  - Login local (usuário/senha + papéis `admin` e `member`) ativado exclusivamente no modo servidor via `STUDIO_AUTH_ENABLED=true`.
+  - Projetos compartilhados entre a equipe com auditoria real de autor (`created_by`, `decided_by`, logs de commit/deploy).
+  - Manter **SQLite (WAL)** como banco interno do Studio (adequado para ~5–30 usuários simultâneos) adicionando **trava otimista de revisão** (`expected_version` → HTTP `409 Conflict`) para evitar sobrescritas concorrentes.
+- **Contas de IA (Harnesses) no Servidor**:
+  - Suportar **conta geral da empresa** (padrão/fallback administrável) **+** **conta pessoal opcional por usuário**.
+  - Isolamento por `HOME` dedicado dentro do volume persistente (`/data/homes/company/` e `/data/homes/users/<user_id>/`) para contas OAuth (`agy`, `claude`, `codex`, `opencode`), com **fluxo guiado na UI** (*Device Code* / colar URL ou código de autorização OAuth) **+** opção de **API Key (BYOK)** no mesmo perfil, protegida no cofre (`FICHA_STUDIO_VAULT_KEY`).
+- **Ciclo Completo de Fichas Existentes (Engenharia Reversa + Deploy)**:
+  - Integrar tanto a estrutura clínica no **PostgreSQL Salutem** quanto os arquivos `.jrxml`/`.jasper` e subreports hospedados nos **servidores SSH/SFTP** e no **JasperReports Server (JasperServer)** — com importação direta para o Studio e deploy controlado por Gate humano + backup automático (`.bak`).
+
+---
+
+### Milestone `v1.1` — Confiabilidade IA/MCP, Sessão Contínua & Engenharia Reversa PostgreSQL
+1. **Confiabilidade MCP & JRXML**:
+   - Validar em ambiente real todas as 8 ferramentas MCP sob o namespace `salutem_studio` (em especial `validate_and_compile_jrxml` e `render_preview_images` na fase `jrxml` do AGY) e garantir erro claro/fallback quando algum servidor MCP falhar.
+   - Garantir que o fluxo `PDF → JSON → SQL → JRXML → Preview` conclua sem passos manuais extras em todos os 4 harnesses.
+2. **Continuidade de Sessão dos Agentes**:
+   - Persistir `conversation_id` / `session_id` / `thread_id` por `(project_id, phase, harness)` no SQLite para retomar sessões nativas (`agy --conversation`, `claude --resume`, `codex exec resume`, `opencode`) entre turnos — reduzindo drasticamente latência e consumo de tokens, com botão "Nova sessão" no chat.
+3. **Engenharia Reversa do PostgreSQL Salutem (`entry_mode="db_import"`)**:
+   - Novo fluxo no modal de criação de projeto: selecionar um perfil PostgreSQL, listar/buscar fichas existentes em `template_ficha_clinica` e importar em modo **somente leitura** (`template` + `perguntas` + `respostas`) gerando automaticamente `ficha.json`, `SELECT` Jasper e base pronta para criar/ajustar o `.jrxml` (ou clonar como novo template via `INSERT`).
+   - *(Evolução opcional v1.1.x)*: gerador de SQL de migração/diff (`UPDATE` + `INSERT` de novas perguntas/respostas) com Dry-Run obrigatório para evoluir templates existentes no banco.
+
+---
+
+### Milestone `v1.2` — Modo Servidor Multiusuário, Contas OAuth/BYOK & Docker com CLIs
+1. **Usuários, Login & Auditoria (`STUDIO_AUTH_ENABLED=true`)**:
+   - Tabela `users` (hash Argon2/bcrypt, papéis `admin` e `member`, sessão JWT em cookie HttpOnly) + tela de login e gestão de usuários pelo Admin.
+   - No modo local (`STUDIO_AUTH_ENABLED=false`, padrão em `start_local.ps1`), o acesso continua direto sem login.
+   - Registrar autor real em revisões, aprovações de Gate e execuções de Dry-Run/Commit SQL.
+2. **Trava Otimista de Revisões**:
+   - Incluir `expected_version` nas mutações de artefatos (`json`, `sql_*`, `jrxml`) retornando `409 Conflict` com alerta claro na UI caso outro membro da equipe tenha salvo uma versão mais nova antes.
+3. **Contas de Harness no Servidor (Empresa + Pessoal)**:
+   - Cofre de credenciais por escopo (`company` vs `user_id`) e gestão de diretórios `HOME` isolados (`/data/homes/...`).
+   - Tela em *Configurações → Minha Conta / IA* permitindo escolher *"Conta geral da empresa"* ou *"Minha conta"*, autenticar via fluxo guiado OAuth (*Device Code* / URL de autorização) ou informar API Key (BYOK), com indicador de status por harness.
+   - `Dockerfile` e `docker-compose.yml` atualizados com suporte aos CLIs de IA na imagem runtime e volume persistente para `/data/homes`.
+
+---
+
+### Milestone `v1.3` — Integração SSH/SFTP & JasperReports Server
+1. **Perfis de Servidores de Relatórios (Cofre Seguro)**:
+   - CRUD em *Configurações* para perfis **SSH/SFTP** (host, porta, usuário, senha ou chave privada SSH no cofre, diretório remoto base de `.jrxml`/`.jasper` e subreports, flag `read_only` / ambiente `HML`/`PRD`).
+   - CRUD para perfis **JasperReports Server** (URL base, organização, usuário/senha ou token no cofre, caminho base de relatórios no repositório, flag `read_only` / ambiente `HML`/`PRD`).
+2. **Importação Direta de Fichas Existentes**:
+   - Navegador de arquivos SFTP / árvore de recursos JasperServer para importar `.jrxml` (e sincronizar subreports `.jasper`) diretamente para um projeto do Studio — podendo combinar no mesmo projeto a estrutura importada do PostgreSQL (`v1.1`) + o `.jrxml` real puxado do servidor.
+3. **Deploy Controlado com Gate Humano & Backup Automático**:
+   - Fluxo de publicação em 2 etapas (semelhante ao Dry-Run → Commit do PostgreSQL): pré-checagem de compilação JVM + diff com o arquivo remoto + aprovação explícita de Gate + **backup automático (`.bak` com timestamp)** antes de sobrescrever o `.jrxml`/`.jasper` no SFTP ou fazer upload via REST API no JasperServer (bloqueado em perfis `read_only`).
+
+---
+
+### Backlog Técnico & Melhorias Contínuas (`v1.x`)
+- **UI de Regras OCR / Regex Customizadas**: expor o motor já pronto em `backend/app/core/custom_regex.py` como nova aba em *Configurações* para cadastro e teste de substituições OCR.
+- **Comparação visual lado a lado**: modo split *PDF Original vs Preview Jasper* no Jasper Studio Light e biblioteca de blocos/templates JRXML reutilizáveis.
+- **Atualização de Actions no CI**: migrar `actions/checkout@v4`, `actions/setup-node@v4`, `actions/setup-java@v4` e `actions/upload-artifact@v4` para versões nativas de Node 24 (`v5`/`v6`).
+- **Code-splitting do bundle frontend**: dividir `monaco` e `pdfjs-dist` via `manualChunks` no `vite.config.ts` para reduzir o chunk principal (`index-*.js`).
+- **Limpeza de branches antigas**: remover branches de feature já mergeadas (`feat/v1-web-studio`, `feat/v1.0.0-release-readiness`, `feat/e3-*`, `feat/e4-*`).

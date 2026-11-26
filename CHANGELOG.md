@@ -25,7 +25,12 @@ Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 ### Fase 4 — Launchers Locais, Docker Multi-Stage & Documentação v1.0.0
 - **Launchers Windows PowerShell 5.1+**:
   - `scripts/start_local.ps1`: validação de `.venv` e `java`, build automático da SPA (`frontend/dist`), seleção automática de porta livre, healthcheck `/api/health`, abertura automática do navegador e encerramento limpo com `Ctrl+C`.
+  - `scripts/start_network.ps1`: inicialização em rede local (`0.0.0.0:8000`) com detecção automática do IPv4 da LAN para acesso compartilhado por outros computadores na rede interna.
   - `scripts/dev.ps1`: inicialização paralela de `uvicorn --reload` e Vite dev server com URLs centralizadas e limpeza de árvore de processos ao sair.
+- **Harnesses IA, MCP & Atualização Automática (sem F5)**:
+  - Acoplamento automático do servidor MCP nativo (`salutem_studio`, 8 ferramentas com `annotations` e UTF-8/stdio seguro no Windows) e flags headless de permissão nos 4 harnesses (`agy`, `claude`, `codex` e `opencode`), incluindo proteção contra o limite de 32 KB de linha de comando no Windows para Claude Code na fase `jrxml`.
+  - Proteção no parser e no orquestrador contra ferramentas presas em `"running"` e contra falsos `GATE_REQUEST` em turnos interrompidos.
+  - Atualização reativa automática no Form Builder, Editor JSON, SQL & DB Workbench, Jasper Studio (incluindo re-renderização automática do Preview) e Histórico de Revisões assim que o agente altera qualquer artefato — sem precisar recarregar a página (`F5`).
 - **Empacotamento Docker Multi-Stage & Compose**:
   - `Dockerfile` multi-stage (`node:22-alpine` + `python:3.13-slim-bookworm` com `openjdk-17-jre-headless`, fontes DejaVu/Liberation, `libpq5`, `curl`, usuário não-root `studio`, `/data` persistente e `HEALTHCHECK`).
   - `.dockerignore` otimizado e `docker-compose.yml` com volume nomeado `studio_data:/data` e variável `FICHA_STUDIO_VAULT_KEY`.

@@ -96,7 +96,15 @@ Parâmetros opcionais:
 | `-NoBrowser` | `$false` | Evita abrir o navegador automaticamente após `/api/health` retornar 200 |
 | `-DataDir` | `workspaces/` | Define `FICHA_STUDIO_DATA_DIR` para persistência de projetos e `studio.db` |
 
-### 3. Modo Desenvolvimento (`scripts/dev.ps1`)
+### 3. Launcher de Rede Local — LAN (`scripts/start_network.ps1`)
+
+Sobe o Studio ouvindo em `0.0.0.0:8000` (porta fixa `8000` liberada na rede), detecta automaticamente o IP IPv4 local da máquina e exibe a URL de rede (`http://<IP-DA-REDE>:8000`) para acesso por outras pessoas na intranet:
+
+```powershell
+.\scripts\start_network.ps1
+```
+
+### 4. Modo Desenvolvimento (`scripts/dev.ps1`)
 
 Sobe em paralelo o **Backend FastAPI** com `--reload` e o **Frontend Vite** com HMR (proxy `/api` -> backend) e encerra ambos de forma limpa com `Ctrl+C`:
 

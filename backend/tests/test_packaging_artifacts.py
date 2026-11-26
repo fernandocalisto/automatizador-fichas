@@ -24,6 +24,7 @@ def test_required_packaging_files_and_runtime_assets_exist() -> None:
         ".dockerignore",
         "docker-compose.yml",
         "scripts/start_local.ps1",
+        "scripts/start_network.ps1",
         "scripts/dev.ps1",
         "README.md",
         "CHANGELOG.md",
@@ -158,6 +159,33 @@ def test_start_local_ps1_contracts() -> None:
     assert " ?? " not in content
 
 
+def test_start_network_ps1_contracts() -> None:
+    content = _read_text("scripts/start_network.ps1")
+
+    for required_fragment in (
+        "[int]$Port = 8000",
+        '[string]$BindHost = "0.0.0.0"',
+        "[switch]$RebuildFrontend",
+        "[switch]$NoBrowser",
+        '[string]$DataDir = ""',
+        ".venv\\Scripts\\python.exe",
+        "uvicorn",
+        "backend.app.main:app",
+        '"--host", "$BindHost"',
+        "/api/health",
+        "Acesso Rede",
+        "finally",
+    ):
+        assert required_fragment in content, (
+            f"Fragmento ausente em scripts/start_network.ps1: {required_fragment}"
+        )
+
+    # Compatibilidade estrita com Windows PowerShell 5.1
+    assert " && " not in content
+    assert " || " not in content
+    assert " ?? " not in content
+
+
 def test_dev_ps1_contracts() -> None:
     content = _read_text("scripts/dev.ps1")
 
@@ -185,7 +213,7 @@ def test_dev_ps1_contracts() -> None:
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Validacao PowerShell ParseFile executa no Windows")
-@pytest.mark.parametrize("script_rel", ["scripts/start_local.ps1", "scripts/dev.ps1"])
+@pytest.mark.parametrize("script_rel", ["scripts/start_local.ps1", "scripts/start_network.ps1", "scripts/dev.ps1"])
 def test_powershell_scripts_parse_with_zero_syntax_errors(script_rel: str) -> None:
     script_path = str((REPO_ROOT / script_rel).resolve()).replace("'", "''")
     ps_cmd = (

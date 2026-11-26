@@ -805,5 +805,75 @@ async def test_codex_harness_parses_jsonl_stream(tmp_path: Path) -> None:
 
     cmd = captured["cmd"]
     assert cmd[:4] == ["/usr/local/bin/codex", "exec", "--json", "-C"]
+    assert "--skip-git-repo-check" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert any("mcp_servers.salutem_studio.command=" in arg for arg in cmd)
     assert cmd[-1] == "-"
     assert "GATE 2" in captured["stdin"]
+
+
+@pytest.mark.asyncio
+async def test_all_harnesses_mcp_wiring_and_windows_claude_prompt_limit(tmp_path: Path) -> None:
+    # 1. AGY materializa plugin limpo `salutem` + server `studio` com todas tools habilitadas
+    legacy_dir = tmp_path / ".agents" / "plugins" / "salutem-ficha-studio"
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "plugin.json").write_text("{}", encoding="utf-8")
+
+    agy_cfg = AgyHarness.ensure_workspace_mcp_config(tmp_path)
+    assert agy_cfg is not None and agy_cfg.is_file()
+    assert not legacy_dir.exists()
+    agy_data = json.loads(agy_cfg.read_text(encoding="utf-8"))
+    studio_entry = agy_data["mcpServers"]["studio"]
+    assert studio_entry["disabled"] is False
+    assert studio_entry["disabledTools"] == []
+    assert "validate_and_compile_jrxml" in studio_entry["alwaysAllow"]
+
+    # 2. Claude Code evita estourar limite de 32KB no Windows na fase jrxml e acopla --mcp-config
+    captured_claude: dict[str, Any] = {}
+    claude_h = ClaudeCodeHarness(
+        runner=make_mock_runner(
+            stdout_lines=[json.dumps({"type": "result", "subtype": "success", "result": "OK"})],
+            captured=captured_claude,
+        ),
+        which_resolver=lambda name: "/usr/bin/claude" if name == "claude" else None,
+    )
+    req_jrxml = HarnessRunRequest(
+        workspace_dir=tmp_path,
+        phase="jrxml",
+        prompt="Analisar layout JRXML",
+        gate_authorized=True,
+    )
+    await claude_h.run_to_completion(req_jrxml)
+    claude_cmd = captured_claude["cmd"]
+    assert "--dangerously-skip-permissions" in claude_cmd
+    assert "--mcp-config" in claude_cmd
+    sys_prompt_arg = claude_cmd[claude_cmd.index("--append-system-prompt") + 1]
+    assert len(sys_prompt_arg) < 16000
+    assert "gerador-layout-jrxml-salutem-v3" in captured_claude["stdin"]
+
+    # 3. OpenCode materializa opencode.json com MCP e permissões por Gate
+    oc_cfg = OpenCodeHarness.ensure_workspace_mcp_config(tmp_path, gate_authorized=True)
+    assert oc_cfg is not None and oc_cfg.is_file()
+    oc_data = json.loads(oc_cfg.read_text(encoding="utf-8"))
+    assert oc_data["mcp"]["salutem_studio"]["enabled"] is True
+    assert oc_data["permission"]["edit"] == "allow"
+
+    # 4. Codex interpreta eventos file_change no JSONL
+    codex_h = CodexHarness(which_resolver=lambda name: "/usr/bin/codex" if name == "codex" else None)
+    state: dict[str, Any] = {}
+    fc_events = codex_h.parse_jsonl_line(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "fc_1",
+                    "type": "file_change",
+                    "status": "completed",
+                    "changes": [{"path": "ficha_clinica.json", "kind": "update"}],
+                },
+            }
+        ),
+        state,
+    )
+    assert [e.type for e in fc_events] == [EventType.TOOL_CALL, EventType.TOOL_RESULT]
+    assert fc_events[0].tool_name == "file_change"

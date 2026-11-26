@@ -143,6 +143,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["pdf_path"],
             "additionalProperties": False,
         },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     {
         "name": "render_pdf_preview_pages",
@@ -176,6 +182,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
             "required": ["pdf_path", "output_dir"],
             "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
         },
     },
     {
@@ -219,6 +231,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["pdf_path", "page_number", "rect", "output_path"],
             "additionalProperties": False,
         },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
     },
     {
         "name": "get_salutem_skill",
@@ -237,6 +255,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
             "required": ["skill_name"],
             "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
         },
     },
     {
@@ -259,6 +283,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 },
             },
             "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
         },
     },
     {
@@ -298,6 +328,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["project_id", "json_content"],
             "additionalProperties": False,
         },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
+        },
     },
     {
         "name": "validate_and_compile_jrxml",
@@ -330,6 +366,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
             "required": ["project_id"],
             "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "openWorldHint": False,
         },
     },
     {
@@ -380,6 +422,12 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
             "required": ["project_id"],
             "additionalProperties": False,
+        },
+        "annotations": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
         },
     },
 ]

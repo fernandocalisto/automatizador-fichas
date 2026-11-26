@@ -486,6 +486,9 @@ def _execute_preview_pipeline(
         "dpi": payload.dpi,
         "page_count": len(rendered_pngs),
         "pdf_path": str(pdf_output_path),
+        "jrxml_version": project.latest_artifacts.get("jrxml"),
+        "jrxml_sha256": hashlib.sha256(jrxml_text.encode("utf-8")).hexdigest(),
+        "stale": False,
     }
     (exports_dir / "latest_preview.json").write_text(
         json.dumps(latest_meta, ensure_ascii=False, indent=2),

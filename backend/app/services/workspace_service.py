@@ -550,6 +550,20 @@ class WorkspaceService:
             summary=summary or f"Updated {artifact_type}",
             created_by=created_by,
         )
+        if artifact_type == "jrxml":
+            latest_preview_path = ws_dir / "exports" / "latest_preview.json"
+            if latest_preview_path.is_file():
+                try:
+                    meta = json.loads(latest_preview_path.read_text(encoding="utf-8"))
+                    if isinstance(meta, dict):
+                        meta["stale"] = True
+                        meta["latest_jrxml_version"] = saved_row["version_num"]
+                        latest_preview_path.write_text(
+                            json.dumps(meta, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                except Exception:
+                    pass
         return ArtifactSaveResponse(artifact=ArtifactRevisionRead(**saved_row))
 
     def restore_revision(

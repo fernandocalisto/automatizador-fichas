@@ -31,8 +31,11 @@ export function JasperStudioView({
   project,
   onProjectUpdated,
   onOpenAgentChat,
+  artifactSyncTick = 0,
 }: JasperStudioViewProps) {
   const { pushToast } = useToast();
+  const loadedVersionRef = useRef<number | null>(null);
+  const initialLoadedRef = useRef(false);
 
   // Estado do artefato JRXML
   const [loadingArtifact, setLoadingArtifact] = useState(true);
@@ -214,10 +217,12 @@ export function JasperStudioView({
 
       if (artifactRes.status === "fulfilled") {
         const rev = artifactRes.value;
+        loadedVersionRef.current = rev.version_num;
         setHasJrxml(true);
         setJrxmlContent(rev.content);
         setSavedContent(rev.content);
         setVersionNum(rev.version_num);
+        initialLoadedRef.current = true;
         setLoadingArtifact(false);
 
         void runPreview({
@@ -230,10 +235,12 @@ export function JasperStudioView({
       } else {
         const reason = artifactRes.reason;
         const isNotFound = reason instanceof ApiError && reason.status === 404;
+        loadedVersionRef.current = null;
         setHasJrxml(false);
         setJrxmlContent("");
         setSavedContent("");
         setVersionNum(null);
+        initialLoadedRef.current = true;
         setLoadingArtifact(false);
 
         if (!isNotFound && reason instanceof Error) {
@@ -246,6 +253,8 @@ export function JasperStudioView({
       }
     };
 
+    initialLoadedRef.current = false;
+    loadedVersionRef.current = null;
     void loadInitial();
 
     return () => {
@@ -257,6 +266,46 @@ export function JasperStudioView({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
+
+  // Atualização automática do editor JRXML e do Preview quando o agente gerar uma nova revisão
+  const latestJrxmlVersion = project.latest_artifacts?.jrxml ?? null;
+  useEffect(() => {
+    if (!initialLoadedRef.current) return;
+    if (latestJrxmlVersion === null && artifactSyncTick === 0) return;
+    if (
+      latestJrxmlVersion !== null &&
+      latestJrxmlVersion === loadedVersionRef.current
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    api
+      .getArtifact(project.id, "jrxml")
+      .then((rev) => {
+        if (cancelled) return;
+        if (rev.version_num === loadedVersionRef.current) return;
+        loadedVersionRef.current = rev.version_num;
+        userEditedRef.current = false;
+        jrxmlRef.current = rev.content;
+        setHasJrxml(true);
+        setJrxmlContent(rev.content);
+        setSavedContent(rev.content);
+        setVersionNum(rev.version_num);
+        setCompileResult(null);
+        setCompileError(null);
+        setLintReport(null);
+
+        void runPreview({ inlineJrxml: rev.content, silent: true });
+      })
+      .catch(() => {
+        // Ignora erro transitório em refresh silencioso
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, latestJrxmlVersion, artifactSyncTick, runPreview]);
 
   // Live-reload debounced (~900ms) após edições no editor
   useEffect(() => {
@@ -298,6 +347,7 @@ export function JasperStudioView({
         setSavedContent(res.jrxml);
         const nextVersion =
           res.saved_revision?.version_num ?? (versionNum ?? 0) + 1;
+        loadedVersionRef.current = nextVersion;
         setVersionNum(nextVersion);
         setLintReport(res.lint ?? null);
         setCompileResult(null);
@@ -417,6 +467,7 @@ export function JasperStudioView({
         created_by: "user",
       });
       userEditedRef.current = false;
+      loadedVersionRef.current = res.artifact.version_num;
       setSavedContent(res.artifact.content);
       setVersionNum(res.artifact.version_num);
 

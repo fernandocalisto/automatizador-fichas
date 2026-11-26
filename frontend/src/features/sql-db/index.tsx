@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { SplitPane, useToast } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import type { SqlDbViewProps } from "@/types/feature-props";
@@ -51,8 +51,12 @@ export function SqlDbView({
   project,
   onProjectUpdated,
   onNavigateSection,
+  artifactSyncTick = 0,
 }: SqlDbViewProps) {
   const { pushToast } = useToast();
+  const loadedInsertVerRef = useRef<number | null>(null);
+  const loadedSelectVerRef = useRef<number | null>(null);
+  const initialLoadedRef = useRef(false);
 
   // Artifacts & drafts
   const [loadingArtifacts, setLoadingArtifacts] = useState(true);
@@ -132,6 +136,8 @@ export function SqlDbView({
     ])
       .then(([ins, sel]) => {
         if (cancelled) return;
+        loadedInsertVerRef.current = ins?.version_num ?? null;
+        loadedSelectVerRef.current = sel?.version_num ?? null;
         setInsertArtifact(ins);
         setSelectArtifact(sel);
         setInsertDraft(ins?.content ?? "");
@@ -146,7 +152,10 @@ export function SqlDbView({
         });
       })
       .finally(() => {
-        if (!cancelled) setLoadingArtifacts(false);
+        if (!cancelled) {
+          initialLoadedRef.current = true;
+          setLoadingArtifacts(false);
+        }
       });
 
     api
@@ -175,6 +184,51 @@ export function SqlDbView({
       cancelled = true;
     };
   }, [project.id, pushToast]);
+
+  // Recarrega scripts SQL automaticamente quando o agente ou JSON regenerar novas versões
+  const latestSqlInsertVer = project.latest_artifacts?.sql_insert ?? null;
+  const latestSqlSelectVer = project.latest_artifacts?.sql_select ?? null;
+  useEffect(() => {
+    if (!initialLoadedRef.current) return;
+    const insertOutdated =
+      latestSqlInsertVer !== null &&
+      latestSqlInsertVer !== loadedInsertVerRef.current;
+    const selectOutdated =
+      latestSqlSelectVer !== null &&
+      latestSqlSelectVer !== loadedSelectVerRef.current;
+    if (!insertOutdated && !selectOutdated && artifactSyncTick === 0) return;
+
+    let cancelled = false;
+    Promise.all([
+      fetchArtifactOrNull(project.id, "sql_insert"),
+      fetchArtifactOrNull(project.id, "sql_select"),
+    ])
+      .then(([ins, sel]) => {
+        if (cancelled) return;
+        if (ins && ins.version_num !== loadedInsertVerRef.current) {
+          loadedInsertVerRef.current = ins.version_num;
+          setInsertArtifact(ins);
+          setInsertDraft(ins.content ?? "");
+          setValidationByTab((prev) => ({ ...prev, sql_insert: null }));
+          setDryRunState(null);
+          setInvalidationReason("sql_edited");
+        }
+        if (sel && sel.version_num !== loadedSelectVerRef.current) {
+          loadedSelectVerRef.current = sel.version_num;
+          setSelectArtifact(sel);
+          setSelectDraft(sel.content ?? "");
+          setValidationByTab((prev) => ({ ...prev, sql_select: null }));
+          setInspectResult(null);
+        }
+      })
+      .catch(() => {
+        // Ignora erro transitório em refresh silencioso
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, latestSqlInsertVer, latestSqlSelectVer, artifactSyncTick]);
 
   // Strict tamper-check: Dry-Run token is valid ONLY for exact SQL & profile snapshot
   const activeDryRunResult =
@@ -230,6 +284,8 @@ export function SqlDbView({
         summary: "Regenerado a partir do JSON na tela SQL & Banco",
       });
 
+      loadedInsertVerRef.current = res.sql_insert.version_num;
+      loadedSelectVerRef.current = res.sql_select.version_num;
       setInsertArtifact(res.sql_insert);
       setSelectArtifact(res.sql_select);
       setInsertDraft(res.sql_insert.content);
@@ -237,6 +293,14 @@ export function SqlDbView({
       setValidationByTab({ sql_insert: null, sql_select: null });
       setInspectResult(null);
       setInspectError(null);
+      onProjectUpdated({
+        ...project,
+        latest_artifacts: {
+          ...project.latest_artifacts,
+          sql_insert: res.sql_insert.version_num,
+          sql_select: res.sql_select.version_num,
+        },
+      });
 
       if (dryRunState && res.sql_insert.content !== dryRunState.sqlSnapshot) {
         setDryRunState(null);
@@ -257,7 +321,7 @@ export function SqlDbView({
     } finally {
       setRegenerating(false);
     }
-  }, [project.id, selectOptions, dryRunState, pushToast]);
+  }, [project, selectOptions, dryRunState, onProjectUpdated, pushToast]);
 
   const handleValidateSql = useCallback(async () => {
     const sqlText = activeTab === "sql_insert" ? insertDraft : selectDraft;
@@ -298,12 +362,21 @@ export function SqlDbView({
             : "Edição manual do SQL SELECT Jasper",
       });
       if (activeTab === "sql_insert") {
+        loadedInsertVerRef.current = res.artifact.version_num;
         setInsertArtifact(res.artifact);
         setInsertDraft(res.artifact.content);
       } else {
+        loadedSelectVerRef.current = res.artifact.version_num;
         setSelectArtifact(res.artifact);
         setSelectDraft(res.artifact.content);
       }
+      onProjectUpdated({
+        ...project,
+        latest_artifacts: {
+          ...project.latest_artifacts,
+          [activeTab]: res.artifact.version_num,
+        },
+      });
       pushToast({
         tone: "success",
         title: `Revisão v${res.artifact.version_num} salva`,
@@ -317,7 +390,7 @@ export function SqlDbView({
     } finally {
       setSaving(false);
     }
-  }, [activeTab, insertDraft, selectDraft, project.id, pushToast]);
+  }, [activeTab, insertDraft, selectDraft, project, onProjectUpdated, pushToast]);
 
   const handleRevertCurrent = useCallback(() => {
     if (activeTab === "sql_insert" && insertArtifact) {

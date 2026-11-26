@@ -12,18 +12,21 @@ export interface ProjectOverviewProps {
   project: ProjectRead;
   onProjectUpdated: (project: ProjectRead) => void;
   onNavigateSection: (section: StudioSection) => void;
+  artifactSyncTick?: number;
 }
 
 export interface FormBuilderViewProps {
   project: ProjectRead;
   onProjectUpdated: (project: ProjectRead) => void;
   onNavigateSection: (section: StudioSection) => void;
+  artifactSyncTick?: number;
 }
 
 export interface SqlDbViewProps {
   project: ProjectRead;
   onProjectUpdated: (project: ProjectRead) => void;
   onNavigateSection: (section: StudioSection) => void;
+  artifactSyncTick?: number;
 }
 
 export interface JasperStudioViewProps {
@@ -31,6 +34,7 @@ export interface JasperStudioViewProps {
   onProjectUpdated: (project: ProjectRead) => void;
   onNavigateSection: (section: StudioSection) => void;
   onOpenAgentChat?: (phase?: ChatPhase) => void;
+  artifactSyncTick?: number;
 }
 
 export interface SettingsViewProps {

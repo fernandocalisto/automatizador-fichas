@@ -47,9 +47,12 @@ export function FormBuilderView({
   project,
   onProjectUpdated,
   onNavigateSection,
+  artifactSyncTick = 0,
 }: FormBuilderViewProps) {
   const { pushToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const loadedVersionRef = useRef<number | null>(null);
+  const initialLoadedRef = useRef(false);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -89,6 +92,7 @@ export function FormBuilderView({
     try {
       const artifact = await api.getArtifact(project.id, "json");
       const raw = artifact.content ?? "";
+      loadedVersionRef.current = artifact.version_num;
       setVersionNum(artifact.version_num);
       setJsonText(raw);
 
@@ -104,6 +108,7 @@ export function FormBuilderView({
       void fetchWarnings(project.id);
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
+        loadedVersionRef.current = null;
         setFormModel(null);
         setJsonText("");
         setVersionNum(null);
@@ -116,13 +121,55 @@ export function FormBuilderView({
         );
       }
     } finally {
+      initialLoadedRef.current = true;
       setLoading(false);
     }
   }, [project.id, fetchWarnings]);
 
   useEffect(() => {
+    initialLoadedRef.current = false;
+    loadedVersionRef.current = null;
     void loadProjectJson();
   }, [loadProjectJson]);
+
+  // Atualização automática quando o agente ou outra tela gerar uma nova revisão JSON
+  const latestJsonVersion = project.latest_artifacts?.json ?? null;
+  useEffect(() => {
+    if (!initialLoadedRef.current) return;
+    if (latestJsonVersion === null && artifactSyncTick === 0) return;
+    if (latestJsonVersion !== null && latestJsonVersion === loadedVersionRef.current) {
+      return;
+    }
+
+    let cancelled = false;
+    api
+      .getArtifact(project.id, "json")
+      .then((artifact) => {
+        if (cancelled) return;
+        if (artifact.version_num === loadedVersionRef.current) return;
+        const raw = artifact.content ?? "";
+        loadedVersionRef.current = artifact.version_num;
+        setVersionNum(artifact.version_num);
+        setJsonText(raw);
+        setIsDirty(false);
+        const parsed = parseClinicalFormJson(raw);
+        if (parsed.data) {
+          setFormModel(renumberClinicalForm(parsed.data));
+          setJsonError(null);
+        } else {
+          setFormModel(null);
+          setJsonError(parsed.error);
+        }
+        void fetchWarnings(project.id);
+      })
+      .catch(() => {
+        // Ignora erro transitório em refresh silencioso
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, latestJsonVersion, artifactSyncTick, fetchWarnings]);
 
   const applyModelUpdate = useCallback((next: ClinicalFormJson) => {
     const normalized = renumberClinicalForm(next);
@@ -280,6 +327,7 @@ export function FormBuilderView({
       }
       setJsonError(null);
       setIsDirty(false);
+      loadedVersionRef.current = response.artifact.version_num;
       setVersionNum(response.artifact.version_num);
 
       const nextArtifacts: Record<string, number> = {

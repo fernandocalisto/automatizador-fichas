@@ -11,7 +11,12 @@ from typing import Any
 
 import httpx
 
-from app.harnesses.base import BaseSubprocessHarness, SubprocessRunner
+from app.harnesses.base import (
+    STUDIO_MCP_SERVER_NAME,
+    BaseSubprocessHarness,
+    SubprocessRunner,
+    build_studio_mcp_server_spec,
+)
 from app.harnesses.types import (
     EventType,
     HarnessEvent,
@@ -348,6 +353,43 @@ class OpenCodeHarness(BaseSubprocessHarness):
                 metadata={"mode": "http", "session_id": session_id},
             )
 
+    @staticmethod
+    def ensure_workspace_mcp_config(
+        workspace_dir: Path,
+        *,
+        gate_authorized: bool = False,
+    ) -> Path | None:
+        """
+        Materializa `opencode.json` no workspace configurando o servidor MCP local do Studio
+        e políticas de permissão não-interativas por Gate.
+        """
+        try:
+            ws_root = Path(workspace_dir).resolve()
+            ws_root.mkdir(parents=True, exist_ok=True)
+            cfg_path = ws_root / "opencode.json"
+            spec = build_studio_mcp_server_spec()
+            payload = {
+                "$schema": "https://opencode.ai/config.json",
+                "mcp": {
+                    STUDIO_MCP_SERVER_NAME: {
+                        "type": "local",
+                        "command": [spec["command"], *spec["args"]],
+                        "environment": spec["env"],
+                        "enabled": True,
+                    }
+                },
+                "permission": {
+                    "edit": "allow" if gate_authorized else "deny",
+                    "bash": "allow",
+                },
+            }
+            text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            if not cfg_path.is_file() or cfg_path.read_text(encoding="utf-8") != text:
+                cfg_path.write_text(text, encoding="utf-8")
+            return cfg_path
+        except OSError:
+            return None
+
     def build_cli_command(self, executable: str, request: HarnessRunRequest) -> list[str]:
         """Monta o comando `opencode run --format json`."""
         cmd = [executable, "run", "--format", "json"]
@@ -364,6 +406,10 @@ class OpenCodeHarness(BaseSubprocessHarness):
         system_prompt: str,
         user_prompt: str,
     ) -> AsyncIterator[HarnessEvent]:
+        self.ensure_workspace_mcp_config(
+            request.workspace_dir,
+            gate_authorized=request.gate_authorized,
+        )
         cmd = self.build_cli_command(executable, request)
         combined = f"{system_prompt}\n\n---\n\n{user_prompt}"
         state: dict[str, Any] = {"had_error": False}

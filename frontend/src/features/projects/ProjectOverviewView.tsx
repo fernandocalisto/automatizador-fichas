@@ -127,6 +127,7 @@ export function ProjectOverviewView({
   project,
   onProjectUpdated,
   onNavigateSection,
+  artifactSyncTick = 0,
 }: ProjectOverviewProps) {
   const { pushToast } = useToast();
 
@@ -191,9 +192,10 @@ export function ProjectOverviewView({
     }
   }, [project.id, artifactFilter, pushToast]);
 
+  const artifactsSignature = JSON.stringify(project.latest_artifacts ?? {});
   useEffect(() => {
     void loadRevisions();
-  }, [loadRevisions]);
+  }, [loadRevisions, artifactsSignature, artifactSyncTick]);
 
   const handleGateAction = async (gateName: GateName, status: GateStatus) => {
     setGateBusy(gateName);

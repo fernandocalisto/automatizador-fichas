@@ -443,6 +443,7 @@ export function AgentChatPanel({
 
       const controller = new AbortController();
       abortControllerRef.current = controller;
+      let syncedInTurn = false;
 
       const updateAssistant = (
         updater: (prev: ChatTimelineItem) => ChatTimelineItem,
@@ -472,6 +473,7 @@ export function AgentChatPanel({
                 (event.type as string) === "artifact_synced";
 
               if (isArtifactSynced) {
+                syncedInTurn = true;
                 const artifactType =
                   typeof meta.artifact_type === "string"
                     ? meta.artifact_type
@@ -556,13 +558,36 @@ export function AgentChatPanel({
                   }));
                   break;
 
-                case "done":
+                case "done": {
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
                     streaming: false,
                   }));
+                  const doneSynced = Array.isArray(meta.synced_artifacts)
+                    ? meta.synced_artifacts
+                    : [];
+                  const doneLatest =
+                    meta.latest_artifacts &&
+                    typeof meta.latest_artifacts === "object"
+                      ? (meta.latest_artifacts as Record<string, number>)
+                      : null;
+                  const latestChanged = Boolean(
+                    doneLatest &&
+                      Object.entries(doneLatest).some(
+                        ([k, v]) => project.latest_artifacts?.[k] !== v,
+                      ),
+                  );
+                  if (!syncedInTurn && (doneSynced.length > 0 || latestChanged)) {
+                    const fallbackType =
+                      phase === "extraction" ? "json" : "jrxml";
+                    triggerProjectSync(
+                      fallbackType,
+                      doneLatest?.[fallbackType],
+                    );
+                  }
                   break;
+                }
               }
             },
           },
@@ -610,6 +635,7 @@ export function AgentChatPanel({
       isGateApproved,
       phase,
       project.id,
+      project.latest_artifacts,
       pushToast,
       selectedHarness,
       streaming,

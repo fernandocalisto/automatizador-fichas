@@ -4,11 +4,17 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
-from app.harnesses.base import BaseSubprocessHarness, SubprocessRunner
+from app.harnesses.base import (
+    STUDIO_MCP_SERVER_NAME,
+    BaseSubprocessHarness,
+    SubprocessRunner,
+    build_studio_mcp_server_spec,
+)
 from app.harnesses.types import (
     EventType,
     HarnessEvent,
@@ -18,13 +24,23 @@ from app.harnesses.types import (
 )
 
 
+def _toml_inline_str(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_inline_dict(mapping: dict[str, str]) -> str:
+    pairs = [f"{k}={_toml_inline_str(v)}" for k, v in mapping.items()]
+    return "{" + ", ".join(pairs) + "}"
+
+
 class CodexHarness(BaseSubprocessHarness):
     """
     Adaptador oficial do OpenAI Codex CLI (`codex`).
 
-    Executa `codex exec --json -C <workspace_dir>` passando o prompt composto via stdin (`-`)
-    e interpreta os eventos JSONL (`thread.started`, `item.started`, `item.completed` para
-    `agent_message`, `reasoning` e `command_execution`, e `turn.completed`).
+    Executa `codex exec --json --skip-git-repo-check -C <workspace_dir>` passando o prompt
+    composto via stdin (`-`), injetando o servidor MCP do Studio via `-c mcp_servers...` e
+    interpretando os eventos JSONL (`thread.started`, `item.started`, `item.completed` para
+    `agent_message`, `reasoning`, `command_execution`, `file_change` e `mcp_tool_call`).
     """
 
     kind = HarnessKind.CODEX
@@ -36,12 +52,18 @@ class CodexHarness(BaseSubprocessHarness):
         runner: SubprocessRunner | None = None,
         which_resolver: Callable[[str], str | None] | None = None,
         default_timeout: float = 300.0,
+        dangerously_skip_permissions: bool | None = None,
     ) -> None:
         super().__init__(
             runner=runner,
             which_resolver=which_resolver,
             default_timeout=default_timeout,
         )
+        if dangerously_skip_permissions is None:
+            env_val = os.environ.get("CODEX_SKIP_PERMISSIONS", "1").strip().lower()
+            self._dangerously_skip_permissions = env_val not in ("0", "false", "no", "off")
+        else:
+            self._dangerously_skip_permissions = bool(dangerously_skip_permissions)
 
     def _find_cli_executable(self) -> str | None:
         return self._resolve_executable("codex")
@@ -61,14 +83,36 @@ class CodexHarness(BaseSubprocessHarness):
         )
 
     def build_command(self, executable: str, request: HarnessRunRequest) -> list[str]:
-        """Constrói o comando `codex exec --json -C <workspace_dir>`."""
+        """Constrói o comando `codex exec --json --skip-git-repo-check -C <workspace_dir>`."""
         cmd = [
             executable,
             "exec",
             "--json",
             "-C",
             str(request.workspace_dir.resolve()),
+            "--skip-git-repo-check",
         ]
+        if request.gate_authorized:
+            if self._dangerously_skip_permissions:
+                cmd.append("--dangerously-bypass-approvals-and-sandbox")
+            else:
+                cmd.extend(["--sandbox", "workspace-write"])
+        else:
+            cmd.extend(["--sandbox", "read-only"])
+
+        spec = build_studio_mcp_server_spec()
+        prefix = f"mcp_servers.{STUDIO_MCP_SERVER_NAME}"
+        cmd.extend(
+            [
+                "-c",
+                f"{prefix}.command={_toml_inline_str(spec['command'])}",
+                "-c",
+                f"{prefix}.args={json.dumps(spec['args'], ensure_ascii=False)}",
+                "-c",
+                f"{prefix}.env={_toml_inline_dict(spec['env'])}",
+            ]
+        )
+
         if request.model:
             cmd.extend(["--model", request.model])
         for img in request.image_paths:
@@ -137,6 +181,18 @@ class CodexHarness(BaseSubprocessHarness):
                             if isinstance(item.get("arguments"), dict)
                             else {}
                         ),
+                        harness=self.kind,
+                    )
+                )
+            elif i_type == "file_change":
+                if item_id:
+                    started_tools.add(item_id)
+                events.append(
+                    HarnessEvent(
+                        type=EventType.TOOL_CALL,
+                        tool_name="file_change",
+                        tool_call_id=item_id or None,
+                        tool_args={"changes": item.get("changes", [])},
                         harness=self.kind,
                     )
                 )
@@ -231,6 +287,35 @@ class CodexHarness(BaseSubprocessHarness):
                         tool_call_id=item_id or None,
                         tool_output=item.get("result") or item.get("error"),
                         harness=self.kind,
+                    )
+                )
+
+            elif i_type == "file_change":
+                changes = item.get("changes", [])
+                status_val = str(item.get("status") or "completed")
+                if not item_id or item_id not in started_tools:
+                    if item_id:
+                        started_tools.add(item_id)
+                    events.append(
+                        HarnessEvent(
+                            type=EventType.TOOL_CALL,
+                            tool_name="file_change",
+                            tool_call_id=item_id or None,
+                            tool_args={"changes": changes},
+                            harness=self.kind,
+                        )
+                    )
+                meta: dict[str, Any] = {"status": status_val}
+                if status_val.lower() in ("failed", "error"):
+                    meta["error"] = str(item.get("error") or "Falha ao aplicar alteração de arquivo.")
+                events.append(
+                    HarnessEvent(
+                        type=EventType.TOOL_RESULT,
+                        tool_name="file_change",
+                        tool_call_id=item_id or None,
+                        tool_output={"changes": changes, "status": status_val},
+                        harness=self.kind,
+                        metadata=meta,
                     )
                 )
 

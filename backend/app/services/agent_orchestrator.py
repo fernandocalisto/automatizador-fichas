@@ -69,6 +69,17 @@ _EXCLUDED_SCAN_DIRS: frozenset[str] = frozenset(
     }
 )
 
+_EXCLUDED_SCAN_FILES: frozenset[str] = frozenset(
+    {
+        "opencode.json",
+        "mcp_config.json",
+        "plugin.json",
+        "studio_mcp_config.json",
+        "package.json",
+        "tsconfig.json",
+    }
+)
+
 _MAX_RECENT_CHAT_MESSAGES = 12
 _MAX_PREVIEW_IMAGES = 12
 
@@ -183,7 +194,9 @@ def _sha256_file(path: Path) -> str:
 
 
 def _is_excluded_workspace_path(rel_path: Path) -> bool:
-    """Ignora subpastas de exports/uploads/caches ao procurar artefatos finais do agente."""
+    """Ignora subpastas de exports/uploads/caches e configs de harness ao procurar artefatos finais."""
+    if rel_path.name.lower() in _EXCLUDED_SCAN_FILES:
+        return True
     return any(
         part in _EXCLUDED_SCAN_DIRS or part.startswith(".")
         for part in rel_path.parts[:-1]
@@ -852,7 +865,10 @@ class AgentOrchestratorService:
                                 metadata={"phase": phase, "workspace_sync_error": True},
                             )
 
+                    refreshed_after_sync = self.workspace_service.get_project(project_id)
+                    latest_artifacts_map = dict(refreshed_after_sync.latest_artifacts)
                     for sync_meta in synced_artifacts:
+                        sync_meta["latest_artifacts"] = latest_artifacts_map
                         sync_event = HarnessEvent(
                             type=EventType.TOOL_RESULT,
                             tool_name="workspace_sync",
@@ -932,6 +948,7 @@ class AgentOrchestratorService:
                     ),
                 )
 
+            latest_proj_state = self.workspace_service.get_project(project_id)
             final_done_meta = dict(buffered_done.metadata) if buffered_done is not None else {}
             final_done_meta.update(
                 {
@@ -940,6 +957,7 @@ class AgentOrchestratorService:
                     "gate_authorized": gate_authorized,
                     "gate_requested": saw_gate_request,
                     "synced_artifacts": synced_artifacts,
+                    "latest_artifacts": dict(latest_proj_state.latest_artifacts),
                     "cancelled": cancelled,
                     "had_error": had_error,
                 }

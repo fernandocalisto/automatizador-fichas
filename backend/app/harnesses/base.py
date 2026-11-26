@@ -8,12 +8,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from app.config import SKILLS_DIR
+try:
+    from backend.app.config import PROJECT_ROOT, SKILLS_DIR, get_data_dir, get_db_path
+except ModuleNotFoundError:  # pragma: no cover
+    from app.config import PROJECT_ROOT, SKILLS_DIR, get_data_dir, get_db_path  # type: ignore[no-redef]
 from app.harnesses.types import (
     EventType,
     HarnessEvent,
@@ -22,6 +26,37 @@ from app.harnesses.types import (
     HarnessStatus,
     PhaseKind,
 )
+
+STUDIO_MCP_SERVER_NAME = "salutem_studio"
+
+STUDIO_MCP_TOOL_NAMES: tuple[str, ...] = (
+    "inspect_clinical_pdf",
+    "render_pdf_preview_pages",
+    "crop_pdf_feedback_region",
+    "get_salutem_skill",
+    "extract_pdf_geometry",
+    "save_validated_json",
+    "validate_and_compile_jrxml",
+    "render_preview_images",
+)
+
+
+def build_studio_mcp_server_spec() -> dict[str, Any]:
+    """
+    Retorna a especificação canônica stdio do servidor MCP nativo do Salutem Ficha Studio
+    (`python -m backend.app.mcp_tools.mcp_server`) com `PYTHONPATH`, UTF-8 e caminhos do banco.
+    """
+    return {
+        "command": sys.executable,
+        "args": ["-m", "backend.app.mcp_tools.mcp_server"],
+        "env": {
+            "PYTHONPATH": str(PROJECT_ROOT.resolve()),
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "FICHA_STUDIO_DATA_DIR": str(get_data_dir().resolve()),
+            "FICHA_STUDIO_DB_PATH": str(get_db_path().resolve()),
+        },
+    }
 
 SKILL_FOLDER_BY_PHASE: dict[str, str] = {
     "extraction": "extrator_ficha",
@@ -81,8 +116,8 @@ STATUS DA AUTORIZAÇÃO (`gate_authorized`): `False` (PAUSA OBRIGATÓRIA ANTES D
 DIRETÓRIO DO WORKSPACE: `{ws_text}`
 
 REGRAS OBRIGATÓRIAS DESTE TURNO:
-1. **PROIBIDO GERAR ARQUIVOS `.jrxml`/`.xml` OU DESPEJAR XML:** NÃO crie arquivos `.jrxml` ou `.xml` finais no workspace e **NUNCA** gere código XML JasperReports no chat neste turno.
-2. **FASE 1 SILENCIOSA:** Inspecione silenciosamente as coordenadas exatas do PDF (textos, fontes, retângulos ~10x10 de checkbox vs círculos ~10x10 de rádio e área útil de `623 px` na banda `<detail>` Retrato com offset vertical `pdf_y - 182`) e os `<field>` da ficha.
+1. **PROIBIDO GERAR ARQUIVOS `.jrxml`/`.xml` OU DESPEJAR XML:** NÃO crie arquivos `.jrxml` ou `.xml` finais no workspace, NÃO chame `validate_and_compile_jrxml` com `save_artifact=true` e **NUNCA** gere código XML JasperReports no chat neste turno.
+2. **FASE 1 SILENCIOSA:** Inspecione silenciosamente as coordenadas exatas do PDF (preferindo a ferramenta MCP `extract_pdf_geometry` ou `inspect_clinical_pdf` quando disponível — textos, fontes, retângulos ~10x10 de checkbox vs círculos ~10x10 de rádio e área útil de `623 px` na banda `<detail>` Retrato com offset vertical `pdf_y - 182`) e os `<field>` da ficha.
 3. **FASE 2 — RESUMO E PERGUNTAS:** Apresente ao usuário:
    - Validação cruzada entre PDF, título interno e campos da ficha/query.
    - Campos omitidos do `<detail>` por já existirem em `cabecalho_retrato.jasper` e `dados_paciente.jasper`.
@@ -107,8 +142,8 @@ STATUS DA AUTORIZAÇÃO (`gate_authorized`): `True` (AUTORIZADO PELO USUÁRIO)
 DIRETÓRIO DO WORKSPACE: `{ws_text}`
 
 REGRAS OBRIGATÓRIAS DESTE TURNO:
-1. **GRAVAÇÃO DIRETA EM ARQUIVOS NO WORKSPACE:** O usuário JÁ AUTORIZOU a geração final do layout JasperReports. Escreva diretamente no diretório `{ws_text}` o arquivo `.jrxml` completo da ficha (e, quando aplicável, o bloco `detail_<nome>.xml`), validando 100% da árvore XML antes de concluir (`isBlankWhenNull="true"` em todos os `<textField>`, UUIDs v4 reais e únicos, `Boolean.TRUE.equals($F{{...}})` em CDATA, ordem estrita XSD e `band_height <= 623`).
-2. **PROIBIDO POLUIR O CHAT COM XML LONGO:** **NUNCA** cole o código `.jrxml` / XML completo no chat. Salve diretamente nos arquivos do workspace.
+1. **GRAVAÇÃO DIRETA EM ARQUIVOS NO WORKSPACE OU VIA MCP:** O usuário JÁ AUTORIZOU a geração final do layout JasperReports. Escreva diretamente no diretório `{ws_text}` o arquivo `.jrxml` completo da ficha (e, quando aplicável, o bloco `detail_<nome>.xml`) e/ou utilize as ferramentas MCP `validate_and_compile_jrxml` e `render_preview_images` (passando `project_id` do contexto), validando 100% da árvore XML antes de concluir (`isBlankWhenNull="true"` em todos os `<textField>`, UUIDs v4 reais e únicos, `Boolean.TRUE.equals($F{{...}})` em CDATA, ordem estrita XSD e `band_height <= 623`).
+2. **PROIBIDO POLUIR O CHAT COM XML LONGO:** **NUNCA** cole o código `.jrxml` / XML completo no chat. Salve diretamente nos arquivos do workspace ou via `validate_and_compile_jrxml`.
 3. **RESPOSTA CONCISA DE ENTREGA:** No chat, confirme os arquivos gravados no workspace, o resultado do checklist de validação automática (XML, UUIDs, fields, limites de banda) e eventuais observações para o preview."""
 
     return (

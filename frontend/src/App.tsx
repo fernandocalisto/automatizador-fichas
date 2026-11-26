@@ -97,6 +97,7 @@ function StudioAppInner() {
   const [chatPhaseOverride, setChatPhaseOverride] = useState<ChatPhase | null>(
     null,
   );
+  const [artifactSyncTick, setArtifactSyncTick] = useState(0);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [jasperUp, setJasperUp] = useState<boolean | null>(null);
 
@@ -207,6 +208,7 @@ function StudioAppInner() {
             project={activeProject}
             onProjectUpdated={handleProjectUpdated}
             onNavigateSection={setActiveSection}
+            artifactSyncTick={artifactSyncTick}
           />
         );
       case "form_builder":
@@ -215,6 +217,7 @@ function StudioAppInner() {
             project={activeProject}
             onProjectUpdated={handleProjectUpdated}
             onNavigateSection={setActiveSection}
+            artifactSyncTick={artifactSyncTick}
           />
         );
       case "sql_db":
@@ -223,6 +226,7 @@ function StudioAppInner() {
             project={activeProject}
             onProjectUpdated={handleProjectUpdated}
             onNavigateSection={setActiveSection}
+            artifactSyncTick={artifactSyncTick}
           />
         );
       case "jasper_studio":
@@ -231,6 +235,7 @@ function StudioAppInner() {
             project={activeProject}
             onProjectUpdated={handleProjectUpdated}
             onNavigateSection={setActiveSection}
+            artifactSyncTick={artifactSyncTick}
             onOpenAgentChat={(phase) => {
               setChatPhaseOverride(phase ?? "jrxml");
               setChatOpen(true);
@@ -272,6 +277,7 @@ function StudioAppInner() {
           initialPhase={chatPhase}
           onProjectUpdated={handleProjectUpdated}
           onNavigateSection={setActiveSection}
+          onArtifactSynced={() => setArtifactSyncTick((prev) => prev + 1)}
         />
       )}
     </StudioShell>

@@ -9,18 +9,18 @@ import importlib.util
 import inspect
 import json
 import os
-import sys
+import shutil
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-try:
-    from backend.app.config import PROJECT_ROOT, get_data_dir, get_db_path
-except ModuleNotFoundError:  # pragma: no cover
-    from app.config import PROJECT_ROOT, get_data_dir, get_db_path  # type: ignore[no-redef]
-
-from app.harnesses.base import BaseSubprocessHarness, SubprocessRunner
+from app.harnesses.base import (
+    STUDIO_MCP_TOOL_NAMES,
+    BaseSubprocessHarness,
+    SubprocessRunner,
+    build_studio_mcp_server_spec,
+)
 from app.harnesses.types import (
     EventType,
     HarnessEvent,
@@ -245,19 +245,25 @@ class AgyHarness(BaseSubprocessHarness):
     @staticmethod
     def ensure_workspace_mcp_config(workspace_dir: Path) -> Path | None:
         """
-        Materializa o plugin de workspace `.agents/plugins/salutem-ficha-studio/` com
-        `plugin.json` e `mcp_config.json` apontando para o servidor MCP stdio nativo do Studio
-        (`python -m backend.app.mcp_tools.mcp_server`), permitindo ao AGY CLI descobrir e
-        invocar diretamente as 8 ferramentas determinísticas do Salutem Ficha Studio.
+        Materializa o plugin de workspace `.agents/plugins/salutem/` com `plugin.json` e
+        `mcp_config.json` (chave `studio` -> namespace limpo `salutem_studio`) apontando
+        para o servidor MCP stdio nativo do Studio (`python -m backend.app.mcp_tools.mcp_server`),
+        com todas as 8 ferramentas explicitamente habilitadas (`disabled: false`, `disabledTools: []`).
         """
         try:
             ws_root = Path(workspace_dir).resolve()
-            plugin_dir = ws_root / ".agents" / "plugins" / "salutem-ficha-studio"
+            plugins_root = ws_root / ".agents" / "plugins"
+            # Remove pasta legada com nome duplicado (salutem-ficha-studio_salutem-ficha-studio)
+            legacy_plugin_dir = plugins_root / "salutem-ficha-studio"
+            if legacy_plugin_dir.is_dir():
+                shutil.rmtree(legacy_plugin_dir, ignore_errors=True)
+
+            plugin_dir = plugins_root / "salutem"
             plugin_dir.mkdir(parents=True, exist_ok=True)
 
             plugin_manifest_path = plugin_dir / "plugin.json"
             plugin_manifest_text = json.dumps(
-                {"name": "salutem-ficha-studio"},
+                {"name": "salutem"},
                 ensure_ascii=False,
                 indent=2,
             ) + "\n"
@@ -267,19 +273,17 @@ class AgyHarness(BaseSubprocessHarness):
             ):
                 plugin_manifest_path.write_text(plugin_manifest_text, encoding="utf-8")
 
+            spec = build_studio_mcp_server_spec()
             mcp_config_path = plugin_dir / "mcp_config.json"
             mcp_payload = {
                 "mcpServers": {
-                    "salutem-ficha-studio": {
-                        "command": sys.executable,
-                        "args": ["-m", "backend.app.mcp_tools.mcp_server"],
-                        "env": {
-                            "PYTHONPATH": str(PROJECT_ROOT.resolve()),
-                            "PYTHONUTF8": "1",
-                            "PYTHONIOENCODING": "utf-8",
-                            "FICHA_STUDIO_DATA_DIR": str(get_data_dir().resolve()),
-                            "FICHA_STUDIO_DB_PATH": str(get_db_path().resolve()),
-                        },
+                    "studio": {
+                        "command": spec["command"],
+                        "args": spec["args"],
+                        "env": spec["env"],
+                        "disabled": False,
+                        "disabledTools": [],
+                        "alwaysAllow": list(STUDIO_MCP_TOOL_NAMES),
                     }
                 }
             }

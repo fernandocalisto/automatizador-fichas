@@ -4,10 +4,17 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
-from app.harnesses.base import BaseSubprocessHarness, SubprocessRunner
+from app.harnesses.base import (
+    STUDIO_MCP_SERVER_NAME,
+    BaseSubprocessHarness,
+    SubprocessRunner,
+    build_studio_mcp_server_spec,
+)
 from app.harnesses.types import (
     EventType,
     HarnessEvent,
@@ -16,14 +23,17 @@ from app.harnesses.types import (
     HarnessStatus,
 )
 
+# Limite seguro para argumento CLI no Windows (CreateProcessW tem limite total de 32.767 chars)
+_MAX_INLINE_SYSTEM_PROMPT_CHARS = 12000
+
 
 class ClaudeCodeHarness(BaseSubprocessHarness):
     """
     Adaptador oficial do Anthropic Claude Code CLI (`claude`).
 
     Executa `claude -p --output-format stream-json --verbose` com `--append-system-prompt`,
-    `--add-dir` e `--model` opcional, fazendo parse em tempo real das mensagens NDJSON
-    (`assistant` text/thinking/tool_use, `user` tool_result e `result`).
+    `--add-dir`, `--mcp-config`, `--dangerously-skip-permissions` e `--model` opcional,
+    fazendo parse em tempo real das mensagens NDJSON (`assistant`, `user` tool_result e `result`).
     """
 
     kind = HarnessKind.CLAUDE
@@ -35,12 +45,18 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
         runner: SubprocessRunner | None = None,
         which_resolver: Callable[[str], str | None] | None = None,
         default_timeout: float = 300.0,
+        dangerously_skip_permissions: bool | None = None,
     ) -> None:
         super().__init__(
             runner=runner,
             which_resolver=which_resolver,
             default_timeout=default_timeout,
         )
+        if dangerously_skip_permissions is None:
+            env_val = os.environ.get("CLAUDE_SKIP_PERMISSIONS", "1").strip().lower()
+            self._dangerously_skip_permissions = env_val not in ("0", "false", "no", "off")
+        else:
+            self._dangerously_skip_permissions = bool(dangerously_skip_permissions)
 
     def _find_cli_executable(self) -> str | None:
         return self._resolve_executable("claude")
@@ -59,11 +75,62 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
             supports_mcp=True,
         )
 
+    @staticmethod
+    def ensure_workspace_mcp_config(workspace_dir: Path) -> Path | None:
+        """Materializa `.claude/studio_mcp_config.json` apontando para o servidor MCP do Studio."""
+        try:
+            ws_root = Path(workspace_dir).resolve()
+            claude_dir = ws_root / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            cfg_path = claude_dir / "studio_mcp_config.json"
+            payload = {"mcpServers": {STUDIO_MCP_SERVER_NAME: build_studio_mcp_server_spec()}}
+            text = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+            if not cfg_path.is_file() or cfg_path.read_text(encoding="utf-8") != text:
+                cfg_path.write_text(text, encoding="utf-8")
+            return cfg_path
+        except OSError:
+            return None
+
+    @staticmethod
+    def _prepare_system_prompt(
+        workspace_dir: Path,
+        system_prompt: str,
+    ) -> tuple[str, str | None]:
+        """
+        Evita estourar o limite de 32 KB da linha de comando do Windows (`WinError 206`)
+        quando `system_prompt` é longo (ex.: `gerador_jrxml/SKILL.md` com ~34 KB).
+        Retorna `(cli_system_prompt, stdin_system_prompt_prefix)`.
+        """
+        if len(system_prompt) <= _MAX_INLINE_SYSTEM_PROMPT_CHARS:
+            return system_prompt, None
+
+        try:
+            ws_root = Path(workspace_dir).resolve()
+            claude_dir = ws_root / ".claude"
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            prompt_file = claude_dir / "studio_system_prompt.md"
+            if not prompt_file.is_file() or prompt_file.read_text(encoding="utf-8") != system_prompt:
+                prompt_file.write_text(system_prompt, encoding="utf-8")
+            file_note = f"Arquivo completo de referência: {prompt_file}"
+        except OSError:
+            file_note = ""
+
+        # Mantém o cabeçalho 2-Gate compacto na CLI e envia o SKILL completo via stdin
+        header_part = system_prompt.split("\n---\n", 1)[0].strip()
+        cli_prompt = (
+            f"{header_part[:4000]}\n\n"
+            f"As instruções completas da Skill Salutem foram anexadas no início do prompt de entrada. "
+            f"{file_note}"
+        ).strip()
+        return cli_prompt, system_prompt
+
     def build_command(
         self,
         executable: str,
         request: HarnessRunRequest,
         system_prompt: str,
+        *,
+        mcp_config_path: Path | None = None,
     ) -> list[str]:
         """Constrói os argumentos de linha de comando para `claude -p --output-format stream-json`."""
         cmd = [
@@ -77,6 +144,12 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
             "--add-dir",
             str(request.workspace_dir.resolve()),
         ]
+        if self._dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
+        elif not request.gate_authorized:
+            cmd.extend(["--permission-mode", "plan"])
+        if mcp_config_path is not None:
+            cmd.extend(["--mcp-config", str(mcp_config_path.resolve())])
         if request.model:
             cmd.extend(["--model", request.model])
         return cmd
@@ -254,19 +327,42 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
             return
 
         system_prompt, user_prompt = self._build_prompts(request)
-        cmd = self.build_command(exe, request, system_prompt)
-        state: dict[str, Any] = {"had_error": False, "emitted_assistant_text": False}
+        mcp_config_path = self.ensure_workspace_mcp_config(request.workspace_dir)
+        cli_system_prompt, stdin_system_prefix = self._prepare_system_prompt(
+            request.workspace_dir, system_prompt
+        )
+        effective_stdin = (
+            f"{stdin_system_prefix}\n\n---\n\n{user_prompt}"
+            if stdin_system_prefix is not None
+            else user_prompt
+        )
+        cmd = self.build_command(
+            exe,
+            request,
+            cli_system_prompt,
+            mcp_config_path=mcp_config_path,
+        )
+        state: dict[str, Any] = {
+            "had_error": False,
+            "emitted_assistant_text": False,
+            "started_tools": {},
+            "completed_tools": set(),
+        }
         stderr_lines: list[str] = []
 
         try:
             async for chunk in self._exec_lines(
                 cmd,
                 cwd=request.workspace_dir,
-                stdin_data=user_prompt.encode("utf-8"),
+                stdin_data=effective_stdin.encode("utf-8"),
                 timeout_seconds=request.timeout_seconds,
             ):
                 if chunk.stream == "stdout":
                     for ev in self.parse_ndjson_line(chunk.line, state):
+                        if ev.type == EventType.TOOL_CALL and ev.tool_call_id:
+                            state["started_tools"][ev.tool_call_id] = ev.tool_name or "tool"
+                        elif ev.type == EventType.TOOL_RESULT and ev.tool_call_id:
+                            state["completed_tools"].add(ev.tool_call_id)
                         yield ev
                 elif chunk.stream == "stderr":
                     if chunk.line.strip():
@@ -283,6 +379,32 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
                             harness=self.kind,
                             metadata={"returncode": chunk.returncode},
                         )
+
+            unfinished = [
+                (cid, name)
+                for cid, name in state["started_tools"].items()
+                if cid not in state["completed_tools"]
+            ]
+            if not state.get("had_error") and unfinished and not state.get("emitted_assistant_text"):
+                state["had_error"] = True
+                for cid, name in unfinished:
+                    err_text = "Ferramenta interrompida antes de retornar resultado no Claude Code CLI."
+                    yield HarnessEvent(
+                        type=EventType.TOOL_RESULT,
+                        tool_name=name,
+                        tool_call_id=cid,
+                        tool_output=err_text,
+                        harness=self.kind,
+                        metadata={"error": err_text, "interrupted": True},
+                    )
+                yield HarnessEvent(
+                    type=EventType.ERROR,
+                    content=(
+                        "O Claude Code CLI encerrou antes de concluir as ferramentas pendentes "
+                        f"({', '.join(name for _, name in unfinished)})."
+                    ),
+                    harness=self.kind,
+                )
 
             if not state.get("had_error"):
                 gate_ev = self._make_gate_event_if_needed(request)

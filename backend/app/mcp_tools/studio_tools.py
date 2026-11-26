@@ -7,11 +7,28 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from app.config import SKILLS_DIR
-from app.mcp_tools.pdf_tools import (
-    crop_pdf_region_to_png,
+try:
+    from backend.app.config import SKILLS_DIR
+except ModuleNotFoundError:  # pragma: no cover
+    from app.config import SKILLS_DIR  # type: ignore[no-redef]
+
+from .artifact_tools import (
     extract_pdf_geometry,
+    render_preview_images,
+    save_validated_json,
+    validate_and_compile_jrxml,
+)
+from .pdf_tools import (
+    crop_pdf_region_to_png,
+    extract_pdf_geometry as _extract_pdf_geometry_raw,
     render_pdf_to_pngs,
+)
+
+LEGACY_STUDIO_TOOL_NAMES: tuple[str, ...] = (
+    "inspect_clinical_pdf",
+    "render_pdf_preview_pages",
+    "crop_pdf_feedback_region",
+    "get_salutem_skill",
 )
 
 _SKILL_ALIASES: dict[str, str] = {
@@ -29,7 +46,7 @@ def inspect_clinical_pdf(pdf_path: str) -> dict[str, Any]:
     Extrai dimensões, orientação, spans de texto com fontes/coordenadas exatas e marcadores
     vetoriais (checkboxes quadrados vs rádios circulares) de um PDF clínico.
     """
-    return extract_pdf_geometry(pdf_path)
+    return _extract_pdf_geometry_raw(pdf_path)
 
 
 def render_pdf_preview_pages(
@@ -222,6 +239,149 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "extract_pdf_geometry",
+        "description": (
+            "Extrai a geometria exata (dimensões, orientação, spans de texto com fontes/coordenadas "
+            "e candidatos a checkboxes/rádios) a partir de um caminho `pdf_path` direto ou "
+            "resolvendo o `uploads/source.pdf` de um projeto via `project_id`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pdf_path": {
+                    "type": "string",
+                    "description": "Caminho absoluto ou relativo do PDF clínico (opcional se project_id for informado).",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "ID do projeto no WorkspaceService cujo source.pdf será inspecionado.",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "save_validated_json",
+        "description": (
+            "Valida estritamente um JSON clínico Salutem (estrutura, UPPERCASE e auditoria de regras), "
+            "persiste uma nova revisão imutável (created_by='agent') no projeto e opcionalmente "
+            "regenera automaticamente os scripts sql_insert e sql_select."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "ID do projeto alvo no Salutem Ficha Studio.",
+                },
+                "json_content": {
+                    "type": ["string", "object"],
+                    "description": "Conteúdo do JSON clínico como string JSON ou objeto estruturado.",
+                },
+                "summary": {
+                    "type": "string",
+                    "default": "JSON salvo pelo agente",
+                    "description": "Resumo da revisão para o histórico imutável do projeto.",
+                },
+                "auto_regenerate_sql": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Se verdadeiro, regenera automaticamente sql_insert e sql_select.",
+                },
+                "apply_uppercase": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Se verdadeiro, aplica a regra Salutem de UPPERCASE nos campos textuais.",
+                },
+            },
+            "required": ["project_id", "json_content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "validate_and_compile_jrxml",
+        "description": (
+            "Executa o linter estrito Fase 4 (`lint_jrxml`) sobre o `.jrxml` fornecido ou sobre a "
+            "última revisão do projeto, salva nova revisão quando bem-formado (`save_artifact=true`) "
+            "e compila no JasperDaemonService retornando o diagnóstico completo."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "ID do projeto alvo no Salutem Ficha Studio.",
+                },
+                "jrxml_content": {
+                    "type": "string",
+                    "description": "Conteúdo XML completo do `.jrxml`. Se omitido, carrega a última revisão salva.",
+                },
+                "save_artifact": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Se verdadeiro e o XML for bem-formado, salva revisão jrxml (created_by='agent').",
+                },
+                "summary": {
+                    "type": "string",
+                    "default": "JRXML validado pelo agente",
+                    "description": "Resumo da revisão salva no histórico do projeto.",
+                },
+            },
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "render_preview_images",
+        "description": (
+            "Gera o PDF fictício de validação (`full`, `stress` ou `blank`) em modo `offline`, "
+            "`auto` ou `db_hybrid` via JasperDaemon e converte todas as páginas em arquivos PNG "
+            "para inspeção visual multimodal."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {
+                    "type": "string",
+                    "description": "ID do projeto alvo no Salutem Ficha Studio.",
+                },
+                "scenario": {
+                    "type": "string",
+                    "enum": ["full", "stress", "blank"],
+                    "default": "full",
+                    "description": "Cenário fictício de preenchimento ('full', 'stress' ou 'blank').",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["offline", "auto", "db_hybrid"],
+                    "default": "offline",
+                    "description": "Modo de renderização ('offline', 'auto' ou 'db_hybrid').",
+                },
+                "dpi": {
+                    "type": "integer",
+                    "default": 150,
+                    "minimum": 36,
+                    "maximum": 600,
+                    "description": "Resolução em DPI das imagens PNG renderizadas (padrão: 150).",
+                },
+                "inline_jrxml": {
+                    "type": "string",
+                    "description": "XML `.jrxml` opcional para preview sem sobrescrever o artefato salvo.",
+                },
+                "db_profile_id": {
+                    "type": "string",
+                    "description": "ID opcional do perfil PostgreSQL para modo 'db_hybrid' ou 'auto'.",
+                },
+                "atendimento_id": {
+                    "type": "integer",
+                    "description": "ID de atendimento opcional para o parâmetro $P{id}.",
+                },
+            },
+            "required": ["project_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 STUDIO_TOOL_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
@@ -229,16 +389,48 @@ STUDIO_TOOL_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "render_pdf_preview_pages": render_pdf_preview_pages,
     "crop_pdf_feedback_region": crop_pdf_feedback_region,
     "get_salutem_skill": get_salutem_skill,
+    "extract_pdf_geometry": extract_pdf_geometry,
+    "save_validated_json": save_validated_json,
+    "validate_and_compile_jrxml": validate_and_compile_jrxml,
+    "render_preview_images": render_preview_images,
 }
 
 
-def get_mcp_tool_descriptors() -> list[dict[str, Any]]:
-    """Retorna cópia dos descritores JSON-Schema prontos para registro em servidor MCP."""
+def get_mcp_tool_descriptors(*, include_artifact_tools: bool = False) -> list[dict[str, Any]]:
+    """
+    Retorna cópia dos descritores JSON-Schema para registro em servidor MCP.
+
+    Por retrocompatibilidade com a Fase 1, `include_artifact_tools=False` retorna as 4
+    ferramentas base de PDF/Skill; passe `include_artifact_tools=True` (ou use
+    `get_all_mcp_tool_descriptors()` / `STUDIO_TOOL_DEFINITIONS`) para obter todas as 8 ferramentas.
+    """
+    if include_artifact_tools:
+        return list(STUDIO_TOOL_DEFINITIONS)
+    return [d for d in STUDIO_TOOL_DEFINITIONS if d["name"] in LEGACY_STUDIO_TOOL_NAMES]
+
+
+def get_all_mcp_tool_descriptors() -> list[dict[str, Any]]:
+    """Retorna todos os descritores JSON-Schema (PDF/Skills + Artefatos Determinísticos)."""
     return list(STUDIO_TOOL_DEFINITIONS)
 
 
-def get_sdk_tool_callables() -> list[Callable[..., dict[str, Any]]]:
-    """Retorna a lista de funções Python tipadas prontas para binding direto em SDKs de agentes."""
+def get_sdk_tool_callables(
+    *, include_artifact_tools: bool = False
+) -> list[Callable[..., dict[str, Any]]]:
+    """
+    Retorna a lista de funções Python tipadas prontas para binding direto em SDKs de agentes.
+
+    Por retrocompatibilidade com a Fase 1, `include_artifact_tools=False` retorna as 4
+    ferramentas base; passe `include_artifact_tools=True` (ou use `get_all_sdk_tool_callables()`)
+    para incluir todas as 8 ferramentas.
+    """
+    if include_artifact_tools:
+        return list(STUDIO_TOOL_HANDLERS.values())
+    return [STUDIO_TOOL_HANDLERS[name] for name in LEGACY_STUDIO_TOOL_NAMES]
+
+
+def get_all_sdk_tool_callables() -> list[Callable[..., dict[str, Any]]]:
+    """Retorna todas as funções Python invocáveis registradas no Studio."""
     return list(STUDIO_TOOL_HANDLERS.values())
 
 

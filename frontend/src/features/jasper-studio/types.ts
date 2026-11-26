@@ -1,6 +1,5 @@
 import type {
   ChatMessageRead,
-  ClinicalOrientation,
   PreviewMode,
   ScenarioType,
 } from "@/types/studio";

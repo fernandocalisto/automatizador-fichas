@@ -44,7 +44,7 @@ export interface PdfPreviewCanvasProps {
   onGeneratePreview: () => void;
 }
 
-const NUMERIC_ZOOMS: number[] = [0.75, 1, 1.25, 1.5];
+const NUMERIC_ZOOMS: Exclude<ZoomPreset, "fit-width">[] = [0.75, 1, 1.25, 1.5];
 
 export function PdfPreviewCanvas({
   projectId,

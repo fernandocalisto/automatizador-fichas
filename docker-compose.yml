@@ -1,0 +1,16 @@
+services:
+  studio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      - studio_data:/data
+    environment:
+      FICHA_STUDIO_DATA_DIR: /data
+      FICHA_STUDIO_VAULT_KEY: ${FICHA_STUDIO_VAULT_KEY:-change-me-in-production}
+    restart: unless-stopped
+
+volumes:
+  studio_data:

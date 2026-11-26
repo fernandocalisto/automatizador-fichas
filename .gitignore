@@ -124,3 +124,17 @@ Thumbs.db
 
 # Diretório de orquestração interna de agentes
 .agent/
+
+# Salutem Ficha Studio (Web + Python + Java)
+.venv/
+venv/
+.env
+workspaces/
+*.db
+*.db-shm
+*.db-wal
+node_modules/
+frontend/dist/
+java-engine/target/
+!frontend/src/lib/
+!frontend/src/lib/**

@@ -1,0 +1,331 @@
+package com.jasper.cli;
+
+import picocli.CommandLine;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.IVersionProvider;
+import picocli.CommandLine.Option;
+
+import java.io.FileDescriptor;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStreamWriter;
+import java.io.PrintStream;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.Callable;
+
+/**
+ * Entrypoint do {@code jasper-cli}.
+ *
+ * <p>Contrato de saída: a stdout recebe <strong>exclusivamente</strong> um documento JSON
+ * ({@link OutputPayload}) — exceto em {@code --help}/{@code --version}, que exibem texto.
+ * Qualquer coisa que bibliotecas tentem escrever em {@code System.out} é redirecionada para
+ * a stderr, preservando a integridade do JSON. Sucesso termina com exit code 0; qualquer
+ * erro (inclusive de parsing de argumentos) termina com exit code 1.</p>
+ */
+@Command(
+        name = "jasper-cli",
+        mixinStandardHelpOptions = true,
+        versionProvider = Main.VersionProvider.class,
+        sortOptions = false,
+        usageHelpAutoWidth = true,
+        headerHeading = "%n",
+        header = "Motor CLI sob demanda do JasperReports Developer Tools.",
+        descriptionHeading = "%n",
+        description = {
+                "Compila, preenche e exporta relatórios JasperReports e testa conexões JDBC.",
+                "A saída é sempre um JSON estruturado na stdout (exit code 0 = sucesso, 1 = erro)."
+        },
+        optionListHeading = "%nOpções:%n",
+        footerHeading = "%n",
+        footer = {
+                "Ações:",
+                "  compile         Compila --input (.jrxml) gerando o .jasper.",
+                "  decompile       Descompila --input (.jasper) reconstruindo o .jrxml em UTF-8.",
+                "  fill            Preenche --input (.jrxml/.jasper) e grava o .jrprint.",
+                "  export          Compila (se .jrxml), preenche e exporta para --format (pdf|jrprint).",
+                "                  Também aceita um .jrprint como --input.",
+                "  test-conn       Testa a conexão JDBC e retorna a latência em ms.",
+                "  inspect-params  Lista parâmetros, campos e query de --input (.jrxml/.jasper).",
+                "  inspect-query   Executa a query do relatório no banco (LIMIT 0 / WHERE 1=0) e retorna metadados JDBC das colunas.",
+                "  serve           Inicia o daemon HTTP aquecido em 127.0.0.1 (--port 0 escolhe porta efêmera).",
+                "",
+                "Sem --db-url, fill/export usam --mock-data (JRMapCollectionDataSource) ou 1 registro vazio.",
+                "Parâmetros injetados automaticamente: SUBREPORT_DIR / caminho_relatorio (diretório de --input",
+                "ou --subreport-dir, com '/' final) e REPORT_LOCALE (pt_BR), a menos que sejam informados em --params.",
+                "A senha também pode ser fornecida pela variável de ambiente " + CommandHandler.DB_PASS_ENV + ".",
+                "",
+                "Exemplos:",
+                "  java -jar jasper-cli.jar --action compile --input relatorio.jrxml",
+                "  java -jar jasper-cli.jar --action decompile --input relatorio.jasper --output relatorio.jrxml",
+                "  java -jar jasper-cli.jar --action export --input relatorio.jrxml --output saida.pdf \\",
+                "       --db-url jdbc:postgresql://localhost:5432/hospital --db-user app --db-pass segredo \\",
+                "       --params \"{\\\"CD_ATENDIMENTO\\\": 1050}\"",
+                "  java -jar jasper-cli.jar --action test-conn --db-url jdbc:oracle:thin:@host:1521:ORCL \\",
+                "       --db-user app --db-pass segredo",
+                "  java -jar jasper-cli.jar --action inspect-query --input relatorio.jrxml \\",
+                "       --db-url jdbc:postgresql://localhost:5432/hospital --db-user app --db-pass segredo"
+        }
+)
+public class Main implements Callable<Integer> {
+
+    @Option(names = "--action", required = true, paramLabel = "<action>", order = 1,
+            description = "Obrigatório. compile | decompile | fill | export | test-conn | inspect-params | inspect-query | serve")
+    private String action;
+
+    @Option(names = "--format", defaultValue = "pdf", paramLabel = "<format>", order = 2,
+            description = "pdf | jasper | jrprint (padrão: ${DEFAULT-VALUE}).")
+    private String format;
+
+    @Option(names = "--input", paramLabel = "<arquivo>", order = 3,
+            description = "Arquivo .jrxml, .jasper ou .jrprint (conforme a ação).")
+    private String input;
+
+    @Option(names = "--output", paramLabel = "<arquivo>", order = 4,
+            description = "Arquivo (ou diretório) de saída. Padrão: mesmo nome de --input com a nova extensão.")
+    private String output;
+
+    @Option(names = "--db-url", paramLabel = "<jdbc-url>", order = 5,
+            description = "URL JDBC, ex.: jdbc:postgresql://localhost:5432/hospital")
+    private String dbUrl;
+
+    @Option(names = "--db-user", paramLabel = "<usuário>", order = 6,
+            description = "Usuário do banco de dados.")
+    private String dbUser;
+
+    @Option(names = "--db-pass", paramLabel = "<senha>", order = 7,
+            description = "Senha do banco de dados (alternativa: variável " + CommandHandler.DB_PASS_ENV + ").")
+    private String dbPass;
+
+    @Option(names = "--custom-driver-jar", paramLabel = "<jar>", order = 8,
+            description = "Caminho absoluto de um .jar de driver JDBC externo.")
+    private String customDriverJar;
+
+    @Option(names = "--custom-driver-class", paramLabel = "<classe>", order = 9,
+            description = "Classe do driver externo, ex.: com.microsoft.sqlserver.jdbc.SQLServerDriver")
+    private String customDriverClass;
+
+    @Option(names = "--params", paramLabel = "<json>", order = 10,
+            description = "Objeto JSON com os parâmetros do relatório, ex.: '{\"CD_ATENDIMENTO\": 1050}'. "
+                    + "Use @arquivo.json para ler de um arquivo.")
+    private String params;
+
+    @Option(names = "--mock-data", paramLabel = "<json>", order = 11,
+            description = "Array JSON de objetos com linhas mock para preenchimento sem banco, "
+                    + "ex.: '[{\"pac_nome\": \"Maria\"}]'. Use @arquivo.json para ler de um arquivo.")
+    private String mockData;
+
+    @Option(names = "--subreport-dir", paramLabel = "<dir>", order = 12,
+            description = "Diretório base para sub-relatórios (sobrescreve SUBREPORT_DIR e caminho_relatorio).")
+    private String subreportDir;
+
+    @Option(names = "--port", defaultValue = "0", paramLabel = "<port>", order = 13,
+            description = "Porta TCP em 127.0.0.1 para --action serve (padrão: ${DEFAULT-VALUE}, porta efêmera).")
+    private int port;
+
+    /** Campos opcionais para invocação programática (modo daemon HTTP). */
+    private Map<String, Object> paramsMap;
+    private List<Map<String, Object>> mockRows;
+
+    /** Stdout real (UTF-8), reservada para o JSON de saída. */
+    private static PrintStream jsonOut;
+
+    public static void main(String[] args) {
+        System.setProperty("java.awt.headless", "true");
+        jsonOut = new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8);
+        PrintStream err = new PrintStream(new FileOutputStream(FileDescriptor.err), true, StandardCharsets.UTF_8);
+        // Isola a stdout: logs/prints de bibliotecas vão para a stderr.
+        System.setOut(err);
+        System.setErr(err);
+
+        int exitCode;
+        try {
+            CommandLine cmd = new CommandLine(new Main());
+            cmd.setOut(new PrintWriter(new OutputStreamWriter(jsonOut, StandardCharsets.UTF_8), true));
+            cmd.setErr(new PrintWriter(new OutputStreamWriter(err, StandardCharsets.UTF_8), true));
+            cmd.setCaseInsensitiveEnumValuesAllowed(true);
+            cmd.setParameterExceptionHandler((ex, argv) -> {
+                emit(OutputPayload.error(ErrorType.INVALID_ARGUMENT,
+                        ex.getMessage() + ". Use --help para ver as opções disponíveis.", null));
+                return 1;
+            });
+            cmd.setExecutionExceptionHandler((ex, commandLine, parseResult) -> {
+                emit(OutputPayload.fromThrowable(ex));
+                return 1;
+            });
+            exitCode = cmd.execute(args);
+        } catch (Throwable t) {
+            emit(OutputPayload.fromThrowable(t));
+            exitCode = 1;
+        }
+        jsonOut.flush();
+        err.flush();
+        // Encerra explicitamente: drivers JDBC/AWT podem deixar threads não-daemon vivas.
+        System.exit(exitCode);
+    }
+
+    @Override
+    public Integer call() throws Exception {
+        if (action != null && "serve".equalsIgnoreCase(action.trim())) {
+            PrintStream out = jsonOut != null ? jsonOut : System.out;
+            new DaemonServer(port, out).runBlocking();
+            return 0;
+        }
+        OutputPayload payload = new CommandHandler(this).handle();
+        emit(payload);
+        return 0;
+    }
+
+    static void emit(OutputPayload payload) {
+        PrintStream out = jsonOut != null ? jsonOut : System.out;
+        out.println(payload.toJson());
+        out.flush();
+    }
+
+    // ------------------------------------------------------------------ getters
+
+    public String getAction() {
+        return action;
+    }
+
+    public String getFormat() {
+        return format;
+    }
+
+    public String getInput() {
+        return input;
+    }
+
+    public String getOutput() {
+        return output;
+    }
+
+    public String getDbUrl() {
+        return dbUrl;
+    }
+
+    public String getDbUser() {
+        return dbUser;
+    }
+
+    public String getDbPass() {
+        return dbPass;
+    }
+
+    public String getCustomDriverJar() {
+        return customDriverJar;
+    }
+
+    public String getCustomDriverClass() {
+        return customDriverClass;
+    }
+
+    public String getParams() {
+        return params;
+    }
+
+    public String getMockData() {
+        return mockData;
+    }
+
+    public String getSubreportDir() {
+        return subreportDir;
+    }
+
+    public int getPort() {
+        return port;
+    }
+
+    public Map<String, Object> getParamsMap() {
+        return paramsMap;
+    }
+
+    public List<Map<String, Object>> getMockRows() {
+        return mockRows;
+    }
+
+    // ------------------------------------------------------------------ setters (programmatic / daemon)
+
+    public void setAction(String action) {
+        this.action = action;
+    }
+
+    public void setFormat(String format) {
+        this.format = format;
+    }
+
+    public void setInput(String input) {
+        this.input = input;
+    }
+
+    public void setOutput(String output) {
+        this.output = output;
+    }
+
+    public void setDbUrl(String dbUrl) {
+        this.dbUrl = dbUrl;
+    }
+
+    public void setDbUser(String dbUser) {
+        this.dbUser = dbUser;
+    }
+
+    public void setDbPass(String dbPass) {
+        this.dbPass = dbPass;
+    }
+
+    public void setCustomDriverJar(String customDriverJar) {
+        this.customDriverJar = customDriverJar;
+    }
+
+    public void setCustomDriverClass(String customDriverClass) {
+        this.customDriverClass = customDriverClass;
+    }
+
+    public void setParams(String params) {
+        this.params = params;
+    }
+
+    public void setMockData(String mockData) {
+        this.mockData = mockData;
+    }
+
+    public void setSubreportDir(String subreportDir) {
+        this.subreportDir = subreportDir;
+    }
+
+    public void setPort(int port) {
+        this.port = port;
+    }
+
+    public void setParamsMap(Map<String, Object> paramsMap) {
+        this.paramsMap = paramsMap;
+    }
+
+    public void setMockRows(List<Map<String, Object>> mockRows) {
+        this.mockRows = mockRows;
+    }
+
+    /** Lê as versões do recurso filtrado pelo Maven ({@code jasper-cli.properties}). */
+    static final class VersionProvider implements IVersionProvider {
+        @Override
+        public String[] getVersion() {
+            Properties p = new Properties();
+            try (InputStream in = Main.class.getResourceAsStream("/jasper-cli.properties")) {
+                if (in != null) {
+                    p.load(in);
+                }
+            } catch (Exception ignored) {
+                // usa valores padrão
+            }
+            return new String[]{
+                    "jasper-cli " + p.getProperty("cli.version", "dev"),
+                    "JasperReports " + p.getProperty("jasperreports.version", "?"),
+                    "Java " + System.getProperty("java.version") + " (" + System.getProperty("java.vendor") + ")"
+            };
+        }
+    }
+}

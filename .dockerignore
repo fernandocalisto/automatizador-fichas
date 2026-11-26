@@ -1,0 +1,43 @@
+# Git e metadados internos
+.git
+.gitignore
+.github
+.agent
+implementation_plan.md
+
+# Ambientes virtuais e segredos locais
+.venv
+venv
+.env
+.env.*
+
+# Dados persistentes locais e bancos SQLite
+workspaces
+*.db
+*.db*
+
+# Frontend build local e dependencias (reconstruidos no Stage 1)
+frontend/node_modules
+frontend/dist
+frontend/coverage
+
+# Artefatos de build Maven (o JAR compilado reside em resources/bin/jasper-daemon.jar)
+java-engine/target
+
+# Cache Python e testes
+__pycache__
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+
+# IDEs e temporarios
+.vscode
+.idea
+*.log
+*.tmp
+Thumbs.db
+.DS_Store

@@ -467,25 +467,49 @@ describe("JasperStudioView", () => {
     );
   });
 
-  it("draws a rectangular region annotation and submits visual_region_feedback to api.appendChat", async () => {
+  it("draws a rectangular region annotation, crops PNG via submitVisualRegionFeedback, and offers 1-click Chat IA jump", async () => {
     vi.spyOn(api, "getArtifact").mockResolvedValue(makeArtifactRevision());
     vi.spyOn(api, "generatePreview").mockResolvedValue(makePreviewResponse());
 
-    const appendChatSpy = vi
-      .spyOn(api, "appendChat")
+    const openChatSpy = vi.fn();
+    const cropFeedbackSpy = vi
+      .spyOn(api, "submitVisualRegionFeedback")
       .mockImplementation(async (_projectId, payload) => ({
-        id: 501,
+        ok: true,
         project_id: MOCK_PROJECT.id,
-        phase: payload.phase ?? "jrxml",
-        role: payload.role ?? "user",
-        content: payload.content,
-        metadata: payload.metadata ?? {},
-        metadata_json: JSON.stringify(payload.metadata ?? {}),
-        created_at: "2026-11-25T11:00:00Z",
+        crop_png_path: "/tmp/crop_p1.png",
+        crop_url: `/api/projects/${MOCK_PROJECT.id}/jasper/preview/feedback/crop_p1.png`,
+        message: {
+          id: 501,
+          project_id: MOCK_PROJECT.id,
+          phase: "jrxml",
+          role: "user",
+          content: payload.content,
+          metadata: {
+            type: "visual_region_feedback",
+            page: payload.page,
+            pdf_rect: payload.pdf_rect,
+            detail_coords: payload.detail_coords ?? {},
+            scenario: payload.scenario ?? "full",
+            crop_png_path: "/tmp/crop_p1.png",
+            crop_url: `/api/projects/${MOCK_PROJECT.id}/jasper/preview/feedback/crop_p1.png`,
+          },
+          metadata_json: "{}",
+          created_at: "2026-11-25T11:00:00Z",
+        },
       }));
 
     const user = userEvent.setup();
-    renderView();
+    render(
+      <ToastProvider>
+        <JasperStudioView
+          project={MOCK_PROJECT}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+          onOpenAgentChat={openChatSpy}
+        />
+      </ToastProvider>,
+    );
 
     await waitFor(() => {
       expect(screen.getByTestId("pdf-preview-canvas")).toBeInTheDocument();
@@ -531,38 +555,37 @@ describe("JasperStudioView", () => {
     );
 
     await waitFor(() => {
-      expect(appendChatSpy).toHaveBeenCalledWith(MOCK_PROJECT.id, {
-        phase: "jrxml",
-        role: "user",
-        content: "esses 3 checkboxes ficaram colados, espaçar horizontalmente",
-        metadata: {
-          type: "visual_region_feedback",
-          page: 1,
-          pdf_rect: {
-            x0: 100,
-            y0: 250,
-            x1: 320,
-            y1: 310,
-            width: 220,
-            height: 60,
-          },
-          detail_coords: {
-            x: 80,
-            y: 68,
-            width: 220,
-            height: 60,
-          },
-          scenario: "full",
+      expect(cropFeedbackSpy).toHaveBeenCalledWith(MOCK_PROJECT.id, {
+        page: 1,
+        pdf_rect: {
+          x0: 100,
+          y0: 250,
+          x1: 320,
+          y1: 310,
+          width: 220,
+          height: 60,
         },
+        detail_coords: {
+          x: 80,
+          y: 68,
+          width: 220,
+          height: 60,
+        },
+        scenario: "full",
+        content: "esses 3 checkboxes ficaram colados, espaçar horizontalmente",
+        dpi: 200,
       });
     });
 
-    // Verifica listagem da anotação enviada na sessão
+    // Verifica listagem da anotação enviada na sessão e botão 1-clique Abrir Chat IA
     expect(
       screen.getByText(
         /esses 3 checkboxes ficaram colados, espaçar horizontalmente/i,
       ),
     ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Abrir Chat IA/i }));
+    expect(openChatSpy).toHaveBeenCalledWith("jrxml");
   });
 
   it("renders export bundle (.zip) link reflecting active scenario/mode and saves JRXML revisions", async () => {

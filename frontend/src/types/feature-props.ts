@@ -1,4 +1,4 @@
-import type { ProjectRead, StudioSection } from "@/types/studio";
+import type { ChatPhase, ProjectRead, StudioSection } from "@/types/studio";
 
 export interface ProjectsDashboardProps {
   projects: ProjectRead[];
@@ -30,6 +30,7 @@ export interface JasperStudioViewProps {
   project: ProjectRead;
   onProjectUpdated: (project: ProjectRead) => void;
   onNavigateSection: (section: StudioSection) => void;
+  onOpenAgentChat?: (phase?: ChatPhase) => void;
 }
 
 export interface SettingsViewProps {

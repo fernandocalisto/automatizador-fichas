@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
+import time
 import zipfile
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -28,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from backend.app.config import get_data_dir
 from backend.app.core.json_utils import parse_and_validate_clinical_json
 from backend.app.core.sql_insert import generate_insert_sql
+from backend.app.db.schemas import ChatMessageCreate
 from backend.app.jrxml.linter import lint_jrxml
 from backend.app.jrxml.mock_data import (
     ScenarioType,
@@ -35,7 +38,7 @@ from backend.app.jrxml.mock_data import (
     generate_fictitious_row,
     prepare_preview_jrxml,
 )
-from backend.app.mcp_tools.pdf_tools import render_pdf_to_pngs
+from backend.app.mcp_tools.pdf_tools import crop_pdf_region_to_png, render_pdf_to_pngs
 from backend.app.services.subreport_service import SubreportService
 from backend.app.services.workspace_service import (
     ArtifactNotFoundError,
@@ -86,6 +89,19 @@ class PreviewPageInfo(BaseModel):
     url: str
     filename: str
     size_bytes: int
+
+
+class VisualRegionCropRequest(BaseModel):
+    """Payload de feedback visual retangular no preview PDF com recorte PNG automático."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    page: int = Field(default=1, ge=1)
+    pdf_rect: dict[str, float] | list[float]
+    detail_coords: dict[str, Any] | None = None
+    scenario: ScenarioType = "full"
+    content: str = Field(..., min_length=1)
+    dpi: int = Field(default=200, ge=72, le=400)
 
 
 # -----------------------------------------------------------------------------
@@ -669,6 +685,154 @@ def stream_project_preview_page_png(
         path=str(png_path),
         media_type="image/png",
         filename=png_path.name,
+        content_disposition_type="inline",
+    )
+
+
+@router.post("/{project_id}/jasper/preview/crop-feedback", status_code=status.HTTP_201_CREATED)
+def submit_visual_region_crop_feedback(
+    project_id: str,
+    payload: VisualRegionCropRequest,
+    workspace_service: WorkspaceSvcDep,
+) -> dict[str, Any]:
+    """
+    Recorta em PNG de alta resolução a área selecionada no PDF de preview (quando disponível)
+    e grava a anotação estruturada `visual_region_feedback` no chat JRXML do projeto.
+    """
+    try:
+        project = workspace_service.get_project(project_id)
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
+
+    if isinstance(payload.pdf_rect, list):
+        if len(payload.pdf_rect) != 4:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="'pdf_rect' em formato lista deve conter exatamente 4 números [x0, y0, x1, y1].",
+            )
+        x0, y0, x1, y1 = (float(v) for v in payload.pdf_rect)
+        pdf_rect_dict: dict[str, float] = {
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
+            "width": round(abs(x1 - x0), 2),
+            "height": round(abs(y1 - y0), 2),
+        }
+    else:
+        x0 = float(payload.pdf_rect.get("x0", 0.0))
+        y0 = float(payload.pdf_rect.get("y0", 0.0))
+        x1 = float(payload.pdf_rect.get("x1", 0.0))
+        y1 = float(payload.pdf_rect.get("y1", 0.0))
+        pdf_rect_dict = {
+            "x0": x0,
+            "y0": y0,
+            "x1": x1,
+            "y1": y1,
+            "width": float(payload.pdf_rect.get("width", round(abs(x1 - x0), 2))),
+            "height": float(payload.pdf_rect.get("height", round(abs(y1 - y0), 2))),
+        }
+
+    exports_dir = Path(project.workspace_dir) / "exports"
+    resolved_scenario = _resolve_active_scenario(exports_dir, payload.scenario)
+    pdf_path = exports_dir / f"preview_{resolved_scenario}.pdf"
+
+    crop_png_path: str | None = None
+    crop_url: str | None = None
+    detail_coords = dict(payload.detail_coords or {})
+
+    if pdf_path.is_file() and abs(x1 - x0) >= 2.0 and abs(y1 - y0) >= 2.0:
+        feedback_dir = exports_dir / "feedback"
+        feedback_dir.mkdir(parents=True, exist_ok=True)
+        crop_filename = (
+            f"crop_p{payload.page}_{resolved_scenario}_{int(time.time())}_{secrets.token_hex(3)}.png"
+        )
+        out_path = feedback_dir / crop_filename
+        try:
+            cropped = crop_pdf_region_to_png(
+                pdf_path=pdf_path,
+                page_number=payload.page,
+                rect=(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)),
+                output_path=out_path,
+                dpi=payload.dpi,
+            )
+            crop_png_path = str(cropped)
+            crop_url = f"/api/projects/{project.id}/jasper/preview/feedback/{crop_filename}"
+            if not detail_coords:
+                detail_coords = dict(cropped.detail_coords)
+        except Exception:
+            # Recorte é enriquecimento visual; nunca bloqueia o registro do feedback
+            crop_png_path = None
+            crop_url = None
+
+    metadata: dict[str, Any] = {
+        "type": "visual_region_feedback",
+        "page": payload.page,
+        "pdf_rect": pdf_rect_dict,
+        "detail_coords": detail_coords,
+        "scenario": resolved_scenario,
+    }
+    if crop_png_path:
+        metadata["crop_png_path"] = crop_png_path
+    if crop_url:
+        metadata["crop_url"] = crop_url
+
+    saved_msg = workspace_service.add_chat_message(
+        project.id,
+        ChatMessageCreate(
+            phase="jrxml",
+            role="user",
+            content=payload.content.strip(),
+            metadata=metadata,
+        ),
+    )
+
+    return {
+        "ok": True,
+        "project_id": project.id,
+        "message": saved_msg.model_dump(mode="json"),
+        "crop_png_path": crop_png_path,
+        "crop_url": crop_url,
+    }
+
+
+@router.get("/{project_id}/jasper/preview/feedback/{filename}")
+def stream_visual_feedback_crop_png(
+    project_id: str,
+    filename: str,
+    workspace_service: WorkspaceSvcDep,
+) -> FileResponse:
+    """Retorna o recorte PNG salvo para uma anotação visual de feedback."""
+    if (
+        "/" in filename
+        or "\\" in filename
+        or ".." in filename
+        or not filename.lower().endswith(".png")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nome de arquivo de recorte PNG inválido.",
+        )
+
+    try:
+        project = workspace_service.get_project(project_id)
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
+
+    crop_path = (Path(project.workspace_dir) / "exports" / "feedback" / filename).resolve()
+    feedback_root = (Path(project.workspace_dir) / "exports" / "feedback").resolve()
+    if not str(crop_path).startswith(str(feedback_root)) or not crop_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Recorte visual '{filename}' não encontrado no projeto '{project_id}'.",
+        )
+
+    return FileResponse(
+        path=str(crop_path),
+        media_type="image/png",
+        filename=crop_path.name,
         content_disposition_type="inline",
     )
 

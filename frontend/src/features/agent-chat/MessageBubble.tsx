@@ -31,6 +31,7 @@ export interface MessageBubbleProps {
 interface ParsedVisualFeedback {
   page: number;
   scenario?: string;
+  cropUrl?: string;
   pdfRect?: {
     x0: number;
     y0: number;
@@ -67,6 +68,10 @@ function parseVisualRegionFeedback(
     page: Number(metadata.page ?? 1),
     scenario:
       typeof metadata.scenario === "string" ? metadata.scenario : undefined,
+    cropUrl:
+      typeof metadata.crop_url === "string" && metadata.crop_url.trim()
+        ? metadata.crop_url
+        : undefined,
     pdfRect: rawRect
       ? {
           x0: Number(rawRect.x0 ?? 0),
@@ -279,6 +284,17 @@ export function MessageBubble({
             </Badge>
           )}
         </div>
+
+        {visualFeedback.cropUrl && (
+          <div className="mt-2 overflow-hidden rounded border border-blueprint/30 bg-surface p-1">
+            <img
+              src={visualFeedback.cropUrl}
+              alt={`Recorte visual da página ${visualFeedback.page}`}
+              className="max-h-36 w-auto max-w-full rounded object-contain"
+              loading="lazy"
+            />
+          </div>
+        )}
 
         <p className="mt-2 whitespace-pre-wrap break-words text-xs leading-relaxed text-ink">
           {message.content}

@@ -13,10 +13,58 @@ import { SqlDbView } from "@/features/sql-db";
 import { useTheme } from "@/hooks/useTheme";
 import { api } from "@/lib/api";
 import type {
+  ChatPhase,
   HealthResponse,
   ProjectRead,
   StudioSection,
 } from "@/types/studio";
+
+const VALID_SECTIONS = new Set<StudioSection>([
+  "projects",
+  "workspace",
+  "form_builder",
+  "sql_db",
+  "jasper_studio",
+  "settings",
+]);
+
+function readHashNavigation(): {
+  projectId: string | null;
+  section: StudioSection | null;
+} {
+  if (typeof window === "undefined") {
+    return { projectId: null, section: null };
+  }
+  const raw = window.location.hash.replace(/^#\/?/, "");
+  if (!raw) {
+    return { projectId: null, section: null };
+  }
+  const params = new URLSearchParams(raw);
+  const projectId = params.get("project") || null;
+  const rawSection = params.get("section") as StudioSection | null;
+  const section =
+    rawSection && VALID_SECTIONS.has(rawSection) ? rawSection : null;
+  return { projectId, section };
+}
+
+function writeHashNavigation(
+  projectId: string | null,
+  section: StudioSection,
+): void {
+  if (typeof window === "undefined") return;
+  const params = new URLSearchParams();
+  if (projectId) params.set("project", projectId);
+  if (section && section !== "projects") params.set("section", section);
+  const encoded = params.toString();
+  const nextHash = encoded ? `#${encoded}` : "";
+  if (window.location.hash !== nextHash) {
+    window.history.replaceState(
+      null,
+      "",
+      nextHash || `${window.location.pathname}${window.location.search}`,
+    );
+  }
+}
 
 function stageToDefaultSection(project: ProjectRead): StudioSection {
   switch (project.current_stage) {
@@ -36,16 +84,28 @@ function StudioAppInner() {
   const { theme, toggleTheme } = useTheme();
   const { pushToast } = useToast();
 
+  const initialNav = readHashNavigation();
   const [projects, setProjects] = useState<ProjectRead[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
-  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
-  const [activeSection, setActiveSection] = useState<StudioSection>("projects");
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(
+    initialNav.projectId,
+  );
+  const [activeSection, setActiveSection] = useState<StudioSection>(
+    initialNav.section ?? "projects",
+  );
   const [chatOpen, setChatOpen] = useState(false);
+  const [chatPhaseOverride, setChatPhaseOverride] = useState<ChatPhase | null>(
+    null,
+  );
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [jasperUp, setJasperUp] = useState<boolean | null>(null);
 
   const activeProject =
     projects.find((p) => p.id === activeProjectId) ?? null;
+
+  useEffect(() => {
+    writeHashNavigation(activeProjectId, activeSection);
+  }, [activeProjectId, activeSection]);
 
   const refreshProjects = useCallback(async () => {
     setLoadingProjects(true);
@@ -53,7 +113,7 @@ function StudioAppInner() {
       const list = await api.listProjects();
       setProjects(list);
       setActiveProjectId((curr) =>
-        curr && list.some((p) => p.id === curr) ? curr : curr,
+        curr && list.some((p) => p.id === curr) ? curr : null,
       );
     } catch (err) {
       pushToast({
@@ -171,6 +231,10 @@ function StudioAppInner() {
             project={activeProject}
             onProjectUpdated={handleProjectUpdated}
             onNavigateSection={setActiveSection}
+            onOpenAgentChat={(phase) => {
+              setChatPhaseOverride(phase ?? "jrxml");
+              setChatOpen(true);
+            }}
           />
         );
       default:
@@ -178,12 +242,17 @@ function StudioAppInner() {
     }
   };
 
-  const chatPhase = activeSection === "jasper_studio" ? "jrxml" : "extraction";
+  const chatPhase: ChatPhase =
+    chatPhaseOverride ??
+    (activeSection === "jasper_studio" ? "jrxml" : "extraction");
 
   return (
     <StudioShell
       activeSection={activeSection}
-      onNavigate={setActiveSection}
+      onNavigate={(section) => {
+        setChatPhaseOverride(null);
+        setActiveSection(section);
+      }}
       projects={projects}
       activeProject={activeProject}
       onSelectProjectId={handleSelectProjectId}

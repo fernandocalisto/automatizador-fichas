@@ -30,6 +30,7 @@ const LIVE_RELOAD_DEBOUNCE_MS = 900;
 export function JasperStudioView({
   project,
   onProjectUpdated,
+  onOpenAgentChat,
 }: JasperStudioViewProps) {
   const { pushToast } = useToast();
 
@@ -502,18 +503,36 @@ export function JasperStudioView({
     }: RegionAnnotationSubmitPayload) => {
       setSubmittingAnnotation(true);
       try {
-        const savedMsg = await api.appendChat(project.id, {
-          phase: "jrxml",
-          role: "user",
-          content,
-          metadata: {
-            type: "visual_region_feedback",
+        let savedMsg;
+        let cropped = false;
+        try {
+          const cropRes = await api.submitVisualRegionFeedback(project.id, {
             page,
             pdf_rect: pdfRect,
             detail_coords: detailCoords,
             scenario,
-          },
-        });
+            content,
+            dpi: 200,
+          });
+          savedMsg = cropRes.message;
+          cropped = Boolean(cropRes.crop_url);
+        } catch (cropErr) {
+          if (cropErr instanceof ApiError && cropErr.status !== 404) {
+            throw cropErr;
+          }
+          savedMsg = await api.appendChat(project.id, {
+            phase: "jrxml",
+            role: "user",
+            content,
+            metadata: {
+              type: "visual_region_feedback",
+              page,
+              pdf_rect: pdfRect,
+              detail_coords: detailCoords,
+              scenario,
+            },
+          });
+        }
 
         const parsed = chatMessageToAnnotation(savedMsg) ?? {
           id: savedMsg.id ?? `local-${Date.now()}`,
@@ -528,7 +547,9 @@ export function JasperStudioView({
 
         pushToast({
           tone: "success",
-          title: "Ajuste visual enviado ao agente",
+          title: cropped
+            ? "Ajuste visual com recorte PNG enviado ao agente"
+            : "Ajuste visual enviado ao agente",
           description: `Página ${page} · detail(${detailCoords.x}, ${detailCoords.y})`,
         });
       } catch (err) {
@@ -619,6 +640,9 @@ export function JasperStudioView({
               submittingAnnotation={submittingAnnotation}
               onSubmitAnnotation={handleSubmitAnnotation}
               onGeneratePreview={() => void runPreview()}
+              onOpenAgentChat={
+                onOpenAgentChat ? () => onOpenAgentChat("jrxml") : undefined
+              }
             />
           </div>
         }

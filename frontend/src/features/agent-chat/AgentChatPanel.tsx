@@ -795,7 +795,7 @@ export function AgentChatPanel({
                 const ready = Boolean(h.installed || h.sdk_available);
                 return (
                   <option key={h.id} value={h.id}>
-                    {ready ? "●" : "○"} {h.display_name}
+                    {ready ? h.display_name : `${h.display_name} (não instalado)`}
                   </option>
                 );
               })}

@@ -239,7 +239,14 @@ export function StudioShell({
         </div>
       </header>
 
-      <main className="min-h-0 flex-1 overflow-hidden">{children}</main>
+      <main
+        className={cn(
+          "min-h-0 flex-1 overflow-hidden transition-[padding] duration-150",
+          chatOpen && activeProject && "xl:pr-[440px]",
+        )}
+      >
+        {children}
+      </main>
     </div>
   );
 }

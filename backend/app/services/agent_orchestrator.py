@@ -641,6 +641,7 @@ class AgentOrchestratorService:
 
         workspace_dir = Path(project.workspace_dir)
         before_snapshot = _snapshot_workspace_artifacts(workspace_dir)
+        before_artifact_versions = dict(project.latest_artifacts)
 
         cancel_event = asyncio.Event()
         active_run = _ActiveRun(
@@ -746,6 +747,10 @@ class AgentOrchestratorService:
                 yield event
 
             if cancelled:
+                for item in tool_calls_log:
+                    if item.get("status") == "running":
+                        item["status"] = "error"
+                        item["result_content"] = "Execução cancelada pelo usuário."
                 cancel_err = HarnessEvent(
                     type=EventType.ERROR,
                     content="Execução do agente cancelada pelo usuário.",
@@ -753,24 +758,99 @@ class AgentOrchestratorService:
                     metadata={"cancelled": True, "phase": phase},
                 )
                 yield cancel_err
-            elif not had_error:
-                if gate_authorized:
-                    try:
-                        synced_artifacts = self._sync_modified_workspace_artifacts(
-                            project_id,
-                            workspace_dir=workspace_dir,
-                            phase=phase,
-                            harness_id=harness_kind.value,
-                            before_snapshot=before_snapshot,
+            else:
+                # Nunca deixar ferramentas presas em "running" após o encerramento do turno
+                unfinished_tools: list[dict[str, Any]] = []
+                for item in tool_calls_log:
+                    if item.get("status") == "running":
+                        unfinished_tools.append(item)
+                        err_msg = "Ferramenta interrompida antes de retornar resultado."
+                        item["status"] = "error"
+                        item["tool_output"] = err_msg
+                        item["result_content"] = err_msg
+                        tool_results_log.append(
+                            {
+                                "tool_name": item.get("tool_name"),
+                                "tool_call_id": item.get("tool_call_id"),
+                                "tool_output": err_msg,
+                                "content": err_msg,
+                                "metadata": {"error": err_msg, "interrupted": True},
+                            }
                         )
-                    except Exception as exc:
-                        had_error = True
                         yield HarnessEvent(
-                            type=EventType.ERROR,
-                            content=f"Falha ao sincronizar artefato do workspace: {exc}",
+                            type=EventType.TOOL_RESULT,
+                            tool_name=item.get("tool_name"),
+                            tool_call_id=item.get("tool_call_id"),
+                            tool_output=err_msg,
+                            content=err_msg,
                             harness=harness_kind,
-                            metadata={"phase": phase, "workspace_sync_error": True},
+                            metadata={"error": err_msg, "interrupted": True},
                         )
+
+                if not had_error and unfinished_tools and not text_parts:
+                    had_error = True
+                    names = ", ".join(
+                        str(t.get("tool_name") or "tool") for t in unfinished_tools
+                    )
+                    yield HarnessEvent(
+                        type=EventType.ERROR,
+                        content=(
+                            f"O agente encerrou sem concluir as ferramentas pendentes ({names}) "
+                            "e não produziu resposta. Nenhum artefato foi alterado."
+                        ),
+                        harness=harness_kind,
+                        metadata={"phase": phase, "unfinished_tools": names},
+                    )
+
+            if not cancelled and not had_error:
+                if gate_authorized:
+                    artifact_type = PHASE_ARTIFACT_MAP[phase]
+                    refreshed_project = self.workspace_service.get_project(project_id)
+                    prev_ver = before_artifact_versions.get(artifact_type)
+                    curr_ver = refreshed_project.latest_artifacts.get(artifact_type)
+                    mcp_saved_new_revision = curr_ver is not None and curr_ver != prev_ver
+
+                    if mcp_saved_new_revision:
+                        try:
+                            latest_rev = self.workspace_service.get_latest_artifact(
+                                project_id, artifact_type
+                            )
+                            mcp_sync_meta: dict[str, Any] = {
+                                "artifact_synced": True,
+                                "artifact_type": artifact_type,
+                                "version_num": latest_rev.version_num,
+                                "revision_id": latest_rev.id,
+                                "source_file": "mcp_tool",
+                            }
+                            if artifact_type == "json":
+                                if refreshed_project.latest_artifacts.get("sql_insert") is not None:
+                                    mcp_sync_meta["sql_insert_version"] = (
+                                        refreshed_project.latest_artifacts["sql_insert"]
+                                    )
+                                if refreshed_project.latest_artifacts.get("sql_select") is not None:
+                                    mcp_sync_meta["sql_select_version"] = (
+                                        refreshed_project.latest_artifacts["sql_select"]
+                                    )
+                            synced_artifacts = [mcp_sync_meta]
+                        except Exception:
+                            synced_artifacts = []
+                    else:
+                        try:
+                            synced_artifacts = self._sync_modified_workspace_artifacts(
+                                project_id,
+                                workspace_dir=workspace_dir,
+                                phase=phase,
+                                harness_id=harness_kind.value,
+                                before_snapshot=before_snapshot,
+                            )
+                        except Exception as exc:
+                            had_error = True
+                            yield HarnessEvent(
+                                type=EventType.ERROR,
+                                content=f"Falha ao sincronizar artefato do workspace: {exc}",
+                                harness=harness_kind,
+                                metadata={"phase": phase, "workspace_sync_error": True},
+                            )
 
                     for sync_meta in synced_artifacts:
                         sync_event = HarnessEvent(
@@ -795,8 +875,8 @@ class AgentOrchestratorService:
                         )
                         yield sync_event
                 else:
-                    # Gate 1: nunca sincroniza artefatos finais e garante evento gate_request
-                    if not saw_gate_request:
+                    # Gate 1: nunca sincroniza artefatos finais e só emite gate_request se houve conteúdo útil
+                    if not saw_gate_request and text_parts:
                         saw_gate_request = True
                         yield HarnessEvent(
                             type=EventType.GATE_REQUEST,
@@ -892,13 +972,18 @@ class AgentOrchestratorService:
         """Associa `tool_result` ao `tool_call` correspondente (por `tool_call_id` ou último aberto)."""
         call_id = result_record.get("tool_call_id")
         tool_name = result_record.get("tool_name")
+        meta = result_record.get("metadata")
+        has_err = isinstance(meta, dict) and bool(meta.get("error") or meta.get("is_error"))
+        final_status = "error" if has_err else "completed"
 
         if call_id:
             for item in reversed(tool_calls_log):
                 if item.get("tool_call_id") == call_id:
                     item["tool_output"] = result_record.get("tool_output")
                     item["result_content"] = result_record.get("content", "")
-                    item["status"] = "completed"
+                    item["status"] = final_status
+                    if has_err and isinstance(meta, dict) and meta.get("error"):
+                        item["error_message"] = str(meta["error"])
                     return
 
         for item in reversed(tool_calls_log):
@@ -907,7 +992,9 @@ class AgentOrchestratorService:
             ):
                 item["tool_output"] = result_record.get("tool_output")
                 item["result_content"] = result_record.get("content", "")
-                item["status"] = "completed"
+                item["status"] = final_status
+                if has_err and isinstance(meta, dict) and meta.get("error"):
+                    item["error_message"] = str(meta["error"])
                 return
 
     # -------------------------------------------------------------------------

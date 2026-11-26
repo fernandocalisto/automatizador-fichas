@@ -263,7 +263,10 @@ class StudioMcpServer:
         in_stream = stdin if stdin is not None else sys.stdin
         out_stream = stdout if stdout is not None else sys.stdout
 
-        for raw_line in in_stream:
+        while True:
+            raw_line = in_stream.readline()
+            if not raw_line:
+                break
             reply = self.handle_raw_line(raw_line)
             if reply is not None:
                 out_stream.write(reply + "\n")
@@ -273,6 +276,13 @@ class StudioMcpServer:
 def main(argv: list[str] | None = None) -> int:
     """Entrypoint CLI (`python -m backend.app.mcp_tools.mcp_server`)."""
     _ = argv
+    for stream in (sys.stdin, sys.stdout):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     server = StudioMcpServer()
     server.serve_stdio()
     return 0

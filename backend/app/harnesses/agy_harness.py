@@ -9,10 +9,16 @@ import importlib.util
 import inspect
 import json
 import os
+import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from types import ModuleType
 from typing import Any
+
+try:
+    from backend.app.config import PROJECT_ROOT, get_data_dir, get_db_path
+except ModuleNotFoundError:  # pragma: no cover
+    from app.config import PROJECT_ROOT, get_data_dir, get_db_path  # type: ignore[no-redef]
 
 from app.harnesses.base import BaseSubprocessHarness, SubprocessRunner
 from app.harnesses.types import (
@@ -45,6 +51,7 @@ class AgyHarness(BaseSubprocessHarness):
         sdk_importer: Callable[[str], ModuleType | Any] | None = None,
         local_appdata_dir: str | Path | None = None,
         default_timeout: float = 300.0,
+        dangerously_skip_permissions: bool | None = None,
     ) -> None:
         super().__init__(
             runner=runner,
@@ -54,6 +61,11 @@ class AgyHarness(BaseSubprocessHarness):
         self._sdk_spec_finder = sdk_spec_finder or importlib.util.find_spec
         self._sdk_importer = sdk_importer or importlib.import_module
         self._local_appdata_dir = local_appdata_dir
+        if dangerously_skip_permissions is None:
+            env_val = os.environ.get("AGY_SKIP_PERMISSIONS", "1").strip().lower()
+            self._dangerously_skip_permissions = env_val not in ("0", "false", "no", "off")
+        else:
+            self._dangerously_skip_permissions = bool(dangerously_skip_permissions)
 
     def is_sdk_available(self) -> bool:
         """Verifica dinamicamente se o pacote `google.antigravity` está instalado."""
@@ -230,6 +242,58 @@ class AgyHarness(BaseSubprocessHarness):
             metadata={"mode": "sdk"},
         )
 
+    @staticmethod
+    def ensure_workspace_mcp_config(workspace_dir: Path) -> Path | None:
+        """
+        Materializa o plugin de workspace `.agents/plugins/salutem-ficha-studio/` com
+        `plugin.json` e `mcp_config.json` apontando para o servidor MCP stdio nativo do Studio
+        (`python -m backend.app.mcp_tools.mcp_server`), permitindo ao AGY CLI descobrir e
+        invocar diretamente as 8 ferramentas determinísticas do Salutem Ficha Studio.
+        """
+        try:
+            ws_root = Path(workspace_dir).resolve()
+            plugin_dir = ws_root / ".agents" / "plugins" / "salutem-ficha-studio"
+            plugin_dir.mkdir(parents=True, exist_ok=True)
+
+            plugin_manifest_path = plugin_dir / "plugin.json"
+            plugin_manifest_text = json.dumps(
+                {"name": "salutem-ficha-studio"},
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n"
+            if (
+                not plugin_manifest_path.is_file()
+                or plugin_manifest_path.read_text(encoding="utf-8") != plugin_manifest_text
+            ):
+                plugin_manifest_path.write_text(plugin_manifest_text, encoding="utf-8")
+
+            mcp_config_path = plugin_dir / "mcp_config.json"
+            mcp_payload = {
+                "mcpServers": {
+                    "salutem-ficha-studio": {
+                        "command": sys.executable,
+                        "args": ["-m", "backend.app.mcp_tools.mcp_server"],
+                        "env": {
+                            "PYTHONPATH": str(PROJECT_ROOT.resolve()),
+                            "PYTHONUTF8": "1",
+                            "PYTHONIOENCODING": "utf-8",
+                            "FICHA_STUDIO_DATA_DIR": str(get_data_dir().resolve()),
+                            "FICHA_STUDIO_DB_PATH": str(get_db_path().resolve()),
+                        },
+                    }
+                }
+            }
+            mcp_text = json.dumps(mcp_payload, ensure_ascii=False, indent=2) + "\n"
+            if (
+                not mcp_config_path.is_file()
+                or mcp_config_path.read_text(encoding="utf-8") != mcp_text
+            ):
+                mcp_config_path.write_text(mcp_text, encoding="utf-8")
+
+            return mcp_config_path
+        except OSError:
+            return None
+
     def build_cli_command(
         self,
         executable: str,
@@ -247,6 +311,8 @@ class AgyHarness(BaseSubprocessHarness):
             "--mode",
             "accept-edits" if request.gate_authorized else "plan",
         ]
+        if self._dangerously_skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
         if request.model:
             cmd.extend(["--model", request.model])
         if request.timeout_seconds and request.timeout_seconds > 0:
@@ -273,6 +339,9 @@ class AgyHarness(BaseSubprocessHarness):
         if state is None:
             state = {}
         emitted_tool_steps: set[str] = state.setdefault("emitted_tool_steps", set())
+        emitted_tool_results: set[str] = state.setdefault("emitted_tool_results", set())
+        emitted_step_text: set[str] = state.setdefault("emitted_step_text", set())
+        tool_names_by_id: dict[str, str] = state.setdefault("tool_names_by_id", {})
 
         if stripped.startswith("{") and stripped.endswith("}"):
             try:
@@ -299,6 +368,7 @@ class AgyHarness(BaseSubprocessHarness):
 
                         step_type = str(su.get("step_type") or "")
                         step_state = str(su.get("state") or "")
+                        step_state_upper = step_state.strip().upper()
                         step_index = su.get("step_index")
                         call_id = (
                             f"agy-step-{step_index}"
@@ -327,24 +397,47 @@ class AgyHarness(BaseSubprocessHarness):
                             )
 
                         # Texto de resposta do agente
-                        if step_type == "agent_response" and su.get("text_delta"):
-                            state["emitted_text"] = True
-                            events.append(
-                                HarnessEvent(
-                                    type=EventType.TEXT_DELTA,
-                                    content=str(su["text_delta"]),
-                                    harness=self.kind,
+                        if step_type == "agent_response":
+                            if su.get("text_delta"):
+                                state["emitted_text"] = True
+                                emitted_step_text.add(call_id)
+                                events.append(
+                                    HarnessEvent(
+                                        type=EventType.TEXT_DELTA,
+                                        content=str(su["text_delta"]),
+                                        harness=self.kind,
+                                    )
                                 )
-                            )
+                            elif (
+                                step_state_upper in ("DONE", "COMPLETED", "SUCCESS")
+                                and call_id not in emitted_step_text
+                            ):
+                                full_text = su.get("text") or su.get("response")
+                                if full_text:
+                                    state["emitted_text"] = True
+                                    emitted_step_text.add(call_id)
+                                    events.append(
+                                        HarnessEvent(
+                                            type=EventType.TEXT_DELTA,
+                                            content=str(full_text),
+                                            harness=self.kind,
+                                        )
+                                    )
 
                         # Chamadas e resultados de ferramenta
-                        if step_type in ("tool", "tool_call", "tool_use"):
+                        if step_type in ("tool", "tool_call", "tool_use", "mcp_tool", "mcp_tool_call"):
                             tool_info = su.get("tool_info")
                             info = tool_info if isinstance(tool_info, dict) else {}
                             tool_name = str(
-                                info.get("name") or su.get("tool_name") or "tool"
+                                info.get("name")
+                                or su.get("tool_name")
+                                or tool_names_by_id.get(call_id)
+                                or "tool"
                             )
+                            tool_names_by_id[call_id] = tool_name
                             params = info.get("parameters")
+                            if params is None:
+                                params = info.get("arguments")
                             tool_args = (
                                 dict(params)
                                 if isinstance(params, dict)
@@ -363,36 +456,77 @@ class AgyHarness(BaseSubprocessHarness):
                                     )
                                 )
 
-                            if step_state == "DONE" and (
-                                "output" in info or "error" in info
-                            ):
-                                tool_err = info.get("error")
-                                tool_out = (
-                                    info.get("output")
-                                    if "output" in info
-                                    else tool_err
+                            success_states = {"DONE", "COMPLETED", "SUCCESS"}
+                            error_states = {
+                                "ERROR",
+                                "FAILED",
+                                "CANCELLED",
+                                "CANCELED",
+                                "REJECTED",
+                                "DENIED",
+                                "BLOCKED",
+                                "TIMEOUT",
+                                "ABORTED",
+                            }
+                            has_payload = any(
+                                k in info for k in ("output", "result", "error")
+                            ) or any(k in su for k in ("output", "result", "error"))
+
+                            if (
+                                call_id not in emitted_tool_results
+                                and (
+                                    step_state_upper in success_states
+                                    or step_state_upper in error_states
                                 )
+                            ):
+                                tool_err = (
+                                    info.get("error")
+                                    if "error" in info
+                                    else su.get("error")
+                                )
+                                if step_state_upper in error_states and tool_err is None:
+                                    tool_err = (
+                                        f"Ferramenta '{tool_name}' encerrada com estado "
+                                        f"{step_state_upper}."
+                                    )
+                                if "output" in info:
+                                    tool_out = info.get("output")
+                                elif "result" in info:
+                                    tool_out = info.get("result")
+                                elif "output" in su:
+                                    tool_out = su.get("output")
+                                elif "result" in su:
+                                    tool_out = su.get("result")
+                                else:
+                                    tool_out = tool_err if tool_err is not None else ""
+
                                 res_meta: dict[str, Any] = {}
+                                if step_state_upper:
+                                    res_meta["state"] = step_state_upper
                                 if tool_err is not None:
                                     res_meta["error"] = (
                                         tool_err.get("message")
                                         if isinstance(tool_err, dict)
                                         else str(tool_err)
                                     )
-                                events.append(
-                                    HarnessEvent(
-                                        type=EventType.TOOL_RESULT,
-                                        tool_name=tool_name,
-                                        tool_call_id=call_id,
-                                        tool_output=tool_out,
-                                        harness=self.kind,
-                                        metadata=res_meta,
+
+                                if has_payload or step_state_upper in (success_states | error_states):
+                                    emitted_tool_results.add(call_id)
+                                    events.append(
+                                        HarnessEvent(
+                                            type=EventType.TOOL_RESULT,
+                                            tool_name=tool_name,
+                                            tool_call_id=call_id,
+                                            tool_output=tool_out,
+                                            harness=self.kind,
+                                            metadata=res_meta,
+                                        )
                                     )
-                                )
 
                         return events
 
                     if event_name == "result":
+                        state["saw_result"] = True
                         res = obj.get("result")
                         if not isinstance(res, dict):
                             return []
@@ -427,6 +561,23 @@ class AgyHarness(BaseSubprocessHarness):
                                 )
                             ]
                         return []
+
+                    if event_name in ("error", "permission_request", "approval_request"):
+                        detail = (
+                            obj.get("message")
+                            or obj.get("error")
+                            or f"AGY CLI emitiu evento '{event_name}' sem suporte interativo."
+                        )
+                        if isinstance(detail, dict):
+                            detail = detail.get("message") or json.dumps(detail, ensure_ascii=False)
+                        return [
+                            HarnessEvent(
+                                type=EventType.ERROR,
+                                content=str(detail),
+                                harness=self.kind,
+                                metadata={"event": event_name},
+                            )
+                        ]
 
                 # 2) Formato JSON flat (retrocompatibilidade / adapters auxiliares)
                 if "type" in obj:
@@ -493,6 +644,7 @@ class AgyHarness(BaseSubprocessHarness):
         user_prompt: str,
     ) -> AsyncIterator[HarnessEvent]:
         """Executa o turno via binário CLI `agy` em modo headless `--input-format stream-json --output-format stream-json`."""
+        self.ensure_workspace_mcp_config(request.workspace_dir)
         cmd = self.build_cli_command(executable, request)
 
         combined_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
@@ -531,6 +683,38 @@ class AgyHarness(BaseSubprocessHarness):
                         harness=self.kind,
                         metadata={"returncode": chunk.returncode},
                     )
+
+        unfinished_ids = (
+            parse_state.get("emitted_tool_steps", set())
+            - parse_state.get("emitted_tool_results", set())
+        )
+        tool_names = parse_state.get("tool_names_by_id", {})
+        if not had_error and unfinished_ids and not parse_state.get("emitted_text"):
+            had_error = True
+            for cid in sorted(unfinished_ids):
+                t_name = tool_names.get(cid, "tool")
+                err_text = "Ferramenta interrompida antes de retornar resultado no AGY CLI."
+                yield HarnessEvent(
+                    type=EventType.TOOL_RESULT,
+                    tool_name=t_name,
+                    tool_call_id=cid,
+                    tool_output=err_text,
+                    harness=self.kind,
+                    metadata={"error": err_text, "interrupted": True},
+                )
+            stderr_tail = "\n".join(stderr_lines[-5:]).strip()
+            detail_msg = (
+                "O AGY CLI encerrou antes de concluir as ferramentas em andamento "
+                f"({', '.join(tool_names.get(c, c) for c in sorted(unfinished_ids))})."
+            )
+            if stderr_tail:
+                detail_msg = f"{detail_msg}\nDetalhes: {stderr_tail}"
+            yield HarnessEvent(
+                type=EventType.ERROR,
+                content=detail_msg,
+                harness=self.kind,
+                metadata={"unfinished_tools": sorted(unfinished_ids)},
+            )
 
         if not had_error:
             gate_ev = self._make_gate_event_if_needed(request)

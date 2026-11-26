@@ -67,8 +67,8 @@ STATUS DA AUTORIZAÇÃO (`gate_authorized`): `False` (AGUARDANDO APROVAÇÃO DO 
 DIRETÓRIO DO WORKSPACE: `{ws_text}`
 
 REGRAS OBRIGATÓRIAS DESTE TURNO:
-1. **PROIBIDO GERAR ARQUIVOS FINAIS OU DESPEJAR JSON/SQL:** NÃO crie nem sobrescreva arquivos `.json` ou `.sql` finais no workspace e **NUNCA** exiba o bloco JSON estruturado completo no chat neste turno.
-2. **ANÁLISE TÉCNICA SILENCIOSA:** Inspecione silenciosamente o PDF/imagens/textos da ficha clínica no workspace (usando as ferramentas de inspeção de geometria/preview de PDF quando disponíveis).
+1. **PROIBIDO GERAR ARQUIVOS FINAIS OU DESPEJAR JSON/SQL:** NÃO crie nem sobrescreva arquivos `.json` ou `.sql` finais no workspace, NÃO chame a ferramenta `save_validated_json` e **NUNCA** exiba o bloco JSON estruturado completo no chat neste turno.
+2. **ANÁLISE TÉCNICA SILENCIOSA:** Inspecione silenciosamente o PDF/imagens/textos da ficha clínica no workspace (preferindo a ferramenta MCP `extract_pdf_geometry` ou `inspect_clinical_pdf` quando disponível).
 3. **APRESENTAÇÃO CLARA E ESTRUTURADA:** Apresente ao usuário:
    - Resumo clínico e metadados identificados da ficha (`orientacao`, assinatura, finalidade).
    - Mapeamento detalhado das seções (`titulo: true`) e perguntas (`pergunta_template_ficha_clinica`), destacando agrupamentos independentes de `BOOLEANO_RADIO` e itens com `observacao: true`.
@@ -97,9 +97,9 @@ STATUS DA AUTORIZAÇÃO (`gate_authorized`): `True` (AUTORIZADO PELO USUÁRIO)
 DIRETÓRIO DO WORKSPACE: `{ws_text}`
 
 REGRAS OBRIGATÓRIAS DESTE TURNO:
-1. **GRAVAÇÃO DIRETA EM ARQUIVO NO WORKSPACE:** O usuário JÁ AUTORIZOU a geração final. Grave o JSON estruturado diretamente em arquivo `.json` dentro de `{ws_text}` (ex.: `ficha_clinica.json`, salvo se outro nome foi especificado no workspace/prompt), obedecendo obrigatoriamente à raiz `{{"template": {{...}}, "perguntas": [...]}}`.
-2. **PROIBIDO POLUIR O CHAT COM JSON GIGANTE:** NÃO despeje o JSON completo na mensagem do chat. Escreva o arquivo diretamente no disco do workspace.
-3. **RESPOSTA CONCISA DE ENTREGA:** No chat, informe o caminho/nome do arquivo `.json` gravado, a contagem de seções, perguntas e respostas geradas, e confirme a conformidade com os 11 tipos estritos do Salutem."""
+1. **GRAVAÇÃO DIRETA EM ARQUIVO NO WORKSPACE OU VIA MCP:** O usuário JÁ AUTORIZOU a geração final. Salve o JSON estruturado usando a ferramenta MCP `save_validated_json` (passando `project_id` do contexto e `json_content`) **OU** grave diretamente em arquivo `.json` dentro de `{ws_text}` (ex.: `ficha_clinica.json`, salvo se outro nome foi especificado no workspace/prompt), obedecendo obrigatoriamente à raiz `{{"template": {{...}}, "perguntas": [...]}}`.
+2. **PROIBIDO POLUIR O CHAT COM JSON GIGANTE:** NÃO despeje o JSON completo na mensagem do chat. Salve via `save_validated_json` ou escreva o arquivo diretamente no disco do workspace.
+3. **RESPOSTA CONCISA DE ENTREGA:** No chat, informe a revisão/arquivo `.json` gravado, a contagem de seções, perguntas e respostas geradas, e confirme a conformidade com os 11 tipos estritos do Salutem."""
         else:
             gate_instructions = f"""## CONTROLE ESTRITO DE FLUXO — GATE 2 (GERAÇÃO JRXML AUTORIZADA DIRETA NO WORKSPACE)
 

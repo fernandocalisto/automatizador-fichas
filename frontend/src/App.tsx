@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { StudioShell } from "@/components/layout/StudioShell";
 import { ToastProvider, useToast } from "@/components/ui";
+import { AgentChatDrawer } from "@/features/agent-chat";
 import { FormBuilderView } from "@/features/form-builder";
 import { JasperStudioView } from "@/features/jasper-studio";
 import {
@@ -39,6 +40,7 @@ function StudioAppInner() {
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<StudioSection>("projects");
+  const [chatOpen, setChatOpen] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [jasperUp, setJasperUp] = useState<boolean | null>(null);
 
@@ -176,6 +178,8 @@ function StudioAppInner() {
     }
   };
 
+  const chatPhase = activeSection === "jasper_studio" ? "jrxml" : "extraction";
+
   return (
     <StudioShell
       activeSection={activeSection}
@@ -187,8 +191,20 @@ function StudioAppInner() {
       onToggleTheme={toggleTheme}
       health={health}
       jasperUp={jasperUp}
+      chatOpen={chatOpen}
+      onToggleChat={() => setChatOpen((prev) => !prev)}
     >
       {renderBody()}
+      {activeProject && (
+        <AgentChatDrawer
+          open={chatOpen}
+          onClose={() => setChatOpen(false)}
+          project={activeProject}
+          initialPhase={chatPhase}
+          onProjectUpdated={handleProjectUpdated}
+          onNavigateSection={setActiveSection}
+        />
+      )}
     </StudioShell>
   );
 }

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import {
+  Bot,
   Database,
   FileCode2,
   FolderKanban,
@@ -28,6 +29,8 @@ export interface StudioShellProps {
   onToggleTheme: () => void;
   health: HealthResponse | null;
   jasperUp: boolean | null;
+  chatOpen?: boolean;
+  onToggleChat?: () => void;
   children: ReactNode;
 }
 
@@ -81,6 +84,8 @@ export function StudioShell({
   onToggleTheme,
   health,
   jasperUp,
+  chatOpen = false,
+  onToggleChat,
   children,
 }: StudioShellProps) {
   return (
@@ -192,6 +197,19 @@ export function StudioShell({
               JVM
             </Badge>
           </div>
+
+          {activeProject && onToggleChat && (
+            <Button
+              variant={chatOpen ? "primary" : "outline"}
+              size="sm"
+              onClick={onToggleChat}
+              icon={<Bot className="h-3.5 w-3.5" />}
+              aria-label="Abrir chat do agente"
+              aria-expanded={chatOpen}
+            >
+              <span className="hidden sm:inline">Chat IA</span>
+            </Button>
+          )}
 
           <Button
             variant={activeSection === "settings" ? "primary" : "ghost"}

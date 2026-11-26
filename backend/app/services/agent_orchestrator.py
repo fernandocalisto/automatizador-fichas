@@ -35,7 +35,7 @@ from backend.app.harnesses import (
     PhaseKind,
     get_default_registry,
 )
-from backend.app.mcp_tools.studio_tools import get_mcp_tool_descriptors
+from backend.app.mcp_tools.studio_tools import get_all_mcp_tool_descriptors
 from backend.app.services.workspace_service import (
     WorkspaceService,
     WorkspaceValidationError,
@@ -415,13 +415,23 @@ class AgentOrchestratorService:
             and item["metadata"].get("type") == "visual_region_feedback"
         ]
 
+        # Inclui recortes PNG de feedback visual existentes para inspeção multimodal
+        seen_image_paths = {p.resolve() for p in image_paths}
+        for fb in visual_feedbacks:
+            crop_raw = fb.get("metadata", {}).get("crop_png_path")
+            if isinstance(crop_raw, str) and crop_raw.strip():
+                crop_path = Path(crop_raw)
+                if crop_path.is_file() and crop_path.resolve() not in seen_image_paths:
+                    image_paths.append(crop_path.resolve())
+                    seen_image_paths.add(crop_path.resolve())
+
         available_tools = [
             {
                 "name": descriptor["name"],
                 "description": descriptor.get("description", ""),
                 "inputSchema": descriptor.get("inputSchema", {}),
             }
-            for descriptor in get_mcp_tool_descriptors()
+            for descriptor in get_all_mcp_tool_descriptors()
         ]
 
         project_context: dict[str, Any] = {

@@ -230,57 +230,260 @@ class AgyHarness(BaseSubprocessHarness):
             metadata={"mode": "sdk"},
         )
 
-    def _parse_cli_line(self, line: str) -> HarnessEvent | None:
+    def build_cli_command(
+        self,
+        executable: str,
+        request: HarnessRunRequest,
+    ) -> list[str]:
+        """Constrói o comando oficial headless/streaming do `agy` CLI (`--input-format stream-json`)."""
+        cmd: list[str] = [
+            executable,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--add-dir",
+            str(request.workspace_dir.resolve()),
+            "--mode",
+            "accept-edits" if request.gate_authorized else "plan",
+        ]
+        if request.model:
+            cmd.extend(["--model", request.model])
+        if request.timeout_seconds and request.timeout_seconds > 0:
+            cmd.extend(["--print-timeout", f"{max(1, int(request.timeout_seconds))}s"])
+        return cmd
+
+    def _parse_cli_line(
+        self,
+        line: str,
+        state: dict[str, Any] | None = None,
+    ) -> list[HarnessEvent]:
+        """
+        Converte uma linha stdout do `agy` CLI em `HarnessEvent`s normalizados.
+
+        Suporta:
+        1. Protocolo oficial `agy --output-format stream-json` (`init`, `step_update`, `result`);
+        2. Envelopes JSON simples (`{"type": "text"|"thought"|"tool_call"|"tool_result"|"error"}`);
+        3. Fallback de texto plano.
+        """
         stripped = line.strip()
         if not stripped:
-            return None
+            return []
+
+        if state is None:
+            state = {}
+        emitted_tool_steps: set[str] = state.setdefault("emitted_tool_steps", set())
+
         if stripped.startswith("{") and stripped.endswith("}"):
             try:
                 obj = json.loads(stripped)
-                if isinstance(obj, dict) and "type" in obj:
+            except json.JSONDecodeError:
+                obj = None
+
+            if isinstance(obj, dict):
+                # 1) Formato oficial agy --output-format stream-json
+                event_name = obj.get("event")
+                if isinstance(event_name, str):
+                    if event_name == "init":
+                        conv_id = obj.get("conversation_id")
+                        if conv_id:
+                            state["conversation_id"] = str(conv_id)
+                        return []
+
+                    if event_name == "step_update":
+                        su = obj.get("step_update")
+                        if not isinstance(su, dict):
+                            return []
+                        if su.get("conversation_id"):
+                            state["conversation_id"] = str(su["conversation_id"])
+
+                        step_type = str(su.get("step_type") or "")
+                        step_state = str(su.get("state") or "")
+                        step_index = su.get("step_index")
+                        call_id = (
+                            f"agy-step-{step_index}"
+                            if step_index is not None
+                            else str(su.get("id") or "agy-step")
+                        )
+                        events: list[HarnessEvent] = []
+
+                        # Pensamento / raciocínio incremental
+                        thought_val = su.get("thought_delta") or su.get("thinking_delta")
+                        if thought_val:
+                            events.append(
+                                HarnessEvent(
+                                    type=EventType.THOUGHT_DELTA,
+                                    content=str(thought_val),
+                                    harness=self.kind,
+                                )
+                            )
+                        elif step_type in ("thinking", "thought") and su.get("text_delta"):
+                            events.append(
+                                HarnessEvent(
+                                    type=EventType.THOUGHT_DELTA,
+                                    content=str(su["text_delta"]),
+                                    harness=self.kind,
+                                )
+                            )
+
+                        # Texto de resposta do agente
+                        if step_type == "agent_response" and su.get("text_delta"):
+                            state["emitted_text"] = True
+                            events.append(
+                                HarnessEvent(
+                                    type=EventType.TEXT_DELTA,
+                                    content=str(su["text_delta"]),
+                                    harness=self.kind,
+                                )
+                            )
+
+                        # Chamadas e resultados de ferramenta
+                        if step_type in ("tool", "tool_call", "tool_use"):
+                            tool_info = su.get("tool_info")
+                            info = tool_info if isinstance(tool_info, dict) else {}
+                            tool_name = str(
+                                info.get("name") or su.get("tool_name") or "tool"
+                            )
+                            params = info.get("parameters")
+                            tool_args = (
+                                dict(params)
+                                if isinstance(params, dict)
+                                else ({"value": params} if params is not None else {})
+                            )
+
+                            if call_id not in emitted_tool_steps:
+                                emitted_tool_steps.add(call_id)
+                                events.append(
+                                    HarnessEvent(
+                                        type=EventType.TOOL_CALL,
+                                        tool_name=tool_name,
+                                        tool_call_id=call_id,
+                                        tool_args=tool_args,
+                                        harness=self.kind,
+                                    )
+                                )
+
+                            if step_state == "DONE" and (
+                                "output" in info or "error" in info
+                            ):
+                                tool_err = info.get("error")
+                                tool_out = (
+                                    info.get("output")
+                                    if "output" in info
+                                    else tool_err
+                                )
+                                res_meta: dict[str, Any] = {}
+                                if tool_err is not None:
+                                    res_meta["error"] = (
+                                        tool_err.get("message")
+                                        if isinstance(tool_err, dict)
+                                        else str(tool_err)
+                                    )
+                                events.append(
+                                    HarnessEvent(
+                                        type=EventType.TOOL_RESULT,
+                                        tool_name=tool_name,
+                                        tool_call_id=call_id,
+                                        tool_output=tool_out,
+                                        harness=self.kind,
+                                        metadata=res_meta,
+                                    )
+                                )
+
+                        return events
+
+                    if event_name == "result":
+                        res = obj.get("result")
+                        if not isinstance(res, dict):
+                            return []
+                        if res.get("conversation_id"):
+                            state["conversation_id"] = str(res["conversation_id"])
+                        if isinstance(res.get("usage"), dict):
+                            state["usage"] = dict(res["usage"])
+
+                        status_val = str(res.get("status") or "SUCCESS").upper()
+                        if status_val != "SUCCESS":
+                            err_msg = str(
+                                res.get("error")
+                                or f"AGY CLI encerrou com status {status_val}."
+                            )
+                            return [
+                                HarnessEvent(
+                                    type=EventType.ERROR,
+                                    content=err_msg,
+                                    harness=self.kind,
+                                    metadata={"status": status_val},
+                                )
+                            ]
+
+                        response_text = res.get("response")
+                        if response_text and not state.get("emitted_text"):
+                            state["emitted_text"] = True
+                            return [
+                                HarnessEvent(
+                                    type=EventType.TEXT_DELTA,
+                                    content=str(response_text),
+                                    harness=self.kind,
+                                )
+                            ]
+                        return []
+
+                # 2) Formato JSON flat (retrocompatibilidade / adapters auxiliares)
+                if "type" in obj:
                     ev_type = str(obj["type"])
                     if ev_type in ("text", "text_delta", "message"):
-                        return HarnessEvent(
-                            type=EventType.TEXT_DELTA,
-                            content=str(obj.get("content") or obj.get("text") or ""),
-                            harness=self.kind,
-                        )
+                        state["emitted_text"] = True
+                        return [
+                            HarnessEvent(
+                                type=EventType.TEXT_DELTA,
+                                content=str(obj.get("content") or obj.get("text") or ""),
+                                harness=self.kind,
+                            )
+                        ]
                     if ev_type in ("thought", "thought_delta", "thinking", "reasoning"):
-                        return HarnessEvent(
-                            type=EventType.THOUGHT_DELTA,
-                            content=str(obj.get("content") or obj.get("text") or ""),
-                            harness=self.kind,
-                        )
+                        return [
+                            HarnessEvent(
+                                type=EventType.THOUGHT_DELTA,
+                                content=str(obj.get("content") or obj.get("text") or ""),
+                                harness=self.kind,
+                            )
+                        ]
                     if ev_type in ("tool_call", "tool_use"):
-                        return HarnessEvent(
-                            type=EventType.TOOL_CALL,
-                            tool_name=str(obj.get("name") or obj.get("tool_name") or "tool"),
-                            tool_call_id=obj.get("id"),
-                            tool_args=obj.get("args") or obj.get("input") or {},
-                            harness=self.kind,
-                        )
+                        return [
+                            HarnessEvent(
+                                type=EventType.TOOL_CALL,
+                                tool_name=str(obj.get("name") or obj.get("tool_name") or "tool"),
+                                tool_call_id=obj.get("id"),
+                                tool_args=obj.get("args") or obj.get("input") or {},
+                                harness=self.kind,
+                            )
+                        ]
                     if ev_type == "tool_result":
-                        return HarnessEvent(
-                            type=EventType.TOOL_RESULT,
-                            tool_name=obj.get("name") or obj.get("tool_name"),
-                            tool_call_id=obj.get("id"),
-                            tool_output=obj.get("output") or obj.get("content"),
-                            harness=self.kind,
-                        )
+                        return [
+                            HarnessEvent(
+                                type=EventType.TOOL_RESULT,
+                                tool_name=obj.get("name") or obj.get("tool_name"),
+                                tool_call_id=obj.get("id"),
+                                tool_output=obj.get("output") or obj.get("content"),
+                                harness=self.kind,
+                            )
+                        ]
                     if ev_type == "error":
-                        return HarnessEvent(
-                            type=EventType.ERROR,
-                            content=str(obj.get("message") or obj.get("content") or "Erro AGY CLI"),
-                            harness=self.kind,
-                        )
-            except json.JSONDecodeError:
-                pass
+                        return [
+                            HarnessEvent(
+                                type=EventType.ERROR,
+                                content=str(obj.get("message") or obj.get("content") or "Erro AGY CLI"),
+                                harness=self.kind,
+                            )
+                        ]
 
-        return HarnessEvent(
-            type=EventType.TEXT_DELTA,
-            content=line + "\n",
-            harness=self.kind,
-        )
+        return [
+            HarnessEvent(
+                type=EventType.TEXT_DELTA,
+                content=line + "\n",
+                harness=self.kind,
+            )
+        ]
 
     async def _stream_via_cli(
         self,
@@ -289,24 +492,29 @@ class AgyHarness(BaseSubprocessHarness):
         system_prompt: str,
         user_prompt: str,
     ) -> AsyncIterator[HarnessEvent]:
-        """Executa o turno via binário CLI `agy` em modo não-interativo."""
-        cmd: list[str] = [executable]
-        if request.model:
-            cmd.extend(["--model", request.model])
+        """Executa o turno via binário CLI `agy` em modo headless `--input-format stream-json --output-format stream-json`."""
+        cmd = self.build_cli_command(executable, request)
 
         combined_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+        stdin_envelope = (
+            json.dumps(
+                {"event": "user", "message": {"content": combined_prompt}},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         stderr_lines: list[str] = []
         had_error = False
+        parse_state: dict[str, Any] = {}
 
         async for chunk in self._exec_lines(
             cmd,
             cwd=request.workspace_dir,
-            stdin_data=combined_prompt.encode("utf-8"),
+            stdin_data=stdin_envelope.encode("utf-8"),
             timeout_seconds=request.timeout_seconds,
         ):
             if chunk.stream == "stdout":
-                ev = self._parse_cli_line(chunk.line)
-                if ev is not None:
+                for ev in self._parse_cli_line(chunk.line, state=parse_state):
                     if ev.type == EventType.ERROR:
                         had_error = True
                     yield ev
@@ -314,7 +522,7 @@ class AgyHarness(BaseSubprocessHarness):
                 if chunk.line.strip():
                     stderr_lines.append(chunk.line.strip())
             elif chunk.stream == "exit":
-                if chunk.returncode not in (0, None):
+                if chunk.returncode not in (0, None) and not had_error:
                     had_error = True
                     detail = "\n".join(stderr_lines[-10:]) or f"Código de saída {chunk.returncode}"
                     yield HarnessEvent(
@@ -328,10 +536,15 @@ class AgyHarness(BaseSubprocessHarness):
             gate_ev = self._make_gate_event_if_needed(request)
             if gate_ev is not None:
                 yield gate_ev
+            done_meta: dict[str, Any] = {"mode": "cli"}
+            if parse_state.get("conversation_id"):
+                done_meta["conversation_id"] = parse_state["conversation_id"]
+            if parse_state.get("usage"):
+                done_meta["usage"] = parse_state["usage"]
             yield HarnessEvent(
                 type=EventType.DONE,
                 harness=self.kind,
-                metadata={"mode": "cli"},
+                metadata=done_meta,
             )
 
     async def stream(self, request: HarnessRunRequest) -> AsyncIterator[HarnessEvent]:

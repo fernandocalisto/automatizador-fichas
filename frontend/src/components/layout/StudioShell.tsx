@@ -85,18 +85,18 @@ export function StudioShell({
 }: StudioShellProps) {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-canvas text-ink">
-      <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border bg-surface px-3">
+      <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border bg-surface px-3">
         {/* Brand + Active project switcher */}
-        <div className="flex min-w-0 items-center gap-3">
+        <div className="flex shrink-0 items-center gap-2.5">
           <button
             type="button"
             onClick={() => onNavigate("projects")}
-            className="flex items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-surface-subtle transition-colors cursor-pointer"
+            className="flex shrink-0 items-center gap-2 rounded-md px-1.5 py-1 text-left hover:bg-surface-subtle transition-colors cursor-pointer"
           >
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-xs font-bold tracking-tight text-accent-ink">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent text-xs font-bold tracking-tight text-accent-ink">
               SF
             </span>
-            <div className="hidden sm:block leading-tight">
+            <div className="hidden lg:block leading-tight whitespace-nowrap">
               <div className="text-xs font-semibold tracking-tight text-ink">
                 Salutem Ficha Studio
               </div>
@@ -107,7 +107,7 @@ export function StudioShell({
           </button>
 
           {projects.length > 0 && (
-            <div className="hidden md:flex items-center gap-1.5 border-l border-border pl-3">
+            <div className="hidden md:flex shrink-0 items-center gap-1.5 border-l border-border pl-2.5">
               <label htmlFor="studio-project-switcher" className="sr-only">
                 Projeto ativo
               </label>
@@ -119,7 +119,7 @@ export function StudioShell({
                     onSelectProjectId(e.target.value);
                   }
                 }}
-                className="h-7 max-w-[220px] truncate rounded border border-border bg-surface-subtle px-2 text-xs font-medium text-ink focus:border-accent focus:outline-none cursor-pointer"
+                className="h-7 max-w-[155px] xl:max-w-[210px] truncate rounded border border-border bg-surface-subtle px-2 text-xs font-medium text-ink focus:border-accent focus:outline-none cursor-pointer"
               >
                 <option value="">Selecionar projeto...</option>
                 {projects.map((p) => (
@@ -141,7 +141,7 @@ export function StudioShell({
         {/* Center workflow navigation */}
         <nav
           aria-label="Etapas do Studio"
-          className="flex items-center gap-1 overflow-x-auto"
+          className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
         >
           {WORKFLOW_NAV.map((item) => {
             const disabled = item.requiresProject && !activeProject;
@@ -154,7 +154,7 @@ export function StudioShell({
                 aria-current={active ? "page" : undefined}
                 onClick={() => onNavigate(item.id)}
                 className={cn(
-                  "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer",
+                  "inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer",
                   "disabled:opacity-40 disabled:cursor-not-allowed",
                   active
                     ? "bg-accent-soft text-accent border border-accent/25"
@@ -169,8 +169,8 @@ export function StudioShell({
         </nav>
 
         {/* Right utilities: status pills, settings, theme */}
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="hidden lg:flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
+          <div className="hidden xl:flex items-center gap-1.5">
             <Badge
               tone={health?.status === "ok" ? "success" : "warning"}
               dot

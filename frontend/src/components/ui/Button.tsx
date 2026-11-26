@@ -57,7 +57,7 @@ export function Button({
       className={cn(
         "inline-flex items-center justify-center font-medium transition-colors cursor-pointer select-none",
         "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
-        "disabled:opacity-50 disabled:cursor-not-allowed",
+        "disabled:cursor-not-allowed disabled:bg-surface-subtle disabled:text-ink-muted disabled:border-border disabled:shadow-none disabled:opacity-80",
         VARIANT_CLASSES[variant],
         SIZE_CLASSES[size],
         className,

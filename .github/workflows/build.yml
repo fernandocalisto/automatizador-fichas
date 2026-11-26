@@ -1,9 +1,13 @@
-name: Build and Release
+name: CI & Release — Salutem Ficha Studio
 
 on:
   push:
+    branches:
+      - main
+      - feat/v1-web-studio
     tags:
-      - 'v*'
+      - "v*"
+  pull_request:
     branches:
       - main
   workflow_dispatch:
@@ -12,84 +16,145 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 30
+  backend-tests:
+    name: Backend pytest + JVM Jasper Daemon
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python
+      - name: Set up Python 3.13
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
 
-      - name: Install dependencies
+      - name: Set up Java 17 (Jasper Daemon JVM)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Install Linux fonts for JasperReports PDF rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fontconfig fonts-dejavu-core fonts-liberation
+
+      - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r backend/requirements.txt
 
-      - name: Run headless tests
-        env:
-          QT_QPA_PLATFORM: offscreen
+      - name: Run full pytest suite (including real JVM & MCP stdio)
+        run: pytest
+
+  frontend-tests:
+    name: Frontend Typecheck, Vitest & Vite Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: TypeScript typecheck
+        run: npm --prefix frontend run typecheck
+
+      - name: Run Vitest suite
+        run: npm --prefix frontend test
+
+      - name: Build production SPA bundle
+        run: npm --prefix frontend run build
+
+      - name: Upload compiled frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 7
+
+  docker-validate:
+    name: Validate Multi-Stage Docker Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [backend-tests, frontend-tests]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t salutem-ficha-studio:ci .
+
+      - name: Smoke-test container health
         run: |
-          python -m pytest -c pytest.ini tests
+          docker run -d --name studio-ci -p 8000:8000 salutem-ficha-studio:ci
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:8000/api/health; then
+              echo ""
+              echo "Container health OK!"
+              docker rm -f studio-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs studio-ci
+          docker rm -f studio-ci
+          exit 1
 
-      - name: Determine version
-        id: version
+  release:
+    name: Package & Publish GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [backend-tests, frontend-tests, docker-validate]
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download compiled frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Create portable Salutem Ficha Studio bundle (.zip)
         run: |
-          if ($env:GITHUB_REF -match 'refs/tags/v(.*)') {
-            $version = $matches[1]
-          } else {
-            $date = Get-Date -Format "yyyy.MM.dd"
-            $commit = $env:GITHUB_SHA.Substring(0, 7)
-            $version = "0.2.0-dev.$date.$commit"
-          }
-          echo "version=$version" >> $env:GITHUB_OUTPUT
-          echo "VERSION=$version"
+          TAG="${GITHUB_REF_NAME}"
+          STAGE="salutem-ficha-studio-${TAG}"
+          mkdir -p "${STAGE}"
+          cp -r backend resources scripts pyproject.toml Dockerfile .dockerignore docker-compose.yml README.md CHANGELOG.md "${STAGE}/"
+          mkdir -p "${STAGE}/frontend"
+          cp -r frontend/dist "${STAGE}/frontend/dist"
+          rm -rf "${STAGE}/backend/tests"
+          find "${STAGE}" -name "__pycache__" -type d -exec rm -rf {} +
+          zip -r "salutem-ficha-studio-${TAG}.zip" "${STAGE}"
+          ls -lh "salutem-ficha-studio-${TAG}.zip"
 
-      - name: Build executable with PyInstaller
-        run: |
-          python -m PyInstaller --clean --noconfirm build.spec
-
-      - name: Verify executable
-        run: |
-          $exe = "dist\AutomatizadorFichas.exe"
-          if (Test-Path $exe) {
-            $size = (Get-Item $exe).Length / 1MB
-            Write-Host "Executable found: $exe (Size: $([math]::Round($size, 2)) MB)"
-            if ($size -lt 15) {
-              Write-Error "Executable too small ($size MB), build may have failed"
-              exit 1
-            }
-          } else {
-            Write-Error "Executable not found at $exe"
-            exit 1
-          }
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "Automatizador de Fichas v${{ steps.version.outputs.version }}"
+          name: "Salutem Ficha Studio ${{ github.ref_name }}"
           body_path: CHANGELOG.md
           generate_release_notes: false
           draft: false
           prerelease: false
           files: |
-            dist/AutomatizadorFichas.exe
+            salutem-ficha-studio-*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload artifact (for non-tag builds)
-        if: "!startsWith(github.ref, 'refs/tags/v')"
-        uses: actions/upload-artifact@v4
-        with:
-          name: AutomatizadorFichas-${{ steps.version.outputs.version }}-windows
-          path: dist/AutomatizadorFichas.exe
-          retention-days: 7

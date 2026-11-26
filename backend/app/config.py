@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 APP_NAME = "Salutem Ficha Studio"
-APP_VERSION = "1.0.0-alpha.1"
+APP_VERSION = "1.0.0"
 
 # backend/app/config.py -> backend/app -> backend -> PROJECT_ROOT
 APP_DIR = Path(__file__).resolve().parent

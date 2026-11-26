@@ -378,7 +378,126 @@ async def test_agy_harness_cli_fallback_via_localappdata(tmp_path: Path) -> None
     ]
     assert events[-1].metadata["mode"] == "cli"
     assert EventType.GATE_REQUEST not in [e.type for e in events]
-    assert "GATE 2" in captured["stdin"]
+    assert "--input-format" in captured["cmd"]
+    assert "stream-json" in captured["cmd"]
+    assert "--mode" in captured["cmd"]
+    assert captured["cmd"][captured["cmd"].index("--mode") + 1] == "accept-edits"
+    stdin_obj = json.loads(captured["stdin"].strip())
+    assert stdin_obj["event"] == "user"
+    assert "GATE 2" in stdin_obj["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agy_harness_parses_official_stream_json_events_and_modes(tmp_path: Path) -> None:
+    captured: dict[str, Any] = {}
+    runner = make_mock_runner(
+        stdout_lines=[
+            json.dumps(
+                {
+                    "event": "init",
+                    "conversation_id": "conv-agy-123",
+                    "init": {"cwd": str(tmp_path), "tools": ["view_file"]},
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": "conv-agy-123",
+                        "step_index": 1,
+                        "state": "ACTIVE",
+                        "step_type": "thinking",
+                        "text_delta": "Analisando geometria...",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": "conv-agy-123",
+                        "step_index": 2,
+                        "state": "DONE",
+                        "step_type": "tool",
+                        "tool_name": "extract_pdf_geometry",
+                        "tool_info": {
+                            "name": "extract_pdf_geometry",
+                            "parameters": {"project_id": "p1"},
+                            "output": '{"page_count": 1}',
+                        },
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": "conv-agy-123",
+                        "step_index": 3,
+                        "state": "ACTIVE",
+                        "step_type": "agent_response",
+                        "text_delta": "Mapeamento ",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "step_update",
+                    "step_update": {
+                        "conversation_id": "conv-agy-123",
+                        "step_index": 3,
+                        "state": "DONE",
+                        "step_type": "agent_response",
+                        "text_delta": "concluído.",
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "event": "result",
+                    "result": {
+                        "conversation_id": "conv-agy-123",
+                        "status": "SUCCESS",
+                        "response": "Mapeamento concluído.",
+                        "usage": {"total_tokens": 512},
+                    },
+                }
+            ),
+        ],
+        captured=captured,
+    )
+
+    harness = AgyHarness(
+        runner=runner,
+        which_resolver=lambda name: "/usr/local/bin/agy" if name == "agy" else None,
+        sdk_spec_finder=lambda _: None,
+    )
+
+    req = HarnessRunRequest(
+        workspace_dir=tmp_path,
+        phase="extraction",
+        prompt="Analise o PDF da ficha.",
+        gate_authorized=False,
+        model="gemini-3.6-pro",
+        timeout_seconds=120.0,
+    )
+    events = await harness.run_to_completion(req)
+
+    assert captured["cmd"][captured["cmd"].index("--mode") + 1] == "plan"
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "gemini-3.6-pro"
+    assert captured["cmd"][captured["cmd"].index("--print-timeout") + 1] == "120s"
+    assert [e.type for e in events] == [
+        EventType.THOUGHT_DELTA,
+        EventType.TOOL_CALL,
+        EventType.TOOL_RESULT,
+        EventType.TEXT_DELTA,
+        EventType.TEXT_DELTA,
+        EventType.GATE_REQUEST,
+        EventType.DONE,
+    ]
+    assert "".join(e.content for e in events if e.type == EventType.TEXT_DELTA) == "Mapeamento concluído."
+    assert events[-1].metadata["conversation_id"] == "conv-agy-123"
+    assert events[-1].metadata["usage"]["total_tokens"] == 512
 
 
 # ---------------------------------------------------------------------------

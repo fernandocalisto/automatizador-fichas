@@ -22,7 +22,7 @@ describe("Studio App shell", () => {
           JSON.stringify({
             status: "ok",
             app_name: "Salutem Ficha Studio",
-            version: "1.0.0-alpha.1",
+            version: "1.0.0",
             database: {},
             paths: {},
             builtin_subreports_count: 4,
@@ -44,7 +44,7 @@ describe("Studio App shell", () => {
 
     expect(screen.getByText("Salutem Ficha Studio")).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByText("v1.0.0-alpha.1")).toBeInTheDocument();
+      expect(screen.getByText("v1.0.0")).toBeInTheDocument();
     });
 
     const themeBtn = screen.getByRole("button", { name: /Ativar tema escuro/i });
@@ -53,5 +53,6 @@ describe("Studio App shell", () => {
 
     await user.click(screen.getByRole("button", { name: /Configurações/i }));
     expect(screen.getByRole("heading", { name: "Configurações" })).toBeInTheDocument();
+    expect(window.location.hash).toContain("section=settings");
   });
 });

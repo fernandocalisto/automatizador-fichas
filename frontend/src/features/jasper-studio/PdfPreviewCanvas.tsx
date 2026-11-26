@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  Bot,
   ChevronLeft,
   ChevronRight,
   Crosshair,
@@ -42,6 +43,7 @@ export interface PdfPreviewCanvasProps {
   submittingAnnotation: boolean;
   onSubmitAnnotation: (payload: RegionAnnotationSubmitPayload) => Promise<void>;
   onGeneratePreview: () => void;
+  onOpenAgentChat?: () => void;
 }
 
 const NUMERIC_ZOOMS: Exclude<ZoomPreset, "fit-width">[] = [0.75, 1, 1.25, 1.5];
@@ -58,6 +60,7 @@ export function PdfPreviewCanvas({
   submittingAnnotation,
   onSubmitAnnotation,
   onGeneratePreview,
+  onOpenAgentChat,
 }: PdfPreviewCanvasProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -475,22 +478,32 @@ export function PdfPreviewCanvas({
           aria-label="Anotações visuais enviadas na sessão"
           className="shrink-0 border-t border-border bg-surface"
         >
-          <button
-            type="button"
-            onClick={() => setAnnotationsExpanded((v) => !v)}
-            className="flex w-full items-center justify-between bg-surface-subtle/60 px-3 py-1.5 text-left text-xs font-semibold text-ink hover:bg-surface-subtle cursor-pointer"
-          >
-            <span className="flex items-center gap-1.5">
-              <MessageSquare className="h-3.5 w-3.5 text-accent" />
-              Ajustes visuais enviados ao agente
+          <div className="flex w-full items-center justify-between gap-2 bg-surface-subtle/60 px-3 py-1.5 text-xs font-semibold text-ink">
+            <button
+              type="button"
+              onClick={() => setAnnotationsExpanded((v) => !v)}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-accent cursor-pointer"
+            >
+              <MessageSquare className="h-3.5 w-3.5 shrink-0 text-accent" />
+              <span className="truncate">Ajustes visuais enviados ao agente</span>
               <Badge tone="accent" className="tabular-nums">
                 {annotations.length}
               </Badge>
-            </span>
-            <span className="text-[11px] font-normal text-ink-muted">
-              {annotationsExpanded ? "Recolher" : "Expandir"}
-            </span>
-          </button>
+              <span className="ml-1 text-[11px] font-normal text-ink-muted">
+                ({annotationsExpanded ? "Recolher" : "Expandir"})
+              </span>
+            </button>
+            {onOpenAgentChat && (
+              <Button
+                variant="primary"
+                size="xs"
+                onClick={onOpenAgentChat}
+                icon={<Bot className="h-3 w-3" />}
+              >
+                Abrir Chat IA
+              </Button>
+            )}
+          </div>
 
           {annotationsExpanded && (
             <ul className="max-h-36 divide-y divide-border/70 overflow-y-auto px-3 py-1.5 text-xs">

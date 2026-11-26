@@ -698,3 +698,49 @@ def test_api_auto_fallback_to_offline_and_on_demand_bundle_generation(
     with zipfile.ZipFile(io.BytesIO(bundle_resp.content), mode="r") as zf:
         assert f"{project.slug}_relatorio_ficticio.pdf" in zf.namelist()
 
+
+def test_api_visual_region_crop_feedback_creates_png_and_persists_chat(
+    studio_env: dict[str, Any],
+) -> None:
+    client: TestClient = studio_env["client"]
+    project = studio_env["project"]
+
+    # Gera preview PDF real primeiro
+    prev_resp = client.post(
+        f"/api/projects/{project.id}/jasper/preview",
+        json={"scenario": "full", "mode": "offline", "dpi": 120},
+    )
+    assert prev_resp.status_code == 200
+
+    # Envia anotação visual retangular para recorte PNG automático
+    crop_resp = client.post(
+        f"/api/projects/{project.id}/jasper/preview/crop-feedback",
+        json={
+            "page": 1,
+            "pdf_rect": {"x0": 40, "y0": 200, "x1": 280, "y1": 280, "width": 240, "height": 80},
+            "detail_coords": {"x": 20, "y": 18, "width": 240, "height": 80},
+            "scenario": "full",
+            "content": "Alinhar checkboxes à direita",
+            "dpi": 150,
+        },
+    )
+    assert crop_resp.status_code == 201
+    data = crop_resp.json()
+    assert data["ok"] is True
+    assert data["crop_png_path"] is not None
+    assert Path(data["crop_png_path"]).is_file()
+    assert data["crop_url"].startswith(f"/api/projects/{project.id}/jasper/preview/feedback/")
+    assert data["message"]["metadata"]["type"] == "visual_region_feedback"
+    assert data["message"]["metadata"]["crop_url"] == data["crop_url"]
+
+    # Streaming do PNG recortado funciona
+    img_resp = client.get(data["crop_url"])
+    assert img_resp.status_code == 200
+    assert img_resp.headers["content-type"] == "image/png"
+    assert img_resp.content.startswith(b"\x89PNG")
+
+    # Rejeita path traversal ou extensão inválida
+    bad_resp = client.get(f"/api/projects/{project.id}/jasper/preview/feedback/evil.txt")
+    assert bad_resp.status_code == 400
+
+

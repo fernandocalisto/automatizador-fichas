@@ -364,6 +364,36 @@ export const api = {
     const qs = params.toString();
     return `/api/projects/${encodeURIComponent(projectId)}/jasper/export-bundle${qs ? `?${qs}` : ""}`;
   },
+  submitVisualRegionFeedback: (
+    projectId: string,
+    payload: {
+      page: number;
+      pdf_rect: {
+        x0: number;
+        y0: number;
+        x1: number;
+        y1: number;
+        width?: number;
+        height?: number;
+      };
+      detail_coords?:
+        | { x: number; y: number; width: number; height: number }
+        | Record<string, unknown>;
+      scenario?: ScenarioType;
+      content: string;
+      dpi?: number;
+    },
+  ) =>
+    requestJson<{
+      ok: boolean;
+      project_id: string;
+      message: ChatMessageRead;
+      crop_png_path: string | null;
+      crop_url: string | null;
+    }>(
+      `/api/projects/${encodeURIComponent(projectId)}/jasper/preview/crop-feedback`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
 
   // Subreports
   listSubreports: () => requestJson<SubreportInfo[]>("/api/subreports"),

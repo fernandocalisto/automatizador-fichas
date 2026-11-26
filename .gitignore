@@ -136,3 +136,5 @@ workspaces/
 node_modules/
 frontend/dist/
 java-engine/target/
+!frontend/src/lib/
+!frontend/src/lib/**

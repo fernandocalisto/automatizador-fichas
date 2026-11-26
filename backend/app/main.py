@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from backend.app.api import (
+    agent,
     database,
     harnesses_and_tools,
     jasper_preview,
@@ -31,6 +32,7 @@ from backend.app.api import (
 )
 from backend.app.config import APP_NAME, APP_VERSION, FRONTEND_DIST_DIR
 from backend.app.db.sqlite_store import SQLiteStore
+from backend.app.services.agent_orchestrator import AgentOrchestratorService
 from backend.app.services.jasper_daemon import JasperDaemonService
 from backend.app.services.postgres_service import PostgresService
 from backend.app.services.subreport_service import SubreportService
@@ -255,6 +257,7 @@ def create_app(
     subreport_service: SubreportService | None = None,
     postgres_service: PostgresService | None = None,
     jasper_daemon: JasperDaemonService | None = None,
+    agent_orchestrator: AgentOrchestratorService | None = None,
     frontend_dist_dir: Path | None = None,
 ) -> FastAPI:
     """Create and configure the Salutem Ficha Studio FastAPI application."""
@@ -262,6 +265,9 @@ def create_app(
     resolved_workspace = workspace_service or WorkspaceService(store=resolved_store)
     resolved_subreports = subreport_service or SubreportService()
     resolved_postgres = postgres_service or PostgresService(store=resolved_store)
+    resolved_agent = agent_orchestrator or AgentOrchestratorService(
+        workspace_service=resolved_workspace
+    )
     dist_dir = frontend_dist_dir if frontend_dist_dir is not None else FRONTEND_DIST_DIR
 
     @asynccontextmanager
@@ -288,6 +294,7 @@ def create_app(
     app_instance.state.workspace_service = resolved_workspace
     app_instance.state.subreport_service = resolved_subreports
     app_instance.state.postgres_service = resolved_postgres
+    app_instance.state.agent_orchestrator = resolved_agent
     if jasper_daemon is not None:
         app_instance.state.jasper_daemon = jasper_daemon
 
@@ -305,6 +312,7 @@ def create_app(
     app_instance.include_router(harnesses_and_tools.router)
     app_instance.include_router(database.router)
     app_instance.include_router(jasper_preview.router)
+    app_instance.include_router(agent.router)
 
     if (dist_dir / "assets").is_dir():
         app_instance.mount(

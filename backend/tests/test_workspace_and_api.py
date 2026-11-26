@@ -506,12 +506,13 @@ def test_system_health_settings_skills_and_root_html_fallback(
     tmp_path: Path,
     studio_env: Path,
 ) -> None:
-    # GET / fallback dark-themed HTML status page
-    root_res = client.get("/")
-    assert root_res.status_code == 200
-    assert "text/html" in root_res.headers["content-type"]
-    for expected_link in ("/docs", "/api/health", "/api/projects", "/api/subreports"):
-        assert expected_link in root_res.text
+    # GET / fallback dark-themed HTML status page (when frontend/dist is absent)
+    with TestClient(create_app(frontend_dist_dir=tmp_path / "missing_dist")) as fallback_client:
+        root_res = fallback_client.get("/")
+        assert root_res.status_code == 200
+        assert "text/html" in root_res.headers["content-type"]
+        for expected_link in ("/docs", "/api/health", "/api/projects", "/api/subreports"):
+            assert expected_link in root_res.text
 
     # GET /api/health
     health = client.get("/api/health").json()

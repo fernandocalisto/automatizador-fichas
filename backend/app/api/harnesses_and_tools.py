@@ -29,7 +29,7 @@ from backend.app.core import (
 from backend.app.harnesses import get_default_registry
 from backend.app.jrxml import lint_jrxml, scaffold_salutem_jrxml
 from backend.app.mcp_tools.pdf_tools import extract_pdf_geometry
-from backend.app.mcp_tools.studio_tools import get_mcp_tool_descriptors
+from backend.app.mcp_tools.studio_tools import get_all_mcp_tool_descriptors
 from backend.app.services.workspace_service import WorkspaceService
 
 router = APIRouter(prefix="/api", tags=["etapa1-studio-tools"])
@@ -71,8 +71,8 @@ def list_harnesses() -> list[dict[str, Any]]:
 
 @router.get("/mcp-tools")
 def list_studio_mcp_tools() -> list[dict[str, Any]]:
-    """Return JSON-Schema descriptors of the deterministic Studio MCP tools."""
-    return get_mcp_tool_descriptors()
+    """Return JSON-Schema descriptors of all deterministic Studio MCP tools."""
+    return get_all_mcp_tool_descriptors()
 
 
 @router.get("/projects/{project_id}/json/warnings")

@@ -192,14 +192,38 @@ def get_postgres_service_dep(request: Request) -> Any | None:
     return PostgresService()
 
 
+def get_jasperserver_service_dep(request: Request) -> Any | None:
+    """
+    Resolve `JasperServerService` via `app.state.jasperserver_service` ou lazy import
+    de `backend.app.services.jasperserver_service.JasperServerService`.
+    """
+    override_svc = getattr(request.app.state, "jasperserver_service", None)
+    if override_svc is not None:
+        return override_svc
+    try:
+        from backend.app.services.jasperserver_service import JasperServerService
+    except ModuleNotFoundError:
+        return None
+
+    store = getattr(request.app.state, "store", None)
+    if store is not None:
+        try:
+            return JasperServerService(store=store)
+        except TypeError:
+            pass
+    return JasperServerService()
+
+
 # Aliases amigáveis para dependency_overrides nos testes e integração
 get_jasper_daemon = get_jasper_daemon_dep
 get_postgres_service = get_postgres_service_dep
+get_jasperserver_service = get_jasperserver_service_dep
 
 WorkspaceSvcDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
 SubreportSvcDep = Annotated[SubreportService, Depends(get_subreport_service)]
 JasperDaemonDep = Annotated[Any, Depends(get_jasper_daemon_dep)]
 PostgresSvcDep = Annotated[Any | None, Depends(get_postgres_service_dep)]
+JasperServerSvcDep = Annotated[Any | None, Depends(get_jasperserver_service_dep)]
 
 
 # -----------------------------------------------------------------------------
@@ -395,6 +419,120 @@ def _resolve_preview_mode_and_db(
         )
 
 
+def _inspect_repo_resources_for_project(
+    *,
+    project: Any,
+    jrxml_text: str,
+    jasperserver_service: Any | None,
+) -> dict[str, Any]:
+    """Inspeciona o status dos recursos `repo:...` referenciados pelo JRXML do projeto."""
+    from backend.app.services.jasperserver_service import JasperServerService
+
+    origin = project.source_origin if isinstance(getattr(project, "source_origin", None), dict) else {}
+    can_sync_remote = bool(
+        origin.get("provider") == "jasperserver"
+        and origin.get("profile_id")
+        and jasperserver_service is not None
+    )
+    resources_dir = Path(project.workspace_dir) / "report_unit_resources"
+    status_dict = JasperServerService.inspect_project_repo_resources(
+        jrxml_text,
+        resources_dir,
+        can_sync_remote=can_sync_remote,
+    )
+    return {"project_id": project.id, **status_dict}
+
+
+def _auto_sync_repo_resources_if_needed(
+    *,
+    project: Any,
+    jrxml_text: str,
+    resources_dir: Path,
+    jasper_daemon: Any,
+    jasperserver_service: Any | None,
+) -> list[str]:
+    """
+    Antes do export JVM, verifica se há recursos `repo:` ausentes no workspace.
+    Se o projeto tiver origem `jasperserver` e `jasperserver_service` disponível,
+    executa `sync_missing_repo_resources(...)` automaticamente sob demanda.
+    """
+    from backend.app.services.jasperserver_service import (
+        JasperServerService,
+        _call_daemon_compile,
+    )
+
+    origin = project.source_origin if isinstance(getattr(project, "source_origin", None), dict) else {}
+    can_sync_remote = bool(
+        origin.get("provider") == "jasperserver"
+        and origin.get("profile_id")
+        and jasperserver_service is not None
+    )
+    inspection = JasperServerService.inspect_project_repo_resources(
+        jrxml_text,
+        resources_dir,
+        can_sync_remote=can_sync_remote,
+    )
+    if inspection["total"] == 0:
+        return []
+
+    warnings: list[str] = []
+    if inspection["missing_count"] > 0 and can_sync_remote:
+        try:
+            sync_res = jasperserver_service.sync_missing_repo_resources(
+                str(origin["profile_id"]),
+                jrxml_text,
+                resources_dir,
+                jasper_daemon,
+                resource_uri=origin.get("resource_uri"),
+            )
+            if isinstance(sync_res, dict) and sync_res.get("warnings"):
+                warnings.extend(str(w) for w in sync_res["warnings"])
+        except Exception as exc:
+            warnings.append(f"Auto-sync de recursos repo: falhou ({exc}).")
+        return warnings
+
+    # Caso todos estejam presentes localmente mas algum subreport .jrxml ainda não tenha .jasper
+    if resources_dir.is_dir():
+        for item in inspection["items"]:
+            if item.get("kind") == "subreport" and item.get("resolved") and not item.get("compiled"):
+                rel_local = item.get("local_path")
+                if not rel_local:
+                    continue
+                jrxml_candidate = (resources_dir / rel_local).resolve()
+                if jrxml_candidate.is_file() and jrxml_candidate.suffix.lower() == ".jrxml":
+                    target_jasper = jrxml_candidate.with_suffix(".jasper")
+                    try:
+                        _call_daemon_compile(jasper_daemon, jrxml_candidate, target_jasper, resources_dir)
+                    except Exception as exc:
+                        warnings.append(f"Falha ao compilar subreport '{rel_local}': {exc}")
+
+    return warnings
+
+
+def _prepare_effective_subreport_dir(
+    *,
+    base_runtime_dir: Path,
+    unit_resources_dir: Path,
+    merged_dir: Path,
+    default_caminho_relatorio: str,
+) -> tuple[str, str]:
+    """
+    Combina `base_runtime_dir` (mock ou subreports padrão) com `ws_dir / "report_unit_resources"`
+    preservando recursivamente a árvore `repo/...` em TODOS os modos (`offline`, `db_hybrid`, `db_live`).
+    """
+    if unit_resources_dir.is_dir() and any(unit_resources_dir.iterdir()):
+        if merged_dir.exists():
+            shutil.rmtree(merged_dir, ignore_errors=True)
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        if base_runtime_dir.is_dir():
+            shutil.copytree(base_runtime_dir, merged_dir, dirs_exist_ok=True)
+        shutil.copytree(unit_resources_dir, merged_dir, dirs_exist_ok=True)
+        resolved = merged_dir.resolve()
+        return str(resolved), resolved.as_posix().rstrip("/") + "/"
+
+    return str(base_runtime_dir.resolve()), default_caminho_relatorio
+
+
 def _execute_preview_pipeline(
     *,
     project_id: str,
@@ -403,6 +541,7 @@ def _execute_preview_pipeline(
     subreport_service: SubreportService,
     jasper_daemon: Any,
     postgres_service: Any | None,
+    jasperserver_service: Any | None = None,
 ) -> dict[str, Any]:
     """Executa o fluxo completo de preview híbrido/offline sem mutar o `.jrxml` original."""
     project = workspace_service.get_project(project_id)
@@ -426,8 +565,18 @@ def _execute_preview_pipeline(
     exports_dir = ws_dir / "exports"
     build_dir = exports_dir / "_build"
     pages_dir = exports_dir / f"pages_{payload.scenario}"
+    unit_resources_dir = ws_dir / "report_unit_resources"
     for d in (exports_dir, build_dir, pages_dir):
         d.mkdir(parents=True, exist_ok=True)
+
+    # Auto-fetch sob demanda de recursos `repo:` faltantes (quando projeto veio do JasperServer)
+    _auto_sync_repo_resources_if_needed(
+        project=project,
+        jrxml_text=jrxml_text,
+        resources_dir=unit_resources_dir,
+        jasper_daemon=jasper_daemon,
+        jasperserver_service=jasperserver_service,
+    )
 
     mock_row: dict[str, Any] | None = None
     if effective_mode == "db_live":
@@ -449,28 +598,27 @@ def _execute_preview_pipeline(
     preview_jrxml_path = build_dir / f"preview_{payload.scenario}_{effective_mode}.jrxml"
     preview_jrxml_path.write_text(rewritten_jrxml, encoding="utf-8")
 
+    merged_subreports_dir = build_dir / "_subreports"
     if effective_mode == "offline":
         mock_runtime_dir = _ensure_offline_mock_subreports_compiled(
             jasper_daemon,
             unit_name=payload.unit_name,
         )
-        subreport_dir = str(mock_runtime_dir.resolve())
-        caminho_relatorio = mock_runtime_dir.resolve().as_posix().rstrip("/") + "/"
+        default_caminho = mock_runtime_dir.resolve().as_posix().rstrip("/") + "/"
+        subreport_dir, caminho_relatorio = _prepare_effective_subreport_dir(
+            base_runtime_dir=mock_runtime_dir,
+            unit_resources_dir=unit_resources_dir,
+            merged_dir=merged_subreports_dir,
+            default_caminho_relatorio=default_caminho,
+        )
     else:
         real_runtime_dir = subreport_service.materialize_runtime_dir()
-        unit_resources_dir = ws_dir / "report_unit_resources"
-        if unit_resources_dir.is_dir() and any(unit_resources_dir.iterdir()):
-            merged_subreports_dir = build_dir / "_subreports"
-            merged_subreports_dir.mkdir(parents=True, exist_ok=True)
-            for src_dir in (real_runtime_dir, unit_resources_dir):
-                for item in src_dir.iterdir():
-                    if item.is_file():
-                        shutil.copy2(item, merged_subreports_dir / item.name)
-            subreport_dir = str(merged_subreports_dir.resolve())
-            caminho_relatorio = merged_subreports_dir.resolve().as_posix().rstrip("/") + "/"
-        else:
-            subreport_dir = str(real_runtime_dir.resolve())
-            caminho_relatorio = subreport_service.get_caminho_relatorio()
+        subreport_dir, caminho_relatorio = _prepare_effective_subreport_dir(
+            base_runtime_dir=real_runtime_dir,
+            unit_resources_dir=unit_resources_dir,
+            merged_dir=merged_subreports_dir,
+            default_caminho_relatorio=subreport_service.get_caminho_relatorio(),
+        )
 
     pdf_output_path = exports_dir / f"preview_{payload.scenario}.pdf"
     if effective_mode == "db_live":
@@ -778,6 +926,78 @@ def compile_project_jasper(
     }
 
 
+@router.get("/{project_id}/jasper/repo-resources")
+def get_project_jasper_repo_resources(
+    project_id: str,
+    workspace_service: WorkspaceSvcDep,
+    jasperserver_service: JasperServerSvcDep,
+) -> dict[str, Any]:
+    """Lista todas as referências `repo:...` do JRXML do projeto e seu status local/compilação."""
+    try:
+        project = workspace_service.get_project(project_id)
+        jrxml_text = _resolve_jrxml_source(workspace_service, project_id, None)
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
+
+    return _inspect_repo_resources_for_project(
+        project=project,
+        jrxml_text=jrxml_text,
+        jasperserver_service=jasperserver_service,
+    )
+
+
+@router.post("/{project_id}/jasper/sync-repo-resources")
+def sync_project_jasper_repo_resources(
+    project_id: str,
+    workspace_service: WorkspaceSvcDep,
+    jasper_daemon: JasperDaemonDep,
+    jasperserver_service: JasperServerSvcDep,
+) -> dict[str, Any]:
+    """Sincroniza do JasperReports Server todos os recursos `repo:...` ausentes e compila subreports."""
+    try:
+        project = workspace_service.get_project(project_id)
+        jrxml_text = _resolve_jrxml_source(workspace_service, project_id, None)
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
+
+    origin = project.source_origin if isinstance(project.source_origin, dict) else {}
+    profile_id = str(origin.get("profile_id") or "").strip()
+    if origin.get("provider") != "jasperserver" or not profile_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Este projeto não está vinculado a um perfil JasperReports Server "
+                "(source_origin.provider='jasperserver')."
+            ),
+        )
+    if jasperserver_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="JasperServerService indisponível neste ambiente.",
+        )
+
+    resources_dir = Path(project.workspace_dir) / "report_unit_resources"
+    try:
+        sync_res = jasperserver_service.sync_missing_repo_resources(
+            profile_id,
+            jrxml_text,
+            resources_dir,
+            jasper_daemon,
+            resource_uri=origin.get("resource_uri"),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Falha ao sincronizar recursos repo: do JasperServer: {exc}",
+        ) from exc
+
+    return {"project_id": project.id, **sync_res}
+
+
 @router.post("/{project_id}/jasper/preview")
 def generate_project_jasper_preview(
     project_id: str,
@@ -785,10 +1005,11 @@ def generate_project_jasper_preview(
     subreport_service: SubreportSvcDep,
     jasper_daemon: JasperDaemonDep,
     postgres_service: PostgresSvcDep,
+    jasperserver_service: JasperServerSvcDep,
     payload: JasperPreviewRequest = Body(default_factory=JasperPreviewRequest),
 ) -> dict[str, Any]:
     """
-    Gera PDF fictício (`full`, `stress` ou `blank`) em modo `offline`, `db_hybrid` ou `auto`,
+    Gera PDF fictício (`full`, `stress` ou `blank`) em modo `offline`, `db_hybrid`, `db_live` ou `auto`,
     renderiza as páginas PNG via PyMuPDF e retorna URLs + métricas de paginação e linter.
     """
     try:
@@ -799,6 +1020,7 @@ def generate_project_jasper_preview(
             subreport_service=subreport_service,
             jasper_daemon=jasper_daemon,
             postgres_service=postgres_service,
+            jasperserver_service=jasperserver_service,
         )
     except HTTPException:
         raise
@@ -1033,6 +1255,7 @@ def export_salutem_delivery_bundle(
     subreport_service: SubreportSvcDep,
     jasper_daemon: JasperDaemonDep,
     postgres_service: PostgresSvcDep,
+    jasperserver_service: JasperServerSvcDep,
     scenario: ScenarioType = Query(default="full"),
     mode: Literal["auto", "offline", "db_hybrid", "db_live"] = Query(default="auto"),
     db_profile_id: str | None = Query(default=None),
@@ -1089,6 +1312,7 @@ def export_salutem_delivery_bundle(
             subreport_service=subreport_service,
             jasper_daemon=jasper_daemon,
             postgres_service=postgres_service,
+            jasperserver_service=jasperserver_service,
         )
 
     slug = project.slug
@@ -1130,6 +1354,8 @@ __all__ = [
     "SyncQueryRequest",
     "get_jasper_daemon",
     "get_jasper_daemon_dep",
+    "get_jasperserver_service",
+    "get_jasperserver_service_dep",
     "get_postgres_service",
     "get_postgres_service_dep",
     "get_subreport_service",

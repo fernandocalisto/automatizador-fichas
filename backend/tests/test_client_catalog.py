@@ -627,3 +627,181 @@ def test_clients_api_endpoints_and_portal_config(isolated_env: dict[str, Any]) -
     r_del_unit = client.delete(f"/api/clients/{unit_id}")
     assert r_del_unit.status_code == 200
     assert client.get(f"/api/clients/{unit_id}").status_code == 404
+
+
+def test_portal_json_camel_case_management_data_schema(isolated_env: dict[str, Any]) -> None:
+    svc: ClientCatalogService = isolated_env["catalog"]
+    pg_svc: PostgresService = isolated_env["postgres"]
+    vault: SecretVaultService = isolated_env["vault"]
+    store: SQLiteStore = isolated_env["store"]
+    client: TestClient = isolated_env["client"]
+
+    payload = {
+        "success": True,
+        "cachedAt": "2026-11-27T12:00:00Z",
+        "ttlSeconds": 300,
+        "estabelecimentos": [{"id": 3, "name": "Hospital"}],
+        "organizations": [{"id": 12, "name": "Rede Exemplo"}],
+        "clientIntegrations": [
+            {
+                "id": 99,
+                "clientId": 42,
+                "integrationId": 7,
+                "integrationName": "LabSync",
+                "typeName": "LIS",
+                "status": "active",
+            }
+        ],
+        "licenses": [{"id": 1, "clientId": 42, "isActive": True}],
+        "clients": [
+            {
+                "id": 42,
+                "idInterno": "042",
+                "name": "(42) HOSPITAL EXEMPLO",
+                "description": "Unidade de referência sintética",
+                "hostingType": "Cloud",
+                "estabelecimentoId": 3,
+                "organizationId": 12,
+                "licenseStatus": "Ativa",
+                "dnsAccess": [
+                    {
+                        "id": 101,
+                        "clientId": 42,
+                        "dnsName": "Ambulatorial",
+                        "link": "https://amb.exemplo.local:8443/",
+                    },
+                    {
+                        "id": 102,
+                        "clientId": 42,
+                        "dnsName": "Hospitalar Homologação",
+                        "link": "https://hosp-hml.exemplo.local:9443/",
+                    },
+                ],
+                "dbAccess": [
+                    {
+                        "id": 201,
+                        "clientId": 42,
+                        "name": "Ambulatorial",
+                        "host": "db-amb.exemplo.local",
+                        "port": 5432,
+                        "databaseName": "salutem_amb_42",
+                        "adminUser": None,
+                    },
+                    {
+                        "id": 202,
+                        "clientId": 42,
+                        "name": "Hospitalar Homologação",
+                        "host": "db-hosp-hml.exemplo.local",
+                        "port": 5433,
+                        "databaseName": None,
+                        "adminUser": None,
+                    },
+                ],
+                "sshAccess": [
+                    {
+                        "id": 301,
+                        "clientId": 42,
+                        "name": "Ambulatorial",
+                        "host": "ssh-amb.exemplo.local:2222",
+                        "username": "ops_amb",
+                        "password": "SyntheticSshSecret!42",
+                    }
+                ],
+                "jasperAccess": [
+                    {
+                        "id": 401,
+                        "clientId": 42,
+                        "host": "jasper.exemplo.local",
+                        "port": 11443,
+                        "url": "",
+                        "monitoringUrl": "https://jasper.exemplo.local:11443/jasperserver/login.html",
+                    }
+                ],
+                "versionUrls": [
+                    {
+                        "id": 501,
+                        "clientId": 42,
+                        "name": "Ambulatorial",
+                        "url": "https://amb.exemplo.local/versao",
+                        "version": "v3.78.0",
+                        "status": "online",
+                    },
+                    {
+                        "id": 502,
+                        "clientId": 42,
+                        "name": "Hospitalar Homologação",
+                        "url": "https://hosp-hml.exemplo.local/versao",
+                        "version": "v4.12.1",
+                        "status": "online",
+                    },
+                ],
+                "integrations": [
+                    {"id": 1, "name": "PACS Exemplo", "type": "PACS", "status": True},
+                    {"id": 2, "name": "Inativa", "type": "Outro", "status": False},
+                ],
+            }
+        ],
+    }
+
+    preview_resp = client.post(
+        "/api/clients/sync/preview",
+        json={"raw_payload": payload, "source_format": "auto"},
+    )
+    assert preview_resp.status_code == 200
+    preview = preview_resp.json()
+    assert preview["ok"] is True
+    assert preview["to_create"] == 1
+    assert preview["items"][0]["systems_count"] == 2
+    assert "SyntheticSshSecret!42" not in preview_resp.text
+
+    apply_resp = client.post(
+        "/api/clients/sync/apply",
+        json={"raw_payload": payload, "source_format": "auto", "import_ssh_passwords": True},
+    )
+    assert apply_resp.status_code == 200
+    applied = apply_resp.json()
+    assert applied["created_units"] == 1
+    assert applied["created_systems"] == 2
+    assert applied["created_profiles"]["postgres"] == 2
+    assert applied["created_profiles"]["sftp"] == 1
+    assert applied["created_profiles"]["jasperserver"] >= 1
+
+    units = svc.list_clients()
+    assert len(units) == 1
+    unit = units[0]
+    assert unit.hosting == "Cloud"
+    assert unit.license_status == "Ativa"
+    assert "Hospital" in unit.tags
+    assert "Rede Exemplo" in unit.tags
+    assert "PACS Exemplo (PACS)" in unit.integrations
+    assert "LabSync (LIS)" in unit.integrations
+    assert all("Inativa" not in i for i in unit.integrations)
+
+    by_type = {(s.system_type, s.environment): s for s in unit.systems}
+    amb = by_type[("ambulatorial", "PRD")]
+    hosp_hml = by_type[("hospitalar", "HML")]
+
+    assert amb.system_url == "https://amb.exemplo.local:8443/"
+    assert amb.version_label == "v3.78.0"
+    assert amb.db_profile_id is not None
+    assert amb.sftp_profile_id is not None
+    assert amb.jasperserver_profile_id is not None
+    assert amb.metadata["pg_host"] == "db-amb.exemplo.local"
+    assert amb.metadata["pg_dbname"] == "salutem_amb_42"
+    assert amb.metadata["sftp_host"] == "ssh-amb.exemplo.local"
+    assert amb.metadata["sftp_port"] == 2222
+    assert amb.metadata["jasper_url"] == "https://jasper.exemplo.local:11443/jasperserver"
+
+    assert hosp_hml.system_url == "https://hosp-hml.exemplo.local:9443/"
+    assert hosp_hml.version_label == "v4.12.1"
+    assert hosp_hml.db_profile_id is not None
+
+    # Verify DB profile inherited databaseName & PRD read_only=True
+    pg_amb = pg_svc.get_profile(amb.db_profile_id)
+    assert pg_amb.dbname == "salutem_amb_42"
+    assert pg_amb.read_only is True
+    assert pg_amb.credential_mode == "default"
+
+    # Verify SSH secret stored in Vault, NEVER in SQLite
+    assert vault.get_secret(f"sftp_password:{amb.sftp_profile_id}") == "SyntheticSshSecret!42"
+    assert b"SyntheticSshSecret!42" not in store.db_path.read_bytes()

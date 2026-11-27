@@ -286,33 +286,104 @@ export function ClientCard({
 
                       {/* Connection profile badges */}
                       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                        <Badge
-                          tone={sys.db_profile_id ? "success" : "neutral"}
-                          className="text-[10px] py-0"
-                        >
-                          <Database className="h-2.5 w-2.5" />
-                          {sys.db_profile_id ? "PG vinculado" : "Sem PG"}
-                        </Badge>
+                        {(() => {
+                          const meta = sys.metadata ?? {};
+                          const pgHost =
+                            typeof meta.pg_host === "string" ? meta.pg_host : "";
+                          const pgPort =
+                            typeof meta.pg_port === "number" ||
+                            typeof meta.pg_port === "string"
+                              ? String(meta.pg_port)
+                              : "";
+                          const pgDb =
+                            typeof meta.pg_dbname === "string"
+                              ? meta.pg_dbname
+                              : "";
+                          const sftpHost =
+                            typeof meta.sftp_host === "string"
+                              ? meta.sftp_host
+                              : "";
+                          const sftpPort =
+                            typeof meta.sftp_port === "number" ||
+                            typeof meta.sftp_port === "string"
+                              ? String(meta.sftp_port)
+                              : "";
+                          const sftpUser =
+                            typeof meta.sftp_user === "string"
+                              ? meta.sftp_user
+                              : "";
+                          const jasperUrl =
+                            typeof meta.jasper_url === "string"
+                              ? meta.jasper_url
+                              : "";
 
-                        <Badge
-                          tone={sys.sftp_profile_id ? "success" : "neutral"}
-                          className="text-[10px] py-0"
-                        >
-                          <Server className="h-2.5 w-2.5" />
-                          {sys.sftp_profile_id ? "SFTP vinculado" : "Sem SFTP"}
-                        </Badge>
+                          const pgSummary = pgHost
+                            ? `${pgHost}${pgPort ? `:${pgPort}` : ""}${pgDb ? `/${pgDb}` : ""}`
+                            : "";
+                          const sftpSummary = sftpHost
+                            ? `${sftpUser ? `${sftpUser}@` : ""}${sftpHost}${sftpPort ? `:${sftpPort}` : ""}`
+                            : "";
 
-                        <Badge
-                          tone={
-                            sys.jasperserver_profile_id ? "success" : "neutral"
-                          }
-                          className="text-[10px] py-0"
-                        >
-                          <FolderDown className="h-2.5 w-2.5" />
-                          {sys.jasperserver_profile_id
-                            ? "Jasper vinculado"
-                            : "Sem Jasper"}
-                        </Badge>
+                          return (
+                            <>
+                              <Badge
+                                tone={sys.db_profile_id ? "success" : "neutral"}
+                                className="text-[10px] py-0"
+                                title={pgSummary || undefined}
+                              >
+                                <Database className="h-2.5 w-2.5" />
+                                {sys.db_profile_id
+                                  ? pgSummary
+                                    ? `PG: ${pgSummary}`
+                                    : "PG vinculado"
+                                  : "Sem PG"}
+                              </Badge>
+
+                              <Badge
+                                tone={
+                                  sys.sftp_profile_id ? "success" : "neutral"
+                                }
+                                className="text-[10px] py-0"
+                                title={sftpSummary || undefined}
+                              >
+                                <Server className="h-2.5 w-2.5" />
+                                {sys.sftp_profile_id
+                                  ? sftpSummary
+                                    ? `SFTP: ${sftpSummary}`
+                                    : "SFTP vinculado"
+                                  : "Sem SFTP"}
+                              </Badge>
+
+                              {sys.jasperserver_profile_id &&
+                              isSafeExternalUrl(jasperUrl) ? (
+                                <a
+                                  href={jasperUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  title={jasperUrl}
+                                  className="inline-flex items-center gap-1 rounded-full border border-success/30 bg-success-soft px-2 py-0 text-[10px] font-medium text-success hover:underline"
+                                >
+                                  <FolderDown className="h-2.5 w-2.5" />
+                                  Jasper: {jasperUrl.replace(/^https?:\/\//i, "")}
+                                </a>
+                              ) : (
+                                <Badge
+                                  tone={
+                                    sys.jasperserver_profile_id
+                                      ? "success"
+                                      : "neutral"
+                                  }
+                                  className="text-[10px] py-0"
+                                >
+                                  <FolderDown className="h-2.5 w-2.5" />
+                                  {sys.jasperserver_profile_id
+                                    ? "Jasper vinculado"
+                                    : "Sem Jasper"}
+                                </Badge>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     </div>
 

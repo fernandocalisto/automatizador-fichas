@@ -907,9 +907,35 @@ class PortalJsonProvider:
         return []
 
     @staticmethod
+    def _normalize_jasper_url(raw_url: str, *, host: str = "", port: int | None = None) -> str:
+        cleaned = _clean_url(raw_url)
+        if cleaned:
+            # Strip trailing login/monitoring endpoints to obtain JasperServer base URL
+            cleaned = re.sub(
+                r"/(?:login\.html|j_spring_security_check|rest_v2(?:/.*)?|flow\.html(?:\?.*)?)$",
+                "",
+                cleaned,
+                flags=re.IGNORECASE,
+            ).rstrip("/")
+            return cleaned
+        host_clean = (host or "").strip()
+        if not host_clean:
+            return ""
+        parsed = _parse_host_port(host_clean, default_port=int(port) if port else 443)
+        if not parsed:
+            return ""
+        eff_host = parsed["host"]
+        eff_port = int(port) if port else int(parsed["port"])
+        scheme = "http" if eff_port in (80, 8080) else "https"
+        if (scheme == "http" and eff_port == 80) or (scheme == "https" and eff_port == 443):
+            return f"{scheme}://{eff_host}/jasperserver"
+        return f"{scheme}://{eff_host}:{eff_port}/jasperserver"
+
+    @staticmethod
     def _extract_dns(raw_obj: dict[str, Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         sources = [
+            raw_obj.get("dnsAccess"),
             raw_obj.get("dns"),
             raw_obj.get("links"),
             raw_obj.get("urls"),
@@ -922,8 +948,23 @@ class PortalJsonProvider:
                     if isinstance(item, str):
                         out.append({"label": "Sistema Web", "url": item})
                     elif isinstance(item, dict):
-                        url = item.get("url") or item.get("link") or item.get("href") or item.get("endereco") or item.get("dns") or ""
-                        label = item.get("label") or item.get("nome") or item.get("name") or item.get("tipo") or item.get("title") or ""
+                        url = (
+                            item.get("link")
+                            or item.get("url")
+                            or item.get("href")
+                            or item.get("endereco")
+                            or item.get("dns")
+                            or ""
+                        )
+                        label = (
+                            item.get("dnsName")
+                            or item.get("label")
+                            or item.get("nome")
+                            or item.get("name")
+                            or item.get("tipo")
+                            or item.get("title")
+                            or ""
+                        )
                         if url or label:
                             out.append({"label": str(label), "url": str(url)})
             elif isinstance(src, dict):
@@ -931,14 +972,30 @@ class PortalJsonProvider:
                     if isinstance(v, str) and v.strip():
                         out.append({"label": str(k), "url": v.strip()})
                     elif isinstance(v, dict):
-                        url = v.get("url") or v.get("link") or v.get("href") or ""
-                        out.append({"label": str(v.get("label") or k), "url": str(url)})
+                        url = v.get("link") or v.get("url") or v.get("href") or ""
+                        out.append(
+                            {
+                                "label": str(v.get("dnsName") or v.get("label") or k),
+                                "url": str(url),
+                            }
+                        )
         return out
+
+    @staticmethod
+    def _safe_int_port(value: Any, default: int) -> int:
+        if value is None or value == "":
+            return default
+        try:
+            port = int(str(value).strip())
+            return port if 1 <= port <= 65535 else default
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _extract_databases(raw_obj: dict[str, Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         sources = [
+            raw_obj.get("dbAccess"),
             raw_obj.get("bancos"),
             raw_obj.get("databases"),
             raw_obj.get("dbs"),
@@ -953,19 +1010,55 @@ class PortalJsonProvider:
                         if parsed:
                             out.append({"label": "PostgreSQL", **parsed})
                     elif isinstance(item, dict):
-                        host_raw = str(item.get("host") or item.get("ip") or item.get("servidor") or item.get("endereco") or item.get("address") or "").strip()
-                        parsed = _parse_host_port(host_raw, default_port=int(item.get("port") or item.get("porta") or 5432)) if host_raw else None
+                        host_raw = str(
+                            item.get("host")
+                            or item.get("ip")
+                            or item.get("servidor")
+                            or item.get("endereco")
+                            or item.get("address")
+                            or ""
+                        ).strip()
+                        explicit_port = PortalJsonProvider._safe_int_port(
+                            item.get("port") or item.get("porta"),
+                            5432,
+                        )
+                        parsed = (
+                            _parse_host_port(host_raw, default_port=explicit_port)
+                            if host_raw
+                            else None
+                        )
                         if parsed:
-                            entry = {
-                                "label": str(item.get("label") or item.get("nome") or item.get("name") or item.get("tipo") or "PostgreSQL").strip(),
+                            entry: dict[str, Any] = {
+                                "label": str(
+                                    item.get("label")
+                                    or item.get("nome")
+                                    or item.get("name")
+                                    or item.get("tipo")
+                                    or "PostgreSQL"
+                                ).strip(),
                                 "host": parsed["host"],
-                                "port": int(item.get("port") or item.get("porta") or parsed["port"]),
+                                "port": PortalJsonProvider._safe_int_port(
+                                    item.get("port") or item.get("porta"),
+                                    int(parsed["port"]),
+                                ),
                             }
-                            dbname = item.get("dbname") or item.get("database") or item.get("banco") or parsed.get("dbname")
-                            user = item.get("user") or item.get("usuario") or item.get("username") or parsed.get("user")
-                            if dbname:
+                            dbname = (
+                                item.get("databaseName")
+                                or item.get("dbname")
+                                or item.get("database")
+                                or item.get("banco")
+                                or parsed.get("dbname")
+                            )
+                            user = (
+                                item.get("adminUser")
+                                or item.get("user")
+                                or item.get("usuario")
+                                or item.get("username")
+                                or parsed.get("user")
+                            )
+                            if dbname and str(dbname).strip():
                                 entry["dbname"] = str(dbname).strip()
-                            if user:
+                            if user and str(user).strip():
                                 entry["user"] = str(user).strip()
                             out.append(entry)
             elif isinstance(src, dict):
@@ -986,6 +1079,7 @@ class PortalJsonProvider:
     def _extract_ssh(raw_obj: dict[str, Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         sources = [
+            raw_obj.get("sshAccess"),
             raw_obj.get("ssh"),
             raw_obj.get("sftp"),
             raw_obj.get("servidores"),
@@ -999,22 +1093,59 @@ class PortalJsonProvider:
                         if parsed:
                             out.append({"label": "SSH", **parsed})
                     elif isinstance(item, dict):
-                        host_raw = str(item.get("host") or item.get("ip") or item.get("servidor") or item.get("endereco") or item.get("address") or "").strip()
-                        parsed = _parse_host_port(host_raw, default_port=int(item.get("port") or item.get("porta") or 22)) if host_raw else None
+                        host_raw = str(
+                            item.get("host")
+                            or item.get("ip")
+                            or item.get("servidor")
+                            or item.get("endereco")
+                            or item.get("address")
+                            or ""
+                        ).strip()
+                        explicit_port = PortalJsonProvider._safe_int_port(
+                            item.get("port") or item.get("porta"),
+                            22,
+                        )
+                        parsed = (
+                            _parse_host_port(host_raw, default_port=explicit_port)
+                            if host_raw
+                            else None
+                        )
                         if parsed:
                             entry: dict[str, Any] = {
-                                "label": str(item.get("label") or item.get("nome") or item.get("name") or item.get("tipo") or "SSH").strip(),
+                                "label": str(
+                                    item.get("label")
+                                    or item.get("nome")
+                                    or item.get("name")
+                                    or item.get("tipo")
+                                    or "SSH"
+                                ).strip(),
                                 "host": parsed["host"],
-                                "port": int(item.get("port") or item.get("porta") or parsed["port"]),
+                                "port": PortalJsonProvider._safe_int_port(
+                                    item.get("port") or item.get("porta"),
+                                    int(parsed["port"]),
+                                ),
                             }
-                            user = item.get("user") or item.get("usuario") or item.get("username") or parsed.get("user")
-                            password = item.get("password") or item.get("senha") or parsed.get("password")
-                            remote_dir = item.get("remote_base_dir") or item.get("diretorio") or item.get("path")
-                            if user:
+                            user = (
+                                item.get("user")
+                                or item.get("usuario")
+                                or item.get("username")
+                                or parsed.get("user")
+                            )
+                            password = (
+                                item.get("password")
+                                or item.get("senha")
+                                or parsed.get("password")
+                            )
+                            remote_dir = (
+                                item.get("remote_base_dir")
+                                or item.get("diretorio")
+                                or item.get("path")
+                            )
+                            if user and str(user).strip():
                                 entry["user"] = str(user).strip()
-                            if password:
+                            if password and str(password):
                                 entry["password"] = str(password)
-                            if remote_dir:
+                            if remote_dir and str(remote_dir).strip():
                                 entry["remote_base_dir"] = str(remote_dir).strip()
                             out.append(entry)
             elif isinstance(src, dict):
@@ -1034,6 +1165,7 @@ class PortalJsonProvider:
     def _extract_jasper(raw_obj: dict[str, Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         sources = [
+            raw_obj.get("jasperAccess"),
             raw_obj.get("jasper"),
             raw_obj.get("jasperserver"),
             raw_obj.get("jasper_urls"),
@@ -1041,52 +1173,107 @@ class PortalJsonProvider:
         ]
         for src in sources:
             if isinstance(src, str) and src.strip():
-                out.append({"label": "JasperServer", "base_url": src.strip()})
+                url = PortalJsonProvider._normalize_jasper_url(src)
+                if url:
+                    out.append({"label": "JasperServer", "base_url": url})
             elif isinstance(src, list):
                 for item in src:
                     if isinstance(item, str) and item.strip():
-                        out.append({"label": "JasperServer", "base_url": item.strip()})
+                        url = PortalJsonProvider._normalize_jasper_url(item)
+                        if url:
+                            out.append({"label": "JasperServer", "base_url": url})
                     elif isinstance(item, dict):
-                        url = item.get("base_url") or item.get("url") or item.get("link") or item.get("href") or ""
+                        raw_url = str(
+                            item.get("base_url")
+                            or item.get("url")
+                            or item.get("monitoringUrl")
+                            or item.get("link")
+                            or item.get("href")
+                            or ""
+                        ).strip()
+                        raw_host = str(item.get("host") or item.get("ip") or "").strip()
+                        raw_port = item.get("port") or item.get("porta")
+                        port_int = (
+                            PortalJsonProvider._safe_int_port(raw_port, 443)
+                            if raw_port is not None and raw_port != ""
+                            else None
+                        )
+                        url = PortalJsonProvider._normalize_jasper_url(
+                            raw_url,
+                            host=raw_host,
+                            port=port_int,
+                        )
                         if url:
                             entry: dict[str, Any] = {
-                                "label": str(item.get("label") or item.get("nome") or item.get("name") or "JasperServer").strip(),
-                                "base_url": str(url).strip(),
+                                "label": str(
+                                    item.get("label")
+                                    or item.get("nome")
+                                    or item.get("name")
+                                    or "JasperServer"
+                                ).strip(),
+                                "base_url": url,
                             }
                             if item.get("organization") or item.get("org"):
-                                entry["organization"] = str(item.get("organization") or item.get("org")).strip()
+                                entry["organization"] = str(
+                                    item.get("organization") or item.get("org")
+                                ).strip()
                             if item.get("user") or item.get("usuario") or item.get("username"):
-                                entry["user"] = str(item.get("user") or item.get("usuario") or item.get("username")).strip()
+                                entry["user"] = str(
+                                    item.get("user")
+                                    or item.get("usuario")
+                                    or item.get("username")
+                                ).strip()
                             out.append(entry)
             elif isinstance(src, dict):
-                if src.get("url") or src.get("base_url"):
+                if src.get("url") or src.get("base_url") or src.get("monitoringUrl") or src.get("host"):
                     out.extend(PortalJsonProvider._extract_jasper({"jasper": [src]}))
                 else:
                     for k, v in src.items():
                         if isinstance(v, str) and v.strip():
-                            out.append({"label": str(k), "base_url": v.strip()})
+                            url = PortalJsonProvider._normalize_jasper_url(v)
+                            if url:
+                                out.append({"label": str(k), "base_url": url})
                         elif isinstance(v, dict):
-                            out.extend(PortalJsonProvider._extract_jasper({"jasper": [{"label": str(k), **v}]}))
+                            out.extend(
+                                PortalJsonProvider._extract_jasper({"jasper": [{"label": str(k), **v}]})
+                            )
         return out
 
     @staticmethod
     def _extract_versions(raw_obj: dict[str, Any]) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
-        src = raw_obj.get("versoes") or raw_obj.get("versions") or raw_obj.get("versoes_sistema")
-        if isinstance(src, dict):
-            for k, v in src.items():
-                if v:
-                    out.append((str(k), str(v).strip()))
-        elif isinstance(src, list):
-            for item in src:
-                if isinstance(item, dict):
-                    lbl = str(item.get("label") or item.get("sistema") or item.get("nome") or item.get("name") or "").strip()
-                    ver = str(item.get("versao") or item.get("version") or item.get("value") or "").strip()
-                    if ver:
-                        out.append((lbl or "Sistema", ver))
-                elif isinstance(item, str) and ":" in item:
-                    lbl, ver = item.split(":", 1)
-                    out.append((lbl.strip(), ver.strip()))
+        sources = [
+            raw_obj.get("versionUrls"),
+            raw_obj.get("versoes"),
+            raw_obj.get("versions"),
+            raw_obj.get("versoes_sistema"),
+        ]
+        for src in sources:
+            if isinstance(src, dict):
+                for k, v in src.items():
+                    if v:
+                        out.append((str(k), str(v).strip()))
+            elif isinstance(src, list):
+                for item in src:
+                    if isinstance(item, dict):
+                        lbl = str(
+                            item.get("label")
+                            or item.get("sistema")
+                            or item.get("nome")
+                            or item.get("name")
+                            or ""
+                        ).strip()
+                        ver = str(
+                            item.get("versao")
+                            or item.get("version")
+                            or item.get("value")
+                            or ""
+                        ).strip()
+                        if ver and ver.upper() != "N/A":
+                            out.append((lbl or "Sistema", ver))
+                    elif isinstance(item, str) and ":" in item:
+                        lbl, ver = item.split(":", 1)
+                        out.append((lbl.strip(), ver.strip()))
         return out
 
     def parse(
@@ -1100,6 +1287,34 @@ class PortalJsonProvider:
                 "No client entries found in portal_json payload."
             )
 
+        # Optional top-level relational lookup tables from `/api/management/data`
+        estab_by_id: dict[str, str] = {}
+        org_by_id: dict[str, str] = {}
+        integs_by_client: dict[str, list[str]] = {}
+        license_by_client: dict[str, str] = {}
+        if isinstance(data, dict):
+            for est in data.get("estabelecimentos") or []:
+                if isinstance(est, dict) and est.get("id") is not None and est.get("name"):
+                    estab_by_id[str(est["id"])] = str(est["name"]).strip()
+            for org in data.get("organizations") or []:
+                if isinstance(org, dict) and org.get("id") is not None and org.get("name"):
+                    org_by_id[str(org["id"])] = str(org["name"]).strip()
+            for ci in data.get("clientIntegrations") or []:
+                if not isinstance(ci, dict) or ci.get("clientId") is None:
+                    continue
+                iname = str(ci.get("integrationName") or ci.get("name") or "").strip()
+                itype = str(ci.get("typeName") or ci.get("type") or "").strip()
+                if not iname:
+                    continue
+                label = f"{iname} ({itype})" if itype else iname
+                integs_by_client.setdefault(str(ci["clientId"]), []).append(label)
+            for lic in data.get("licenses") or []:
+                if not isinstance(lic, dict) or lic.get("clientId") is None:
+                    continue
+                cid = str(lic["clientId"])
+                if cid not in license_by_client:
+                    license_by_client[cid] = "Ativa" if lic.get("isActive") else "Inativa"
+
         units: list[ClientUnitEntry] = []
         for idx, item in enumerate(raw_clients):
             name = str(
@@ -1107,6 +1322,7 @@ class PortalJsonProvider:
                 or item.get("nome")
                 or item.get("title")
                 or item.get("cliente")
+                or item.get("companyName")
                 or item.get("razao_social")
                 or ""
             ).strip()
@@ -1115,7 +1331,11 @@ class PortalJsonProvider:
                 continue
 
             ext_id_val = item.get("external_id") or item.get("id") or item.get("codigo_externo")
-            external_id = str(ext_id_val).strip() if ext_id_val is not None and str(ext_id_val).strip() else None
+            external_id = (
+                str(ext_id_val).strip()
+                if ext_id_val is not None and str(ext_id_val).strip()
+                else None
+            )
             raw_code = item.get("unit_code") or item.get("sigla") or item.get("code") or item.get("codigo")
             unit_code = _clean_unit_code(
                 str(raw_code) if raw_code is not None else None,
@@ -1124,30 +1344,43 @@ class PortalJsonProvider:
             )
 
             hosting = str(
-                item.get("hosting")
+                item.get("hostingType")
+                or item.get("hosting")
                 or item.get("hospedagem")
                 or item.get("infra")
                 or item.get("tipo_hospedagem")
                 or ""
             ).strip()
             license_status = str(
-                item.get("license_status")
+                item.get("licenseStatus")
+                or item.get("license_status")
                 or item.get("licenca")
                 or item.get("status_licenca")
                 or item.get("status")
+                or (license_by_client.get(external_id, "") if external_id else "")
                 or ""
             ).strip()
-            notes = str(item.get("notes") or item.get("observacoes") or "").strip()
+            notes = str(
+                item.get("notes")
+                or item.get("observacoes")
+                or item.get("description")
+                or ""
+            ).strip()
 
             raw_tags = item.get("tags") or item.get("etiquetas") or []
             if isinstance(raw_tags, str):
                 raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
-            tags = _dedupe_strings(
-                [
-                    t.get("name") or t.get("label") or "" if isinstance(t, dict) else str(t)
-                    for t in (raw_tags if isinstance(raw_tags, list) else [])
-                ]
-            )
+            tag_items: list[str] = [
+                t.get("name") or t.get("label") or "" if isinstance(t, dict) else str(t)
+                for t in (raw_tags if isinstance(raw_tags, list) else [])
+            ]
+            est_id = item.get("estabelecimentoId")
+            if est_id is not None and str(est_id) in estab_by_id:
+                tag_items.append(estab_by_id[str(est_id)])
+            org_id = item.get("organizationId")
+            if org_id is not None and str(org_id) in org_by_id:
+                tag_items.append(org_by_id[str(org_id)])
+            tags = _dedupe_strings(tag_items)
 
             access_container: dict[str, Any] = dict(item)
             for nested_key in ("acessos", "acessos_tecnicos", "technical_access", "accesses"):
@@ -1163,12 +1396,20 @@ class PortalJsonProvider:
             )
             if isinstance(raw_integs, str):
                 raw_integs = [x.strip() for x in re.split(r"[,;\n]+", raw_integs) if x.strip()]
-            integrations = _dedupe_strings(
-                [
-                    x.get("name") or x.get("nome") or x.get("label") or "" if isinstance(x, dict) else str(x)
-                    for x in (raw_integs if isinstance(raw_integs, list) else [])
-                ]
-            )
+            integ_list: list[str] = []
+            for x in (raw_integs if isinstance(raw_integs, list) else []):
+                if isinstance(x, dict):
+                    if x.get("status") is False:
+                        continue
+                    iname = str(x.get("name") or x.get("nome") or x.get("label") or "").strip()
+                    itype = str(x.get("type") or x.get("typeName") or "").strip()
+                    if iname:
+                        integ_list.append(f"{iname} ({itype})" if itype else iname)
+                elif str(x).strip():
+                    integ_list.append(str(x).strip())
+            if external_id and external_id in integs_by_client:
+                integ_list.extend(integs_by_client[external_id])
+            integrations = _dedupe_strings(integ_list)
 
             systems = _correlate_systems(
                 dns_items=self._extract_dns(access_container),
@@ -2777,12 +3018,24 @@ class ClientCatalogService:
                 if js_created:
                     created_profiles["jasperserver"] += 1
 
-                # Strip any password from metadata before storing in SQLite
+                # Strip any password from metadata before storing in SQLite and include non-secret display hints
                 safe_meta = {
                     k: v
                     for k, v in (sys_entry.metadata or {}).items()
                     if "password" not in k.lower() and "secret" not in k.lower()
                 }
+                if isinstance(sys_entry.postgres, dict) and sys_entry.postgres.get("host"):
+                    safe_meta["pg_host"] = str(sys_entry.postgres["host"])
+                    safe_meta["pg_port"] = int(sys_entry.postgres.get("port") or 5432)
+                    if sys_entry.postgres.get("dbname"):
+                        safe_meta["pg_dbname"] = str(sys_entry.postgres["dbname"])
+                if isinstance(sys_entry.sftp, dict) and sys_entry.sftp.get("host"):
+                    safe_meta["sftp_host"] = str(sys_entry.sftp["host"])
+                    safe_meta["sftp_port"] = int(sys_entry.sftp.get("port") or 22)
+                    if sys_entry.sftp.get("user"):
+                        safe_meta["sftp_user"] = str(sys_entry.sftp["user"])
+                if isinstance(sys_entry.jasperserver, dict) and sys_entry.jasperserver.get("base_url"):
+                    safe_meta["jasper_url"] = str(sys_entry.jasperserver["base_url"])
                 meta_json = json.dumps(safe_meta, ensure_ascii=False)
 
                 with self.store.connection() as conn:

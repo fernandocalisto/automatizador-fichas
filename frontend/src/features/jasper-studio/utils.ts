@@ -130,6 +130,20 @@ export function triggerTextDownload(
   URL.revokeObjectURL(url);
 }
 
+function generateUuidV4(): string {
+  if (
+    typeof crypto !== "undefined" &&
+    typeof crypto.randomUUID === "function"
+  ) {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0;
+    const v = ch === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 /**
  * Gera um template JRXML mínimo e válido (sem dependência de ficha.json),
  * ideal para relatórios livres (free_report) ou início rápido a partir do zero.
@@ -148,6 +162,9 @@ export function createBlankJrxmlTemplate(
   const pageHeight = isLandscape ? 595 : 842;
   const columnWidth = pageWidth - 40;
   const orientationAttr = isLandscape ? ' orientation="Landscape"' : "";
+  const reportUuid = generateUuidV4();
+  const titleElementUuid = generateUuidV4();
+  const detailElementUuid = generateUuidV4();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports"
@@ -155,13 +172,14 @@ export function createBlankJrxmlTemplate(
   xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports http://jasperreports.sourceforge.net/xsd/jasperreport.xsd"
   name="${safeName}"${orientationAttr}
   pageWidth="${pageWidth}" pageHeight="${pageHeight}" columnWidth="${columnWidth}"
-  leftMargin="20" rightMargin="20" topMargin="20" bottomMargin="20">
-  <queryString><![CDATA[SELECT 1 AS exemplo]]></queryString>
+  leftMargin="20" rightMargin="20" topMargin="20" bottomMargin="20"
+  uuid="${reportUuid}">
+  <queryString language="SQL"><![CDATA[SELECT 1 AS exemplo]]></queryString>
   <field name="exemplo" class="java.lang.Integer"/>
   <title>
     <band height="40">
       <staticText>
-        <reportElement x="0" y="6" width="${columnWidth}" height="24"/>
+        <reportElement x="0" y="6" width="${columnWidth}" height="24" uuid="${titleElementUuid}"/>
         <textElement verticalAlignment="Middle">
           <font fontName="DejaVu Sans" size="14" isBold="true"/>
         </textElement>
@@ -172,7 +190,7 @@ export function createBlankJrxmlTemplate(
   <detail>
     <band height="24">
       <textField isBlankWhenNull="true">
-        <reportElement x="0" y="2" width="${columnWidth}" height="18"/>
+        <reportElement x="0" y="2" width="${columnWidth}" height="18" uuid="${detailElementUuid}"/>
         <textElement verticalAlignment="Middle">
           <font fontName="DejaVu Sans" size="10"/>
         </textElement>

@@ -14,6 +14,7 @@ import type {
 import { JasperStudioView } from "./index";
 import {
   convertNormalizedRectToPdfAndDetail,
+  createBlankJrxmlTemplate,
   detectJrxmlOrientation,
 } from "./utils";
 
@@ -200,6 +201,26 @@ describe("JasperStudio utils", () => {
       width: 200,
       height: 150,
     });
+  });
+
+  it("generates lint-compliant blank JRXML with unique UUIDv4 attributes and SQL queryString", () => {
+    const xml = createBlankJrxmlTemplate("PAISAGEM", "relatorio_produtividade");
+    expect(xml).toContain('orientation="Landscape"');
+    expect(xml).toContain('pageWidth="842" pageHeight="595"');
+    expect(xml).toContain('<queryString language="SQL">');
+
+    const uuidMatches = Array.from(
+      xml.matchAll(/\buuid="([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})"/gi),
+    ).map((m) => m[1]);
+    expect(uuidMatches).toHaveLength(3);
+    expect(new Set(uuidMatches).size).toBe(3);
+
+    expect(xml).toMatch(/<jasperReport[\s\S]*?\buuid="[0-9a-f-]{36}"/);
+    const reportElementTags = xml.match(/<reportElement[^>]*>/g) ?? [];
+    expect(reportElementTags).toHaveLength(2);
+    for (const tag of reportElementTags) {
+      expect(tag).toMatch(/\buuid="[0-9a-f-]{36}"/);
+    }
   });
 });
 

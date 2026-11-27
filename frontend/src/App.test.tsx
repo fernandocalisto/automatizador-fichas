@@ -316,10 +316,29 @@ describe("Studio App shell", () => {
           },
         ]);
       }
+      if (url.includes("/api/sftp/profiles")) {
+        return jsonResponse([
+          {
+            id: "sftp-1",
+            name: "SFTP Unidade Norte",
+            host: "10.2.2.10",
+            port: 22,
+            username: "salutem",
+            auth_type: "private_key",
+            credential_mode: "default",
+            remote_base_dir: "/opt/salutem",
+            environment: "HML",
+            read_only: false,
+            linked_db_profile_id: null,
+            has_secret: true,
+            created_at: "2026-11-27T10:00:00Z",
+            updated_at: "2026-11-27T10:00:00Z",
+          },
+        ]);
+      }
       if (
         url.includes("/api/projects") ||
         url.includes("/api/clients") ||
-        url.includes("/api/sftp/profiles") ||
         url.includes("/api/jasperserver/profiles") ||
         url.includes("/api/subreports") ||
         url.includes("/api/harnesses") ||
@@ -366,6 +385,13 @@ describe("Studio App shell", () => {
       );
       expect(screen.getByText("Hospital Central PRD")).toBeInTheDocument();
       expect(screen.queryByText("Clínica Sul HML")).not.toBeInTheDocument();
+    });
+
+    // Switching to another tab after CommandPalette deep-link must NOT leak the previous search filter
+    await user.click(screen.getByRole("tab", { name: /Servidores SFTP/i }));
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Buscar servidores SFTP/i)).toHaveValue("");
+      expect(screen.getByText("SFTP Unidade Norte")).toBeInTheDocument();
     });
   });
 });

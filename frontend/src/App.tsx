@@ -309,7 +309,10 @@ function StudioAppInner() {
         <SettingsView
           initialTab={settingsTab}
           initialSearch={settingsInitialSearch}
-          onTabChange={(tab) => setSettingsTab(tab)}
+          onTabChange={(tab) => {
+            setSettingsTab(tab);
+            setSettingsInitialSearch(undefined);
+          }}
           onClose={() => {
             setSettingsTab("db_profiles");
             setSettingsInitialSearch(undefined);

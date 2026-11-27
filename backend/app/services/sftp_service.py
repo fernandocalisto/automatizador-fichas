@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS sftp_profiles (
     credential_mode TEXT NOT NULL DEFAULT 'custom'
         CHECK (credential_mode IN ('default', 'custom')),
     remote_base_dir TEXT NOT NULL DEFAULT '/',
+    private_key_filename TEXT NOT NULL DEFAULT '',
+    private_key_path TEXT NOT NULL DEFAULT '',
     environment TEXT NOT NULL DEFAULT 'HML'
         CHECK (environment IN ('DEV', 'HML', 'PRD')),
     read_only INTEGER NOT NULL DEFAULT 1,
@@ -143,6 +145,8 @@ class SftpProfileCreate(BaseModel):
     credential_mode: CredentialMode = "custom"
     password: str | None = Field(default=None, repr=False)
     private_key: str | None = Field(default=None, repr=False)
+    private_key_filename: str = Field(default="", max_length=255)
+    private_key_path: str = Field(default="", max_length=1024)
     passphrase: str | None = Field(default=None, repr=False)
     remote_base_dir: str = Field(default="/", max_length=512)
     environment: EnvironmentKind = "HML"
@@ -161,6 +165,13 @@ class SftpProfileCreate(BaseModel):
     @classmethod
     def _strip_text(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("private_key_filename", "private_key_path", mode="before")
+    @classmethod
+    def _normalize_optional_key_meta(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
 
     @field_validator("linked_db_profile_id")
     @classmethod
@@ -184,6 +195,8 @@ class SftpProfileUpdate(BaseModel):
     credential_mode: CredentialMode | None = None
     password: str | None = Field(default=None, repr=False)
     private_key: str | None = Field(default=None, repr=False)
+    private_key_filename: str | None = Field(default=None, max_length=255)
+    private_key_path: str | None = Field(default=None, max_length=1024)
     passphrase: str | None = Field(default=None, repr=False)
     remote_base_dir: str | None = Field(default=None, max_length=512)
     environment: EnvironmentKind | None = None
@@ -200,7 +213,7 @@ class SftpProfileUpdate(BaseModel):
             raise ValueError("Field cannot be blank.")
         return cleaned
 
-    @field_validator("username", "remote_base_dir")
+    @field_validator("username", "remote_base_dir", "private_key_filename", "private_key_path")
     @classmethod
     def _strip_optional_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -229,6 +242,8 @@ class SftpProfileRead(BaseModel):
     auth_type: SftpAuthType = "password"
     credential_mode: CredentialMode = "custom"
     remote_base_dir: str = "/"
+    private_key_filename: str = ""
+    private_key_path: str = ""
     environment: EnvironmentKind = "HML"
     read_only: bool = True
     linked_db_profile_id: str | None = None
@@ -370,11 +385,52 @@ def sanitize_base_filename(raw_name: str) -> str:
     return cleaned
 
 
+def _resolve_private_key_text(
+    private_key: str | None,
+    private_key_path: str | None = None,
+) -> str:
+    """Resolve SSH private key content from SecretVault first, falling back to a local `.key` file."""
+    if private_key and private_key.strip():
+        return private_key
+
+    raw_path = (private_key_path or "").strip()
+    if raw_path:
+        expanded = Path(raw_path).expanduser()
+        if not expanded.exists():
+            raise SftpConnectionError(
+                f"Arquivo de chave privada SSH não encontrado: '{expanded}'."
+            )
+        if not expanded.is_file():
+            raise SftpConnectionError(
+                f"O caminho informado para a chave privada SSH não é um arquivo: '{expanded}'."
+            )
+        try:
+            content = expanded.read_text(encoding="utf-8")
+        except Exception as exc:
+            raise SftpConnectionError(
+                f"Não foi possível ler o arquivo de chave privada SSH '{expanded}': {exc}"
+            ) from exc
+        if not content.strip():
+            raise SftpConnectionError(
+                f"O arquivo de chave privada SSH '{expanded}' está vazio."
+            )
+        return content
+
+    raise SftpConnectionError("Chave privada SSH não configurada para este perfil.")
+
+
 def _load_paramiko_pkey(pem_text: str, passphrase: str | None = None) -> paramiko.PKey:
-    """Parse an RSA, Ed25519, or ECDSA private key from PEM text."""
+    """Parse an OpenSSH, RSA, Ed25519, or ECDSA private key from PEM/OpenSSH text."""
     if not pem_text or not pem_text.strip():
         raise SftpConnectionError("Chave privada SSH não configurada para este perfil.")
 
+    normalized = (
+        pem_text.lstrip("\ufeff")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .strip()
+        + "\n"
+    )
     pw = passphrase if passphrase else None
     key_classes: tuple[type[paramiko.PKey], ...] = tuple(
         cls
@@ -385,15 +441,24 @@ def _load_paramiko_pkey(pem_text: str, passphrase: str | None = None) -> paramik
         )
         if cls is not None
     )
+    password_required_exc = getattr(
+        getattr(paramiko, "ssh_exception", None),
+        "PasswordRequiredException",
+        None,
+    )
     last_error: Exception | None = None
     for key_cls in key_classes:
         try:
-            return key_cls.from_private_key(io.StringIO(pem_text), password=pw)
+            return key_cls.from_private_key(io.StringIO(normalized), password=pw)
         except Exception as exc:
+            if password_required_exc is not None and isinstance(exc, password_required_exc):
+                raise SftpConnectionError(
+                    "A chave privada SSH está protegida por passphrase. Informe a passphrase na configuração."
+                ) from exc
             last_error = exc
             continue
     raise SftpConnectionError(
-        f"Não foi possível carregar a chave privada SSH (formatos suportados: RSA, Ed25519, ECDSA): {last_error}"
+        f"Não foi possível carregar a chave privada SSH (formatos suportados: OpenSSH, RSA, Ed25519, ECDSA): {last_error}"
     ) from last_error
 
 
@@ -467,6 +532,18 @@ class SftpService:
             return
         with self.store.connection() as conn:
             conn.executescript(SFTP_SCHEMA_SQL)
+            existing_cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(sftp_profiles)").fetchall()
+            }
+            if "private_key_filename" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE sftp_profiles ADD COLUMN private_key_filename TEXT NOT NULL DEFAULT ''"
+                )
+            if "private_key_path" not in existing_cols:
+                conn.execute(
+                    "ALTER TABLE sftp_profiles ADD COLUMN private_key_path TEXT NOT NULL DEFAULT ''"
+                )
         self._initialized_dbs.add(db_target)
 
     # -------------------------------------------------------------------------
@@ -502,6 +579,7 @@ class SftpService:
         *,
         credential_mode: str,
         auth_type: str,
+        private_key_path: str = "",
     ) -> bool:
         try:
             if credential_mode == "default":
@@ -510,7 +588,9 @@ class SftpService:
                     return defaults.has_private_key
                 return defaults.has_password
             if auth_type == "private_key":
-                return self._vault.has_secret(self._key_account(profile_id))
+                return self._vault.has_secret(self._key_account(profile_id)) or bool(
+                    (private_key_path or "").strip()
+                )
             return self._vault.has_secret(self._password_account(profile_id))
         except SecretVaultError as exc:
             raise SftpServiceError(str(exc)) from exc
@@ -525,6 +605,8 @@ class SftpService:
         auth_type: SftpAuthType = "private_key" if row.get("auth_type") == "private_key" else "password"
         env_raw = str(row.get("environment") or "HML")
         env: EnvironmentKind = env_raw if env_raw in ("DEV", "HML", "PRD") else "HML"  # type: ignore[assignment]
+        private_key_filename = str(row.get("private_key_filename") or "").strip()
+        private_key_path = str(row.get("private_key_path") or "").strip()
         return SftpProfileRead(
             id=profile_id,
             name=str(row["name"]),
@@ -534,6 +616,8 @@ class SftpService:
             auth_type=auth_type,
             credential_mode=mode,
             remote_base_dir=normalize_posix_base_dir(str(row.get("remote_base_dir") or "/")),
+            private_key_filename=private_key_filename,
+            private_key_path=private_key_path,
             environment=env,
             read_only=bool(row["read_only"]),
             linked_db_profile_id=row.get("linked_db_profile_id"),
@@ -541,6 +625,7 @@ class SftpService:
                 profile_id,
                 credential_mode=mode,
                 auth_type=auth_type,
+                private_key_path=private_key_path,
             ),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
@@ -604,9 +689,10 @@ class SftpService:
                     """
                     INSERT INTO sftp_profiles (
                         id, name, host, port, username, auth_type, credential_mode,
-                        remote_base_dir, environment, read_only, linked_db_profile_id,
+                        remote_base_dir, private_key_filename, private_key_path,
+                        environment, read_only, linked_db_profile_id,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile_id,
@@ -617,6 +703,8 @@ class SftpService:
                         payload.auth_type,
                         payload.credential_mode,
                         normalized_base,
+                        payload.private_key_filename,
+                        payload.private_key_path,
                         payload.environment,
                         1 if effective_read_only else 0,
                         payload.linked_db_profile_id,
@@ -664,11 +752,23 @@ class SftpService:
                 continue
             if raw_val == "":
                 self._vault.delete_secret(account)
+                if field_name == "private_key" and "private_key_filename" not in fields:
+                    fields["private_key_filename"] = ""
             else:
                 self._store_profile_secret(account, raw_val)
 
         db_updates: dict[str, Any] = {}
-        for col in ("name", "host", "port", "username", "auth_type", "credential_mode", "environment"):
+        for col in (
+            "name",
+            "host",
+            "port",
+            "username",
+            "auth_type",
+            "credential_mode",
+            "private_key_filename",
+            "private_key_path",
+            "environment",
+        ):
             if col in fields and fields[col] is not None:
                 db_updates[col] = fields[col]
         if "remote_base_dir" in fields and fields["remote_base_dir"] is not None:
@@ -718,6 +818,8 @@ class SftpService:
                 custom_user=str(row.get("username") or ""),
                 custom_auth_type=str(row.get("auth_type") or "password"),
                 custom_remote_base_dir=str(row.get("remote_base_dir") or "/"),
+                custom_private_key_filename=str(row.get("private_key_filename") or ""),
+                custom_private_key_path=str(row.get("private_key_path") or ""),
             )
         except SecretVaultError as exc:
             raise SftpServiceError(str(exc)) from exc
@@ -730,6 +832,8 @@ class SftpService:
             "auth_type": str(creds.get("auth_type") or "password"),
             "password": creds.get("password"),
             "private_key": creds.get("private_key"),
+            "private_key_filename": str(creds.get("private_key_filename") or ""),
+            "private_key_path": str(creds.get("private_key_path") or ""),
             "passphrase": creds.get("passphrase"),
             "remote_base_dir": normalize_posix_base_dir(str(creds.get("remote_base_dir") or "/")),
             "timeout": self.timeout_seconds,
@@ -799,8 +903,12 @@ class SftpService:
         }
 
         if conn_params["auth_type"] == "private_key":
+            key_text = _resolve_private_key_text(
+                conn_params.get("private_key"),
+                conn_params.get("private_key_path"),
+            )
             pkey = _load_paramiko_pkey(
-                str(conn_params.get("private_key") or ""),
+                key_text,
                 passphrase=conn_params.get("passphrase"),
             )
             connect_kwargs["pkey"] = pkey

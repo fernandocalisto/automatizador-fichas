@@ -70,9 +70,19 @@ describe("DefaultCredentialsTab", () => {
         ...INITIAL_DEFAULTS[kind],
         username: payload.username ?? INITIAL_DEFAULTS[kind].username,
         auth_type: payload.auth_type ?? INITIAL_DEFAULTS[kind].auth_type,
-        has_password: Boolean(payload.password) || INITIAL_DEFAULTS[kind].has_password,
+        private_key_filename:
+          payload.private_key_filename ??
+          INITIAL_DEFAULTS[kind].private_key_filename ??
+          "",
+        private_key_path:
+          payload.private_key_path ??
+          INITIAL_DEFAULTS[kind].private_key_path ??
+          "",
+        has_password:
+          Boolean(payload.password) || INITIAL_DEFAULTS[kind].has_password,
         has_private_key:
-          Boolean(payload.private_key) || INITIAL_DEFAULTS[kind].has_private_key,
+          Boolean(payload.private_key || payload.private_key_path) ||
+          INITIAL_DEFAULTS[kind].has_private_key,
         configured: true,
       }));
     const deleteSpy = vi
@@ -127,16 +137,32 @@ describe("DefaultCredentialsTab", () => {
       );
     });
 
-    // Switch SFTP auth_type to private_key and save
+    // Switch SFTP auth_type to private_key, pick a .key file + optional local path, and save
     await user.selectOptions(
       screen.getByLabelText(/Tipo de autenticação/i),
       "private_key",
     );
     await user.type(screen.getByLabelText(/Usuário SSH/i), "deploy_demo");
-    await user.type(
-      screen.getByLabelText(/Chave privada SSH/i),
-      "-----BEGIN SYNTHETIC KEY-----",
+
+    const keyFile = new File(
+      ["-----BEGIN SYNTHETIC KEY-----\nTEST\n-----END SYNTHETIC KEY-----"],
+      "acesso_demo.key",
+      { type: "application/octet-stream" },
     );
+    await user.upload(
+      screen.getByLabelText(/Selecionar arquivo \.key ou \.pem/i),
+      keyFile,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/acesso_demo\.key ✓/i)).toBeInTheDocument();
+    });
+
+    await user.type(
+      screen.getByLabelText(/Ou caminho local do arquivo \.key/i),
+      "C:\\chaves\\acesso_demo.key",
+    );
+
     await user.click(
       screen.getByRole("button", { name: /Salvar SFTP padrão/i }),
     );
@@ -146,7 +172,10 @@ describe("DefaultCredentialsTab", () => {
         expect.objectContaining({
           username: "deploy_demo",
           auth_type: "private_key",
-          private_key: "-----BEGIN SYNTHETIC KEY-----",
+          private_key:
+            "-----BEGIN SYNTHETIC KEY-----\nTEST\n-----END SYNTHETIC KEY-----",
+          private_key_filename: "acesso_demo.key",
+          private_key_path: "C:\\chaves\\acesso_demo.key",
         }),
       );
     });

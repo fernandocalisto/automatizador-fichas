@@ -1,9 +1,10 @@
-# Estado Atual do Projeto — Salutem Ficha Studio (`v1.0.0` → Roadmap `v1.1–v1.3`)
+# Estado Atual do Projeto — Salutem Ficha Studio (`v1.0.0` → Plano `v1.1`)
 
-> **Última atualização:** 2026-11-26  
-> **Branch principal:** `main` (`4437952`)  
+> **Última atualização:** 2026-11-27  
+> **Branch principal:** `main` (`c22d778`+)  
 > **Release publicada:** [`v1.0.0`](https://github.com/fernandocalisto/automatizador-fichas/releases/tag/v1.0.0)  
-> **Status geral:** **Em produção local + pós-1.0.0 em `main` (Harnesses/MCP padronizados e auto-refresh sem F5); Roadmap `v1.1` → `v1.3` definido**
+> **Plano detalhado da próxima versão:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md)  
+> **Status geral:** **Em produção local + quick wins de hardening entregues em `main`; Escopo `v1.1` fechado (Report Workbench completo para Ambulatorial & Hospitalar: Relatório Livre + SQL Explorer/MCP + SFTP + JasperServer `Report Unit`)**
 
 ---
 
@@ -133,62 +134,33 @@ agy mcp add salutem_studio .\.venv\Scripts\python.exe -- -m backend.app.mcp_tool
 
 ---
 
-## 5. Decisões Arquiteturais & Escopo Futuro (Roadmap `v1.1` → `v1.3`)
+## 5. Decisões Arquiteturais & Escopo Futuro (`v1.1` — Ver `implementation_plan_v1.1.md`)
 
-Decisões estratégicas alinhadas para evolução do Salutem Ficha Studio:
+Decisões estratégicas atualizadas em **2026-11-27** (detalhamento completo em [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md)):
 
-- **Modelo de Implantação — Híbrido**: manter a experiência local zero-fricção no Windows (`scripts/start_local.ps1`, sem tela de login) e evoluir o modo servidor compartilhado em Docker/Linux na rede interna.
-- **Autenticação & Concorrência no Servidor**:
-  - Login local (usuário/senha + papéis `admin` e `member`) ativado exclusivamente no modo servidor via `STUDIO_AUTH_ENABLED=true`.
-  - Projetos compartilhados entre a equipe com auditoria real de autor (`created_by`, `decided_by`, logs de commit/deploy).
-  - Manter **SQLite (WAL)** como banco interno do Studio (adequado para ~5–30 usuários simultâneos) adicionando **trava otimista de revisão** (`expected_version` → HTTP `409 Conflict`) para evitar sobrescritas concorrentes.
-- **Contas de IA (Harnesses) no Servidor**:
-  - Suportar **conta geral da empresa** (padrão/fallback administrável) **+** **conta pessoal opcional por usuário**.
-  - Isolamento por `HOME` dedicado dentro do volume persistente (`/data/homes/company/` e `/data/homes/users/<user_id>/`) para contas OAuth (`agy`, `claude`, `codex`, `opencode`), com **fluxo guiado na UI** (*Device Code* / colar URL ou código de autorização OAuth) **+** opção de **API Key (BYOK)** no mesmo perfil, protegida no cofre (`FICHA_STUDIO_VAULT_KEY`).
-- **Ciclo Completo de Fichas Existentes (Engenharia Reversa + Deploy)**:
-  - Integrar tanto a estrutura clínica no **PostgreSQL Salutem** quanto os arquivos `.jrxml`/`.jasper` e subreports hospedados nos **servidores SSH/SFTP** e no **JasperReports Server (JasperServer)** — com importação direta para o Studio e deploy controlado por Gate humano + backup automático (`.bak`).
+- **Posicionamento — AI-First Report & Form Workbench**: não tentar clonar os painéis visuais legados do Jaspersoft Studio; maximizar **leveza, velocidade (~150ms), zero fricção e IA integrada com visão + acesso read-only ao schema do banco**.
+- **Foco 100% em utilidade diária (Ambulatorial + Hospitalar)**: eliminar 4 ferramentas pesadas/manuais (~~Jaspersoft Studio~~, ~~DataGrip~~, ~~cadastro manual de templates~~ e ~~Tabby/FileZilla~~), cobrindo fichas ambulatoriais via **SFTP** e relatórios Hospitalares/gerais via **JasperReports Server (`Report Unit`)**.
+- **Contas multiusuário / Login (`STUDIO_AUTH_ENABLED`)**: **adiado por tempo indeterminado** para concentrar todo esforço em produtividade real antes de adicionar gestão de usuários.
+- **Portal interno de gestão de unidades**: preparar interface plugável (`UnitCatalogProvider`) para sincronização futura automática de PostgreSQL, SFTP e JasperServer de todas as unidades assim que o formato de exposição dos dados for levantado.
 
 ---
 
-### Milestone `v1.1` — Confiabilidade IA/MCP, Sessão Contínua & Engenharia Reversa PostgreSQL
-1. **Confiabilidade MCP & JRXML**:
-   - Validar em ambiente real todas as 8 ferramentas MCP sob o namespace `salutem_studio` (em especial `validate_and_compile_jrxml` e `render_preview_images` na fase `jrxml` do AGY) e garantir erro claro/fallback quando algum servidor MCP falhar.
-   - Garantir que o fluxo `PDF → JSON → SQL → JRXML → Preview` conclua sem passos manuais extras em todos os 4 harnesses.
-2. **Continuidade de Sessão dos Agentes**:
-   - Persistir `conversation_id` / `session_id` / `thread_id` por `(project_id, phase, harness)` no SQLite para retomar sessões nativas (`agy --conversation`, `claude --resume`, `codex exec resume`, `opencode`) entre turnos — reduzindo drasticamente latência e consumo de tokens, com botão "Nova sessão" no chat.
-3. **Engenharia Reversa do PostgreSQL Salutem (`entry_mode="db_import"`)**:
-   - Novo fluxo no modal de criação de projeto: selecionar um perfil PostgreSQL, listar/buscar fichas existentes em `template_ficha_clinica` e importar em modo **somente leitura** (`template` + `perguntas` + `respostas`) gerando automaticamente `ficha.json`, `SELECT` Jasper e base pronta para criar/ajustar o `.jrxml` (ou clonar como novo template via `INSERT`).
-   - *(Evolução opcional v1.1.x)*: gerador de SQL de migração/diff (`UPDATE` + `INSERT` de novas perguntas/respostas) com Dry-Run obrigatório para evoluir templates existentes no banco.
+### Milestone `v1.1` — Report Workbench Completo (4 Blocos Incrementais)
+1. **Bloco 1 — Modo Relatório Livre + SQL Workbench & MCP de Schema + Parâmetros Dinâmicos + Sessão Contínua**:
+   - Novo `project_kind="free_report"` pulando Form Builder/`INSERT` ambulatorial; SQL Workbench Read-Only (schemas, tabelas, colunas, PK/FK e `SELECT` seguro com `LIMIT 50`); 3 novas MCP tools (`list_db_tables`, `describe_db_table`, `preview_db_select`); Preview Live (`db_live`) com parâmetros `$P{...}` dinâmicos; continuidade de sessão nos 4 harnesses (`agent_sessions`) e skill `manutencao_relatorio`.
+2. **Bloco 2 — Conector SSH/SFTP (`paramiko`)**:
+   - Substitui Tabby/FileZilla para fichas ambulatoriais: perfis no cofre (`read_only` padrão em PRD), navegador SFTP, importação de `.jrxml` ou decompilação automática de `.jasper` via JVM Daemon, e deploy em 2 etapas (compilação JVM obrigatória + diff + backup remoto `.bak.<timestamp>`).
+3. **Bloco 3 — Conector JasperReports Server (`Report Unit` — REST v2)**:
+   - Portado dos contratos validados em `fernandocalisto/jasper-reports-tools`: perfis no cofre, navegador de pastas/`Report Units`, importação completa (`main_jrxml` + subreports/recursos em `_files/` + input controls) e deploy controlado com diff + backup.
+4. **Bloco 4 — Hardening do Cofre (`cryptography`) & Gancho do Catálogo de Unidades**:
+   - Extração para `secret_vault.py` com **AES-256-GCM** (retrocompatível com `.vault.json` v1) e interface `UnitCatalogProvider` pronta para sincronizar unidades do site interno de gestão.
 
 ---
 
-### Milestone `v1.2` — Modo Servidor Multiusuário, Contas OAuth/BYOK & Docker com CLIs
-1. **Usuários, Login & Auditoria (`STUDIO_AUTH_ENABLED=true`)**:
-   - Tabela `users` (hash Argon2/bcrypt, papéis `admin` e `member`, sessão JWT em cookie HttpOnly) + tela de login e gestão de usuários pelo Admin.
-   - No modo local (`STUDIO_AUTH_ENABLED=false`, padrão em `start_local.ps1`), o acesso continua direto sem login.
-   - Registrar autor real em revisões, aprovações de Gate e execuções de Dry-Run/Commit SQL.
-2. **Trava Otimista de Revisões**:
-   - Incluir `expected_version` nas mutações de artefatos (`json`, `sql_*`, `jrxml`) retornando `409 Conflict` com alerta claro na UI caso outro membro da equipe tenha salvo uma versão mais nova antes.
-3. **Contas de Harness no Servidor (Empresa + Pessoal)**:
-   - Cofre de credenciais por escopo (`company` vs `user_id`) e gestão de diretórios `HOME` isolados (`/data/homes/...`).
-   - Tela em *Configurações → Minha Conta / IA* permitindo escolher *"Conta geral da empresa"* ou *"Minha conta"*, autenticar via fluxo guiado OAuth (*Device Code* / URL de autorização) ou informar API Key (BYOK), com indicador de status por harness.
-   - `Dockerfile` e `docker-compose.yml` atualizados com suporte aos CLIs de IA na imagem runtime e volume persistente para `/data/homes`.
-
----
-
-### Milestone `v1.3` — Integração SSH/SFTP & JasperReports Server
-1. **Perfis de Servidores de Relatórios (Cofre Seguro)**:
-   - CRUD em *Configurações* para perfis **SSH/SFTP** (host, porta, usuário, senha ou chave privada SSH no cofre, diretório remoto base de `.jrxml`/`.jasper` e subreports, flag `read_only` / ambiente `HML`/`PRD`).
-   - CRUD para perfis **JasperReports Server** (URL base, organização, usuário/senha ou token no cofre, caminho base de relatórios no repositório, flag `read_only` / ambiente `HML`/`PRD`).
-2. **Importação Direta de Fichas Existentes**:
-   - Navegador de arquivos SFTP / árvore de recursos JasperServer para importar `.jrxml` (e sincronizar subreports `.jasper`) diretamente para um projeto do Studio — podendo combinar no mesmo projeto a estrutura importada do PostgreSQL (`v1.1`) + o `.jrxml` real puxado do servidor.
-3. **Deploy Controlado com Gate Humano & Backup Automático**:
-   - Fluxo de publicação em 2 etapas (semelhante ao Dry-Run → Commit do PostgreSQL): pré-checagem de compilação JVM + diff com o arquivo remoto + aprovação explícita de Gate + **backup automático (`.bak` com timestamp)** antes de sobrescrever o `.jrxml`/`.jasper` no SFTP ou fazer upload via REST API no JasperServer (bloqueado em perfis `read_only`).
-
----
-
-### Backlog Técnico & Melhorias Contínuas (`v1.x`)
-- **UI de Regras OCR / Regex Customizadas**: expor o motor já pronto em `backend/app/core/custom_regex.py` como nova aba em *Configurações* para cadastro e teste de substituições OCR.
-- **Comparação visual lado a lado**: modo split *PDF Original vs Preview Jasper* no Jasper Studio Light e biblioteca de blocos/templates JRXML reutilizáveis.
-- **Atualização de Actions no CI**: migrar `actions/checkout@v4`, `actions/setup-node@v4`, `actions/setup-java@v4` e `actions/upload-artifact@v4` para versões nativas de Node 24 (`v5`/`v6`).
-- **Migração criptográfica do cofre fallback**: evoluir `_EncryptedVault` para `cryptography` (AES-256-GCM / Fernet) antes do armazenamento de API Keys BYOK e credenciais SFTP/JasperServer (`v1.2`/`v1.3`).
+### Backlog Futuro / Adiado (`v1.x` / Sob Demanda)
+- **Contas multiusuário, Login (`STUDIO_AUTH_ENABLED`) & Trava Otimista (`409`)**: adiado por tempo indeterminado até haver demanda formal de servidor compartilhado.
+- **BYOK simplificado (API Key Claude/OpenAI/Gemini)** na UI de Configurações (sem exigir contas multiusuário).
+- **Engenharia Reversa de `template_ficha_clinica` (PostgreSQL Ambulatorial → `ficha.json`)**.
+- **UI de Regras OCR / Regex Customizadas**: expor `backend/app/core/custom_regex.py` em *Configurações*.
+- **Comparação visual lado a lado**: modo split *PDF Original vs Preview Jasper* e biblioteca de blocos JRXML.
+- **Atualização de Actions no CI**: migrar `actions/*@v4` para versões nativas de Node 24 (`v5`/`v6`).

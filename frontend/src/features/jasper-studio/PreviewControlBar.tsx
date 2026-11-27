@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -37,6 +38,7 @@ export interface PreviewControlBarProps {
   cacheBuster: number;
   onRefreshPreview: () => void;
   onDownloadJrxml: () => void;
+  headerExtraActions?: ReactNode;
 }
 
 export function PreviewControlBar({
@@ -58,9 +60,10 @@ export function PreviewControlBar({
   cacheBuster,
   onRefreshPreview,
   onDownloadJrxml,
+  headerExtraActions,
 }: PreviewControlBarProps) {
   const effectiveProfileId =
-    mode === "db_hybrid" || mode === "auto"
+    mode === "db_hybrid" || mode === "db_live" || mode === "auto"
       ? selectedDbProfileId || null
       : null;
 
@@ -132,8 +135,8 @@ export function PreviewControlBar({
         </Button>
       </div>
 
-      {/* Linha condicional para Banco Híbrido (CTE): perfil PostgreSQL + atendimento_id opcional */}
-      {mode === "db_hybrid" && (
+      {/* Linha condicional para Banco Híbrido (CTE) ou Live (Banco Real) */}
+      {(mode === "db_hybrid" || mode === "db_live") && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-blueprint/25 bg-blueprint-soft/45 px-2.5 py-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-blueprint">
             <Database className="h-3.5 w-3.5" />
@@ -157,15 +160,23 @@ export function PreviewControlBar({
             )}
           </Select>
 
-          <Input
-            type="number"
-            min={1}
-            aria-label="atendimento_id (opcional)"
-            placeholder="atendimento_id (opcional)"
-            value={atendimentoIdInput}
-            onChange={(e) => onChangeAtendimentoIdInput(e.target.value)}
-            className="h-7 w-44 text-xs font-mono tabular-nums"
-          />
+          {mode === "db_hybrid" && (
+            <Input
+              type="number"
+              min={1}
+              aria-label="atendimento_id (opcional)"
+              placeholder="atendimento_id (opcional)"
+              value={atendimentoIdInput}
+              onChange={(e) => onChangeAtendimentoIdInput(e.target.value)}
+              className="h-7 w-44 text-xs font-mono tabular-nums"
+            />
+          )}
+
+          {mode === "db_live" && (
+            <Badge tone="blueprint" className="text-[10px]">
+              Query original · sem CTE mock
+            </Badge>
+          )}
         </div>
       )}
 
@@ -187,15 +198,18 @@ export function PreviewControlBar({
 
               <Badge
                 tone={
-                  previewResult.effective_mode === "db_hybrid"
+                  previewResult.effective_mode === "db_hybrid" ||
+                  previewResult.effective_mode === "db_live"
                     ? "blueprint"
                     : "neutral"
                 }
               >
                 Modo:{" "}
-                {previewResult.effective_mode === "db_hybrid"
-                  ? "Banco Híbrido (CTE)"
-                  : "Offline (Mock)"}
+                {previewResult.effective_mode === "db_live"
+                  ? "Live (Banco Real)"
+                  : previewResult.effective_mode === "db_hybrid"
+                    ? "Banco Híbrido (CTE)"
+                    : "Offline (Mock)"}
               </Badge>
 
               {previewResult.fallback_reason && (
@@ -249,6 +263,8 @@ export function PreviewControlBar({
             <Archive className="h-3.5 w-3.5" />
             Baixar pacote de entrega (.zip)
           </a>
+
+          {headerExtraActions}
         </div>
       </div>
 

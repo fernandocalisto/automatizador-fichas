@@ -10,7 +10,9 @@ import {
   Bot,
   FileCode2,
   FileText,
+  Link2,
   RefreshCw,
+  RotateCcw,
   Send,
   Sparkles,
   Square,
@@ -27,6 +29,7 @@ import {
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type {
+  AgentSessionRead,
   ChatPhase,
   GateApprovalRead,
   HarnessStatus,
@@ -44,6 +47,7 @@ import {
   isToolOutputError,
   normalizePersistedChatMessage,
   phaseToGateName,
+  resetAgentSession,
   streamAgentTurn,
   type AgentStreamEvent,
   type ChatTimelineItem,
@@ -244,6 +248,8 @@ export function AgentChatPanel({
     project.preferred_harness || "agy",
   );
   const [gates, setGates] = useState<GateApprovalRead[]>(project.gates ?? []);
+  const [sessions, setSessions] = useState<AgentSessionRead[]>([]);
+  const [resettingSession, setResettingSession] = useState(false);
   const [pendingVisualFeedbackCount, setPendingVisualFeedbackCount] =
     useState(0);
 
@@ -309,6 +315,9 @@ export function AgentChatPanel({
           if (Array.isArray(st.gates)) {
             setGates(st.gates);
           }
+          if (Array.isArray(st.sessions)) {
+            setSessions(st.sessions);
+          }
           setPendingVisualFeedbackCount(st.pending_visual_feedback_count ?? 0);
           if (st.preferred_harness && !userSelectedHarnessRef.current) {
             setSelectedHarness(st.preferred_harness);
@@ -356,6 +365,13 @@ export function AgentChatPanel({
   );
   const isHarnessReady = Boolean(
     activeHarnessInfo?.installed || activeHarnessInfo?.sdk_available,
+  );
+  const activeSession = useMemo(
+    () =>
+      sessions.find(
+        (s) => s.phase === phase && s.harness_id === selectedHarness,
+      ) ?? null,
+    [sessions, phase, selectedHarness],
   );
 
   // Detecta se há análise pendente de aprovação na fase atual
@@ -564,6 +580,30 @@ export function AgentChatPanel({
                     harness: event.harness || prev.harness,
                     streaming: false,
                   }));
+                  const doneSessionId =
+                    typeof meta.session_id === "string" && meta.session_id.trim()
+                      ? meta.session_id.trim()
+                      : null;
+                  if (doneSessionId) {
+                    const effectiveHarness = event.harness || selectedHarness;
+                    const updatedSession: AgentSessionRead = {
+                      project_id: project.id,
+                      phase,
+                      harness_id: effectiveHarness,
+                      external_session_id: doneSessionId,
+                      updated_at: new Date().toISOString(),
+                    };
+                    setSessions((prev) => [
+                      ...prev.filter(
+                        (s) =>
+                          !(
+                            s.phase === phase &&
+                            s.harness_id === effectiveHarness
+                          ),
+                      ),
+                      updatedSession,
+                    ]);
+                  }
                   const doneSynced = Array.isArray(meta.synced_artifacts)
                     ? meta.synced_artifacts
                     : [];
@@ -706,6 +746,36 @@ export function AgentChatPanel({
     composerRef.current?.focus();
   }, []);
 
+  const handleResetSession = useCallback(async () => {
+    if (resettingSession || streaming) return;
+    setResettingSession(true);
+    try {
+      await resetAgentSession(project.id, {
+        phase,
+        harnessId: selectedHarness,
+      });
+      setSessions((prev) =>
+        prev.filter(
+          (s) => !(s.phase === phase && s.harness_id === selectedHarness),
+        ),
+      );
+      pushToast({
+        tone: "info",
+        title: "Nova sessão iniciada",
+        description:
+          "O próximo envio começará uma conversa limpa neste harness.",
+      });
+    } catch (err) {
+      pushToast({
+        tone: "error",
+        title: "Falha ao reiniciar sessão",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setResettingSession(false);
+    }
+  }, [phase, project.id, pushToast, resettingSession, selectedHarness, streaming]);
+
   const handleQuickPromptClick = (promptText: string) => {
     setDraft(promptText);
     composerRef.current?.focus();
@@ -837,6 +907,35 @@ export function AgentChatPanel({
             {isGateApproved ? "Gate 2 — Autorizado" : "Gate 1 — Aguardando"}
           </Badge>
         </div>
+
+        {/* Indicador de sessão contínua + botão Nova sessão */}
+        {activeSession && (
+          <div
+            data-testid="active-session-bar"
+            className="flex items-center justify-between gap-2 rounded-md border border-border bg-surface-subtle/60 px-2 py-1 text-[11px]"
+          >
+            <div className="flex min-w-0 items-center gap-1.5 text-ink-secondary">
+              <Link2 className="h-3 w-3 shrink-0 text-blueprint" />
+              <span className="truncate font-mono" title={activeSession.external_session_id}>
+                Sessão contínua:{" "}
+                {activeSession.external_session_id.length > 14
+                  ? `${activeSession.external_session_id.slice(0, 14)}…`
+                  : activeSession.external_session_id}
+              </span>
+            </div>
+            <Button
+              size="xs"
+              variant="ghost"
+              loading={resettingSession}
+              disabled={streaming}
+              onClick={() => void handleResetSession()}
+              icon={<RotateCcw className="h-3 w-3" />}
+              className="h-6 px-1.5 text-[11px]"
+            >
+              Nova sessão
+            </Button>
+          </div>
+        )}
       </header>
 
       {/* Timeline de mensagens */}

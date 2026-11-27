@@ -18,6 +18,13 @@ from .artifact_tools import (
     save_validated_json,
     validate_and_compile_jrxml,
 )
+from .db_tools import (
+    DB_TOOL_DEFINITIONS,
+    DB_TOOL_HANDLERS,
+    describe_db_table,
+    list_db_tables,
+    preview_db_select,
+)
 from .pdf_tools import (
     crop_pdf_region_to_png,
     extract_pdf_geometry as _extract_pdf_geometry_raw,
@@ -38,6 +45,10 @@ _SKILL_ALIASES: dict[str, str] = {
     "gerador_jrxml": "gerador_jrxml",
     "jrxml": "gerador_jrxml",
     "gerador-layout-jrxml-salutem-v3": "gerador_jrxml",
+    "manutencao_relatorio": "manutencao_relatorio",
+    "manutencao-relatorio-salutem": "manutencao_relatorio",
+    "free_report": "manutencao_relatorio",
+    "maintenance": "manutencao_relatorio",
 }
 
 
@@ -105,12 +116,12 @@ def crop_pdf_feedback_region(
 def get_salutem_skill(skill_name: str) -> dict[str, Any]:
     """
     Retorna o conteúdo Markdown oficial de uma skill embutida do Salutem Ficha Studio
-    (`extrator_ficha` ou `gerador_jrxml`).
+    (`extrator_ficha`, `gerador_jrxml` ou `manutencao_relatorio`).
     """
     normalized = skill_name.strip().lower()
     canonical = _SKILL_ALIASES.get(normalized)
     if not canonical:
-        valid = ", ".join(sorted({"extrator_ficha", "gerador_jrxml"}))
+        valid = ", ".join(sorted({"extrator_ficha", "gerador_jrxml", "manutencao_relatorio"}))
         raise ValueError(f"Skill desconhecida '{skill_name}'. Valores aceitos: {valid}")
 
     skill_file = SKILLS_DIR / canonical / "SKILL.md"
@@ -242,15 +253,15 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "get_salutem_skill",
         "description": (
             "Carrega as instruções e regras oficiais das skills embutidas do Salutem "
-            "('extrator_ficha' ou 'gerador_jrxml')."
+            "('extrator_ficha', 'gerador_jrxml' ou 'manutencao_relatorio')."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "skill_name": {
                     "type": "string",
-                    "enum": ["extrator_ficha", "gerador_jrxml"],
-                    "description": "Nome da skill desejada ('extrator_ficha' ou 'gerador_jrxml').",
+                    "enum": ["extrator_ficha", "gerador_jrxml", "manutencao_relatorio"],
+                    "description": "Nome da skill desejada ('extrator_ficha', 'gerador_jrxml' ou 'manutencao_relatorio').",
                 }
             },
             "required": ["skill_name"],
@@ -430,6 +441,7 @@ STUDIO_TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "openWorldHint": False,
         },
     },
+    *DB_TOOL_DEFINITIONS,
 ]
 
 STUDIO_TOOL_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
@@ -441,6 +453,7 @@ STUDIO_TOOL_HANDLERS: dict[str, Callable[..., dict[str, Any]]] = {
     "save_validated_json": save_validated_json,
     "validate_and_compile_jrxml": validate_and_compile_jrxml,
     "render_preview_images": render_preview_images,
+    **DB_TOOL_HANDLERS,
 }
 
 

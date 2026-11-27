@@ -5,10 +5,16 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.app.db.sqlite_store import SQLiteStore
+from backend.app.services.pg_schema_inspector import (
+    PgSchemaInspector,
+    SelectPreviewResult,
+    TableSchemaDetail,
+    TableSummary,
+)
 from backend.app.services.postgres_service import (
     CommitInsertResult,
     DbConnectionTestResult,
@@ -71,6 +77,17 @@ class InspectSelectRequest(BaseModel):
     sql: str | None = None
     sample_id: int | None = None
     lookup_sample_id: bool = False
+
+
+class PreviewSelectRequest(BaseModel):
+    """Payload to run a strictly READ ONLY bounded SELECT preview on a PostgreSQL profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sql_select: str | None = None
+    sql: str | None = None
+    params: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=50, ge=1, le=200)
 
 
 # =============================================================================
@@ -222,6 +239,80 @@ def list_profile_databases(
     try:
         databases = service.list_databases(profile_id)
         return {"profile_id": profile_id, "databases": databases}
+    except Exception as exc:
+        _raise_http_for_db_error(exc)
+        raise
+
+
+@router.get("/db/profiles/{profile_id}/schemas")
+def list_profile_schemas(
+    profile_id: str,
+    service: PostgresSvcDep,
+) -> dict[str, Any]:
+    """List user PostgreSQL schemas on the profile in a strictly READ ONLY transaction."""
+    try:
+        inspector = PgSchemaInspector(service)
+        schemas = inspector.list_schemas(profile_id)
+        return {"profile_id": profile_id, "schemas": schemas}
+    except Exception as exc:
+        _raise_http_for_db_error(exc)
+        raise
+
+
+@router.get("/db/profiles/{profile_id}/tables", response_model=list[TableSummary])
+def list_profile_tables(
+    profile_id: str,
+    service: PostgresSvcDep,
+    schema: str = Query(default="public"),
+    search: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[TableSummary]:
+    """List tables and views in a schema with estimated row counts (READ ONLY)."""
+    try:
+        inspector = PgSchemaInspector(service)
+        return inspector.list_tables(
+            profile_id,
+            schema=schema,
+            search=search,
+            limit=limit,
+        )
+    except Exception as exc:
+        _raise_http_for_db_error(exc)
+        raise
+
+
+@router.get("/db/profiles/{profile_id}/tables/{table_name}", response_model=TableSchemaDetail)
+def describe_profile_table(
+    profile_id: str,
+    table_name: str,
+    service: PostgresSvcDep,
+    schema: str = Query(default="public"),
+) -> TableSchemaDetail:
+    """Describe columns, Java classes, PKs, and FKs of a PostgreSQL table/view (READ ONLY)."""
+    try:
+        inspector = PgSchemaInspector(service)
+        return inspector.describe_table(profile_id, schema=schema, table=table_name)
+    except Exception as exc:
+        _raise_http_for_db_error(exc)
+        raise
+
+
+@router.post("/db/profiles/{profile_id}/preview-select", response_model=SelectPreviewResult)
+def preview_profile_select(
+    profile_id: str,
+    payload: PreviewSelectRequest,
+    service: PostgresSvcDep,
+) -> SelectPreviewResult:
+    """Execute a strictly READ ONLY SELECT preview bounded by LIMIT (1..200)."""
+    sql_text = payload.sql_select if payload.sql_select is not None else (payload.sql or "")
+    try:
+        inspector = PgSchemaInspector(service)
+        return inspector.preview_select_query(
+            profile_id,
+            sql_text,
+            params=payload.params,
+            limit=payload.limit,
+        )
     except Exception as exc:
         _raise_http_for_db_error(exc)
         raise

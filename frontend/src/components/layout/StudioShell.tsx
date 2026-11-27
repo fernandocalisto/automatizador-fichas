@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import {
   Bot,
+  Building2,
   Database,
   FileCode2,
   FolderKanban,
@@ -46,6 +47,12 @@ const WORKFLOW_NAV: NavItem[] = [
     id: "projects",
     label: "Projetos",
     icon: <FolderKanban className="h-3.5 w-3.5" />,
+    requiresProject: false,
+  },
+  {
+    id: "clients",
+    label: "Clientes",
+    icon: <Building2 className="h-3.5 w-3.5" />,
     requiresProject: false,
   },
   {
@@ -106,7 +113,7 @@ export function StudioShell({
                 Salutem Ficha Studio
               </div>
               <div className="text-[10px] text-ink-muted tabular-nums">
-                {health?.version ? `v${health.version}` : "v1.0.0"}
+                {health?.version ? `v${health.version}` : "v1.1.0"}
               </div>
             </div>
           </button>
@@ -148,7 +155,15 @@ export function StudioShell({
           aria-label="Etapas do Studio"
           className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
         >
-          {WORKFLOW_NAV.map((item) => {
+          {WORKFLOW_NAV.filter((item) => {
+            if (
+              item.id === "form_builder" &&
+              activeProject?.project_kind === "free_report"
+            ) {
+              return false;
+            }
+            return true;
+          }).map((item) => {
             const disabled = item.requiresProject && !activeProject;
             const active = activeSection === item.id;
             return (

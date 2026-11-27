@@ -37,7 +37,8 @@ def test_etapa1_full_integrated_pipeline(tmp_path: Path, monkeypatch) -> None:
 
         skills_resp = client.get("/api/skills")
         assert skills_resp.status_code == 200
-        assert len(skills_resp.json()) == 2
+        skill_ids = {s["id"] for s in skills_resp.json()}
+        assert {"extrator_ficha", "gerador_jrxml", "manutencao_relatorio"}.issubset(skill_ids)
 
         subreports_resp = client.get("/api/subreports")
         assert subreports_resp.status_code == 200

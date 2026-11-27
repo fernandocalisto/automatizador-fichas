@@ -1,19 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
+import { CloudUpload, UploadCloud } from "lucide-react";
 import { StudioShell } from "@/components/layout/StudioShell";
-import { ToastProvider, useToast } from "@/components/ui";
+import { Button, ToastProvider, useToast } from "@/components/ui";
 import { AgentChatDrawer } from "@/features/agent-chat";
+import { ClientsView } from "@/features/clients";
 import { FormBuilderView } from "@/features/form-builder";
 import { JasperStudioView } from "@/features/jasper-studio";
+import { JasperServerDeployModal } from "@/features/jasperserver";
 import {
+  CreateProjectDialog,
   ProjectOverviewView,
   ProjectsDashboardView,
 } from "@/features/projects";
 import { SettingsView } from "@/features/settings";
+import { SftpDeployModal } from "@/features/sftp";
 import { SqlDbView } from "@/features/sql-db";
 import { useTheme } from "@/hooks/useTheme";
 import { api } from "@/lib/api";
+import type { SettingsTabId } from "@/types/feature-props";
 import type {
   ChatPhase,
+  EntryMode,
   HealthResponse,
   ProjectRead,
   StudioSection,
@@ -21,6 +28,7 @@ import type {
 
 const VALID_SECTIONS = new Set<StudioSection>([
   "projects",
+  "clients",
   "workspace",
   "form_builder",
   "sql_db",
@@ -67,6 +75,9 @@ function writeHashNavigation(
 }
 
 function stageToDefaultSection(project: ProjectRead): StudioSection {
+  if (project.project_kind === "free_report") {
+    return project.current_stage === "sql_db" ? "sql_db" : "jasper_studio";
+  }
   switch (project.current_stage) {
     case "form_builder":
       return "form_builder";
@@ -78,6 +89,16 @@ function stageToDefaultSection(project: ProjectRead): StudioSection {
     default:
       return "workspace";
   }
+}
+
+interface QuickCreateState {
+  open: boolean;
+  initialEntryMode?: EntryMode;
+  initialName?: string;
+  initialDbProfileId?: string | null;
+  initialClientSystemId?: string | null;
+  initialSftpProfileId?: string;
+  initialJasperProfileId?: string;
 }
 
 function StudioAppInner() {
@@ -93,6 +114,14 @@ function StudioAppInner() {
   const [activeSection, setActiveSection] = useState<StudioSection>(
     initialNav.section ?? "projects",
   );
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    SettingsTabId | undefined
+  >(undefined);
+  const [quickCreate, setQuickCreate] = useState<QuickCreateState>({
+    open: false,
+  });
+  const [sftpDeployOpen, setSftpDeployOpen] = useState(false);
+  const [jasperDeployOpen, setJasperDeployOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatPhaseOverride, setChatPhaseOverride] = useState<ChatPhase | null>(
     null,
@@ -157,7 +186,11 @@ function StudioAppInner() {
       const target = projects.find((p) => p.id === projectId);
       if (target) {
         setActiveProjectId(target.id);
-        if (activeSection === "projects" || activeSection === "settings") {
+        if (
+          activeSection === "projects" ||
+          activeSection === "clients" ||
+          activeSection === "settings"
+        ) {
           setActiveSection(stageToDefaultSection(target));
         }
       }
@@ -186,7 +219,51 @@ function StudioAppInner() {
 
   const renderBody = () => {
     if (activeSection === "settings") {
-      return <SettingsView onClose={() => setActiveSection(activeProject ? "workspace" : "projects")} />;
+      return (
+        <SettingsView
+          initialTab={settingsInitialTab}
+          onClose={() => {
+            setSettingsInitialTab(undefined);
+            setActiveSection(activeProject ? "workspace" : "projects");
+          }}
+        />
+      );
+    }
+
+    if (activeSection === "clients") {
+      return (
+        <ClientsView
+          onCreateFreeReport={({ clientSystemId, dbProfileId, defaultName }) => {
+            setQuickCreate({
+              open: true,
+              initialEntryMode: "blank_report",
+              initialName: defaultName,
+              initialDbProfileId: dbProfileId ?? null,
+              initialClientSystemId: clientSystemId,
+            });
+          }}
+          onOpenSftpImport={(sftpProfileId, dbProfileId) => {
+            setQuickCreate({
+              open: true,
+              initialEntryMode: "sftp_import",
+              initialSftpProfileId: sftpProfileId,
+              initialDbProfileId: dbProfileId ?? null,
+            });
+          }}
+          onOpenJasperImport={(jasperProfileId, dbProfileId) => {
+            setQuickCreate({
+              open: true,
+              initialEntryMode: "jasperserver_import",
+              initialJasperProfileId: jasperProfileId,
+              initialDbProfileId: dbProfileId ?? null,
+            });
+          }}
+          onOpenSettings={() => {
+            setSettingsInitialTab("default_credentials");
+            setActiveSection("settings");
+          }}
+        />
+      );
     }
 
     if (activeSection === "projects" || !activeProject) {
@@ -231,16 +308,48 @@ function StudioAppInner() {
         );
       case "jasper_studio":
         return (
-          <JasperStudioView
-            project={activeProject}
-            onProjectUpdated={handleProjectUpdated}
-            onNavigateSection={setActiveSection}
-            artifactSyncTick={artifactSyncTick}
-            onOpenAgentChat={(phase) => {
-              setChatPhaseOverride(phase ?? "jrxml");
-              setChatOpen(true);
-            }}
-          />
+          <>
+            <JasperStudioView
+              project={activeProject}
+              onProjectUpdated={handleProjectUpdated}
+              onNavigateSection={setActiveSection}
+              artifactSyncTick={artifactSyncTick}
+              onOpenAgentChat={(phase) => {
+                setChatPhaseOverride(phase ?? "jrxml");
+                setChatOpen(true);
+              }}
+              headerExtraActions={
+                <>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    icon={<UploadCloud className="h-3.5 w-3.5" />}
+                    onClick={() => setSftpDeployOpen(true)}
+                  >
+                    Publicar SFTP
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    icon={<CloudUpload className="h-3.5 w-3.5" />}
+                    onClick={() => setJasperDeployOpen(true)}
+                  >
+                    Publicar JasperServer
+                  </Button>
+                </>
+              }
+            />
+            <SftpDeployModal
+              open={sftpDeployOpen}
+              onClose={() => setSftpDeployOpen(false)}
+              project={activeProject}
+            />
+            <JasperServerDeployModal
+              open={jasperDeployOpen}
+              onClose={() => setJasperDeployOpen(false)}
+              project={activeProject}
+            />
+          </>
         );
       default:
         return null;
@@ -256,6 +365,9 @@ function StudioAppInner() {
       activeSection={activeSection}
       onNavigate={(section) => {
         setChatPhaseOverride(null);
+        if (section !== "settings") {
+          setSettingsInitialTab(undefined);
+        }
         setActiveSection(section);
       }}
       projects={projects}
@@ -269,6 +381,20 @@ function StudioAppInner() {
       onToggleChat={() => setChatOpen((prev) => !prev)}
     >
       {renderBody()}
+      <CreateProjectDialog
+        open={quickCreate.open}
+        onClose={() => setQuickCreate({ open: false })}
+        onCreated={(created) => {
+          setQuickCreate({ open: false });
+          handleSelectProject(created);
+        }}
+        initialEntryMode={quickCreate.initialEntryMode}
+        initialName={quickCreate.initialName}
+        initialDbProfileId={quickCreate.initialDbProfileId}
+        initialClientSystemId={quickCreate.initialClientSystemId}
+        initialSftpProfileId={quickCreate.initialSftpProfileId}
+        initialJasperProfileId={quickCreate.initialJasperProfileId}
+      />
       {activeProject && (
         <AgentChatDrawer
           open={chatOpen}

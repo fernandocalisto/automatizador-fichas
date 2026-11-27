@@ -24,21 +24,27 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.app.api import (
     agent,
+    clients,
     credentials,
     database,
     harnesses_and_tools,
     jasper_preview,
+    jasperserver,
     projects,
+    sftp,
     subreports,
     system,
 )
 from backend.app.config import APP_NAME, APP_VERSION, FRONTEND_DIST_DIR
 from backend.app.db.sqlite_store import SQLiteStore
 from backend.app.services.agent_orchestrator import AgentOrchestratorService
+from backend.app.services.client_catalog_service import ClientCatalogService
 from backend.app.services.default_credentials_service import DefaultCredentialsService
 from backend.app.services.jasper_daemon import JasperDaemonService
+from backend.app.services.jasperserver_service import JasperServerService
 from backend.app.services.postgres_service import PostgresService
 from backend.app.services.secret_vault import SecretVaultService
+from backend.app.services.sftp_service import SftpService
 from backend.app.services.subreport_service import SubreportService
 from backend.app.services.workspace_service import WorkspaceService
 
@@ -286,6 +292,9 @@ def create_app(
     secret_vault: SecretVaultService | None = None,
     default_credentials_service: DefaultCredentialsService | None = None,
     postgres_service: PostgresService | None = None,
+    sftp_service: SftpService | None = None,
+    jasperserver_service: JasperServerService | None = None,
+    client_catalog_service: ClientCatalogService | None = None,
     jasper_daemon: JasperDaemonService | None = None,
     agent_orchestrator: AgentOrchestratorService | None = None,
     frontend_dist_dir: Path | None = None,
@@ -302,6 +311,22 @@ def create_app(
     resolved_postgres = postgres_service or PostgresService(
         store=resolved_store,
         vault=resolved_vault,
+        default_credentials_service=resolved_default_creds,
+    )
+    resolved_sftp = sftp_service or SftpService(
+        store=resolved_store,
+        vault=resolved_vault,
+        default_credentials_service=resolved_default_creds,
+    )
+    resolved_jasperserver = jasperserver_service or JasperServerService(
+        store=resolved_store,
+        vault=resolved_vault,
+        default_credentials_service=resolved_default_creds,
+    )
+    resolved_client_catalog = client_catalog_service or ClientCatalogService(
+        store=resolved_store,
+        vault=resolved_vault,
+        postgres_service=resolved_postgres,
         default_credentials_service=resolved_default_creds,
     )
     resolved_agent = agent_orchestrator or AgentOrchestratorService(
@@ -325,7 +350,7 @@ def create_app(
     app_instance = FastAPI(
         title=APP_NAME,
         version=APP_VERSION,
-        description="Backend API for Salutem Ficha Studio — Clinical Form Extraction, SQL Generation & JasperReports Designer.",
+        description="Backend API for Salutem Ficha Studio — Clinical Form Extraction, SQL Workbench, Remote SFTP/JasperServer & JasperReports Designer.",
         lifespan=lifespan,
     )
 
@@ -335,6 +360,9 @@ def create_app(
     app_instance.state.workspace_service = resolved_workspace
     app_instance.state.subreport_service = resolved_subreports
     app_instance.state.postgres_service = resolved_postgres
+    app_instance.state.sftp_service = resolved_sftp
+    app_instance.state.jasperserver_service = resolved_jasperserver
+    app_instance.state.client_catalog_service = resolved_client_catalog
     app_instance.state.agent_orchestrator = resolved_agent
     if jasper_daemon is not None:
         app_instance.state.jasper_daemon = jasper_daemon
@@ -353,6 +381,9 @@ def create_app(
     app_instance.include_router(subreports.router)
     app_instance.include_router(system.router)
     app_instance.include_router(credentials.router)
+    app_instance.include_router(clients.router)
+    app_instance.include_router(sftp.router)
+    app_instance.include_router(jasperserver.router)
     app_instance.include_router(harnesses_and_tools.router)
     app_instance.include_router(database.router)
     app_instance.include_router(jasper_preview.router)

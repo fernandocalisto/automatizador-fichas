@@ -1,10 +1,10 @@
-# Estado Atual do Projeto — Salutem Ficha Studio (`v1.0.0` → Plano `v1.1`)
+# Estado Atual do Projeto — Salutem Ficha Studio (`v1.1.0`)
 
 > **Última atualização:** 2026-11-27  
-> **Branch principal:** `main` (`c22d778`+)  
-> **Release publicada:** [`v1.0.0`](https://github.com/fernandocalisto/automatizador-fichas/releases/tag/v1.0.0)  
-> **Plano detalhado da próxima versão:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md)  
-> **Status geral:** **Em produção local + quick wins de hardening entregues em `main`; Escopo `v1.1` fechado (Report Workbench completo para Ambulatorial & Hospitalar: Relatório Livre + SQL Explorer/MCP + SFTP + JasperServer `Report Unit`)**
+> **Branch principal:** `main` (`v1.1.0`)  
+> **Release anterior publicada:** [`v1.0.0`](https://github.com/fernandocalisto/automatizador-fichas/releases/tag/v1.0.0)  
+> **Plano detalhado executado:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md)  
+> **Status geral:** **`v1.1.0` implementada e validada ponta a ponta (Bloco 0 + 4 Frentes Swarm + Integração Final: Relatório Livre, SQL Workbench/MCP Read-Only, SFTP, JasperReports Server REST v2, Aba Clientes Multi-Sistema & Credenciais Padrão/Personalizadas em Cofre AES-256-GCM)**
 
 ---
 

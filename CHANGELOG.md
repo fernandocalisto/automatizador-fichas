@@ -2,6 +2,31 @@
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
+## [1.1.0] - 2026-11-27
+
+### Bloco 0 — Fundação Compartilhada (Cofre v2, Credenciais Padrão & Migração SQLite)
+- **Cofre Unificado (`backend/app/services/secret_vault.py`)**: extração do cofre criptografado para serviço compartilhado usando `cryptography` (**PBKDF2-HMAC-SHA256 600k + AES-256-GCM** com autenticação AAD em formato `version: 2`), mantendo leitura retrocompatível das entradas `v1.0.0` e `keyring` primário no OS.
+- **Credenciais Padrão vs Personalizadas (`default_credentials_service.py` + `/api/credentials/defaults`)**: suporte a credenciais padrão locais (nunca built-in no código) por tipo de conexão (`postgres`, `sftp`, `jasperserver`), incluindo `default_dbname` (geral/ambulatorial/hospitalar), `default_remote_base_dir` e herança via `credential_mode = 'default' | 'custom'`.
+- **Migração SQLite v1.0 → v1.1 (`sqlite_store.py`)**: migração idempotente com preservação de projetos existentes adicionando `project_kind`, `source_origin_json`, `default_db_profile_id`, `client_system_id`, `entry_mode` ampliado (`blank_report`, `sftp_import`, `jasperserver_import`), tabela `agent_sessions` e descoberta de databases (`GET /api/db/profiles/{id}/databases`).
+
+### Bloco 1 — Modo Relatório Livre, SQL Workbench & MCP Read-Only, Parâmetros `$P{}` e Sessão Contínua
+- **SQL Workbench & Schema Explorer Read-Only (`pg_schema_inspector.py` + `SqlDbView`)**: listagem de schemas, tabelas/views, inspeção de colunas/PK/FK/classes Java e preview `SELECT` estritamente `READ ONLY` (`statement_timeout`, `LIMIT 1..200`, bloqueio de DDL/DML e `ROLLBACK` incondicional) + sincronização bidirecional `<queryString>` ↔ `sql_select`.
+- **3 Novas Ferramentas MCP Read-Only (`db_tools.py`)**: `list_db_tables`, `describe_db_table` e `preview_db_select` (teto de 20 linhas), totalizando 11 ferramentas MCP.
+- **Parâmetros Dinâmicos `$P{}` & Preview `db_live` (`jrxml/parameters.py`, `jasper_preview.py`, `ReportParamsBar`)**: detecção automática de parâmetros no `.jrxml`, persistência local por projeto e execução Live direta no Jasper Daemon JVM sem reescrita CTE.
+- **Skill `manutencao_relatorio` & Continuidade de Sessão**: skill dedicada carregada automaticamente em projetos `free_report` e retomada/reset de sessão nos 4 harnesses (`agy`, `claude`, `codex`, `opencode`).
+
+### Bloco 2 — Conector SSH/SFTP (`sftp_service.py` + `api/sftp.py`)
+- Perfis SFTP com `default`/`custom`, senha ou chave PEM (RSA/Ed25519/ECDSA), trava `read_only` padrão em `PRD`, navegador remoto com proteção contra path traversal, importação de `.jrxml` e decompilação automática de `.jasper` via JVM Daemon, e deploy em 2 etapas (padrão `jrxml_only`, opções `both` e `jasper_only`, compilação JVM obrigatória, diff, `deploy_token` de uso único e backup `.bak.<timestamp>` + cópia local).
+
+### Bloco 3 — Conector JasperReports Server (`jasperserver_service.py` + `api/jasperserver.py`)
+- Cliente REST v2 (`POST /rest_v2/login`, `JSESSIONID` + fallback Basic + re-login 401, `username|org`, `serverInfo`, `resources`, inspeção de `Report Unit`), importação com resolução híbrida de subreports (`{uri}_files/*` e compartilhados `repo:/...` compilados localmente) e publicação segura em 2 etapas (update de `main_jrxml` com backup local ou criação de nova `Report Unit` com seleção de DataSource).
+
+### Bloco 4 — Aba de Clientes Multi-Sistema & Sincronização do Portal Logado (`client_catalog_service.py` + `ClientsView`)
+- Nova aba **Clientes** no topo do Studio com modelo 1:N (`client_units` → `client_systems`: Ambulatorial, Hospitalar, Painel, Compras, DEV/HML/PRD), link web clicável (`system_url`), atalhos diretos para criar Relatório Livre ou importar de SFTP/JasperServer e aba **Credenciais Padrão** em Configurações.
+- Sincronização local sob demanda via sessão autenticada do colaborador no navegador (Bookmarklet/Snippet ou upload `.json`/`.html` com preview de diff antes de aplicar), mantendo **zero** URLs internas, clientes ou credenciais no repositório.
+
+---
+
 ## [1.0.0] - 2026-11-25
 
 ### Fase 1 — Fundação Backend, Workspaces SQLite & Núcleo Salutem

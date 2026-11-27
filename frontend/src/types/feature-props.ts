@@ -37,6 +37,16 @@ export interface JasperStudioViewProps {
   artifactSyncTick?: number;
 }
 
+export type SettingsTabId =
+  | "db_profiles"
+  | "default_credentials"
+  | "sftp_profiles"
+  | "jasperserver_profiles"
+  | "subreports"
+  | "harnesses"
+  | "preferences";
+
 export interface SettingsViewProps {
   onClose?: () => void;
+  initialTab?: SettingsTabId;
 }

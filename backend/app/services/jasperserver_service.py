@@ -14,9 +14,11 @@ from __future__ import annotations
 import base64
 import difflib
 import hashlib
+import json
 import posixpath
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import time
@@ -86,8 +88,26 @@ CREATE INDEX IF NOT EXISTS idx_jasperserver_deploy_tokens_lookup
 """
 
 _REPO_URI_RE = re.compile(r"""repo:([^\s"'<>\\]+)""", re.IGNORECASE)
+_XML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _JSESSIONID_RE = re.compile(r"JSESSIONID=([^;,\s]+)", re.IGNORECASE)
 _JAVA_SERIALIZED_MAGIC = b"\xac\xed\x00\x05"
+
+_REPO_COMMON_EXTENSIONS: tuple[str, ...] = (
+    ".jasper",
+    ".jrxml",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".jrtx",
+    ".properties",
+)
+_IMAGE_EXTENSIONS: frozenset[str] = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".svg", ".bmp", ".webp", ".ico"}
+)
+_SUBREPORT_EXTENSIONS: frozenset[str] = frozenset({".jrxml", ".jasper"})
+_STYLE_EXTENSIONS: frozenset[str] = frozenset({".jrtx"})
 
 
 # =============================================================================
@@ -188,32 +208,246 @@ def _map_resource_type(raw_type: str | None, uri: str = "", label: str = "") -> 
     return "other"
 
 
-def _extract_repo_uris_from_jrxml(jrxml_xml: str) -> list[str]:
-    """Extract all `repo:...` subreport URIs from `<subreportExpression>` elements and raw JRXML."""
-    discovered: list[str] = []
-    seen: set[str] = set()
+def _infer_repo_resource_kind(
+    ref: str,
+    tag_hint: str | None = None,
+) -> Literal["subreport", "image", "style", "other"]:
+    """Classify a `repo:` reference into `subreport`, `image`, `style`, or `other`."""
+    if tag_hint == "subreportExpression":
+        return "subreport"
+    if tag_hint == "imageExpression":
+        return "image"
+    if tag_hint == "template":
+        return "style"
 
-    def _add(candidate: str) -> None:
+    cleaned = (ref or "").strip().lower()
+    for ext in _SUBREPORT_EXTENSIONS:
+        if cleaned.endswith(ext):
+            return "subreport"
+    for ext in _IMAGE_EXTENSIONS:
+        if cleaned.endswith(ext):
+            return "image"
+    for ext in _STYLE_EXTENSIONS:
+        if cleaned.endswith(ext):
+            return "style"
+    return "other"
+
+
+def _extract_repo_references_with_kind(
+    jrxml_xml: str,
+) -> list[tuple[str, Literal["subreport", "image", "style", "other"]]]:
+    """
+    Extract all `repo:...` references across `<subreportExpression>`, `<imageExpression>`,
+    `<template>`, and any other JRXML expressions/text, preserving discovery order and
+    prioritizing semantic XML tag classification over generic regex matches.
+    """
+    if not jrxml_xml:
+        return []
+
+    order: list[str] = []
+    kinds: dict[str, Literal["subreport", "image", "style", "other"]] = {}
+
+    def _record(candidate: str, kind: Literal["subreport", "image", "style", "other"]) -> None:
         cleaned = candidate.strip().strip("\"'")
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            discovered.append(cleaned)
+        if not cleaned:
+            return
+        if cleaned not in kinds:
+            order.append(cleaned)
+            kinds[cleaned] = kind
+        elif kinds[cleaned] == "other" and kind != "other":
+            kinds[cleaned] = kind
 
+    priority_tags = ("subreportExpression", "imageExpression", "template")
     try:
         root = ET.fromstring(jrxml_xml)
+        # Pass 1: semantic tags first
         for elem in root.iter():
             tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-            if tag == "subreportExpression" and elem.text:
+            if tag in priority_tags and elem.text:
                 for match in _REPO_URI_RE.finditer(elem.text):
-                    _add(match.group(1))
+                    _record(match.group(1), _infer_repo_resource_kind(match.group(1), tag))
+        # Pass 2: all other XML elements/attributes (e.g. defaultValueExpression, parameter, variable, textFieldExpression)
+        for elem in root.iter():
+            tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+            if elem.text and "repo:" in elem.text.lower():
+                for match in _REPO_URI_RE.finditer(elem.text):
+                    _record(match.group(1), _infer_repo_resource_kind(match.group(1), tag))
+            for attr_val in elem.attrib.values():
+                if attr_val and "repo:" in attr_val.lower():
+                    for match in _REPO_URI_RE.finditer(attr_val):
+                        _record(match.group(1), _infer_repo_resource_kind(match.group(1), tag))
     except ET.ParseError:
         pass
 
-    # Fallback regex pass (covers comments/complex expressions if needed)
-    for match in _REPO_URI_RE.finditer(jrxml_xml):
-        _add(match.group(1))
+    # Fallback regex pass on comment-stripped text (catches malformed XML or complex CDATA expressions)
+    stripped = _XML_COMMENT_RE.sub("", jrxml_xml)
+    for match in _REPO_URI_RE.finditer(stripped):
+        _record(match.group(1), _infer_repo_resource_kind(match.group(1)))
 
-    return discovered
+    return [(ref, kinds[ref]) for ref in order]
+
+
+def _extract_repo_uris_from_jrxml(jrxml_xml: str) -> list[str]:
+    """Extract all `repo:...` resource references across `<subreportExpression>`, `<imageExpression>`, `<template>`, and expressions."""
+    return [ref for ref, _ in _extract_repo_references_with_kind(jrxml_xml)]
+
+
+def _repo_ref_to_rel_segments(ref: str) -> list[str] | None:
+    """Safely normalize a `repo:` reference into relative POSIX path segments, rejecting traversal."""
+    cleaned = (ref or "").strip()
+    if cleaned.lower().startswith("repo:"):
+        cleaned = cleaned[5:].strip()
+    cleaned = cleaned.replace("\\", "/").lstrip("/")
+    if not cleaned:
+        return None
+    segments: list[str] = []
+    for part in cleaned.split("/"):
+        if not part or part == ".":
+            continue
+        if part == ".." or "\x00" in part or ":" in part:
+            return None
+        segments.append(part)
+    return segments or None
+
+
+def _safe_join_under(root: Path, segments: list[str], filename_override: str | None = None) -> Path | None:
+    """Resolve `segments` under `root`, guaranteeing the result stays strictly inside `root`."""
+    if not segments:
+        return None
+    parts = list(segments[:-1]) + [filename_override or segments[-1]]
+    if any(p in ("", ".", "..") or "\x00" in p or ":" in p for p in parts):
+        return None
+    root_resolved = root.resolve()
+    candidate = root_resolved.joinpath(*parts).resolve()
+    try:
+        candidate.relative_to(root_resolved)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _call_daemon_compile(
+    jasper_daemon: Any,
+    jrxml_path: Path,
+    jasper_path: Path,
+    subreport_dir: Path,
+) -> Any:
+    """Invoke `jasper_daemon.compile` tolerating test fakes without `subreport_dir` kwarg."""
+    try:
+        return jasper_daemon.compile(jrxml_path, jasper_path, subreport_dir=subreport_dir)
+    except TypeError:
+        return jasper_daemon.compile(str(jrxml_path), str(jasper_path))
+
+
+def _resolve_local_repo_resource(
+    resources_dir: Path,
+    ref: str,
+    kind: Literal["subreport", "image", "style", "other"],
+) -> dict[str, Any]:
+    """
+    Locate a `repo:` reference inside `resources_dir` using the exact same search order as
+    JVM `RepoSchemeRepositoryService` (`<resources_dir>/repo/<rel>`, `<resources_dir>/<rel>`,
+    and basename fallback `<resources_dir>/<basename>`).
+    """
+    segments = _repo_ref_to_rel_segments(ref)
+    if not segments or not resources_dir.is_dir():
+        return {
+            "resolved": False,
+            "compiled": False,
+            "local_path": None,
+            "file_path": None,
+            "jrxml_path": None,
+            "jasper_path": None,
+        }
+
+    rel_posix = "/".join(segments)
+    basename = segments[-1]
+    lower_rel = rel_posix.lower()
+
+    def _candidate_names(path_str: str) -> list[str]:
+        low = path_str.lower()
+        cands: list[str] = []
+        if kind == "subreport":
+            if low.endswith(".jrxml"):
+                cands.extend([path_str[:-6] + ".jasper", path_str])
+            elif low.endswith(".jasper"):
+                cands.extend([path_str, path_str[:-7] + ".jrxml"])
+            else:
+                cands.extend([path_str + ".jasper", path_str, path_str + ".jrxml"])
+        else:
+            cands.append(path_str)
+            if low.endswith(".jrxml"):
+                cands.append(path_str[:-6] + ".jasper")
+            for ext in _REPO_COMMON_EXTENSIONS:
+                if not low.endswith(ext):
+                    cands.append(path_str + ext)
+        dedup: list[str] = []
+        for c in cands:
+            if c not in dedup:
+                dedup.append(c)
+        return dedup
+
+    root_resolved = resources_dir.resolve()
+    search_targets: list[tuple[Path, str]] = []
+    for cand in _candidate_names(rel_posix):
+        search_targets.append((root_resolved / "repo", cand))
+    for cand in _candidate_names(rel_posix):
+        search_targets.append((root_resolved, cand))
+    for cand in _candidate_names(basename):
+        search_targets.append((root_resolved, cand))
+
+    primary_file: Path | None = None
+    jrxml_file: Path | None = None
+    jasper_file: Path | None = None
+
+    for base_root, rel_cand in search_targets:
+        cand_segments = [p for p in rel_cand.split("/") if p]
+        resolved_cand = _safe_join_under(base_root, cand_segments)
+        if resolved_cand is None or not resolved_cand.is_file():
+            continue
+        if primary_file is None:
+            primary_file = resolved_cand
+        low_name = resolved_cand.name.lower()
+        if low_name.endswith(".jasper") and jasper_file is None:
+            jasper_file = resolved_cand
+        if low_name.endswith(".jrxml") and jrxml_file is None:
+            jrxml_file = resolved_cand
+        if primary_file is not None and (
+            kind != "subreport" or (jasper_file is not None and jrxml_file is not None)
+        ):
+            break
+
+    # If exact file has no extension, inspect magic bytes for .jasper / .jrxml
+    if primary_file is not None and jasper_file is None and jrxml_file is None:
+        try:
+            head = primary_file.read_bytes()[:4096]
+            if head.startswith(_JAVA_SERIALIZED_MAGIC):
+                jasper_file = primary_file
+            elif _looks_like_jrxml_bytes(head):
+                jrxml_file = primary_file
+        except OSError:
+            pass
+
+    if primary_file is None:
+        return {
+            "resolved": False,
+            "compiled": False,
+            "local_path": None,
+            "file_path": None,
+            "jrxml_path": None,
+            "jasper_path": None,
+        }
+
+    chosen = jasper_file if (kind == "subreport" and jasper_file is not None) else primary_file
+    rel_display = chosen.relative_to(root_resolved).as_posix()
+    return {
+        "resolved": True,
+        "compiled": jasper_file is not None,
+        "local_path": rel_display,
+        "file_path": chosen,
+        "jrxml_path": jrxml_file,
+        "jasper_path": jasper_file,
+    }
 
 
 def _looks_like_jrxml_bytes(data: bytes) -> bool:
@@ -221,6 +455,31 @@ def _looks_like_jrxml_bytes(data: bytes) -> bool:
         return False
     head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
     return b"<jasperReport" in head or (head.startswith(b"<?xml") and b"jasperReport" in data[:16384])
+
+
+def _is_report_unit_descriptor(raw_bytes: bytes, ctype: str) -> dict[str, Any] | None:
+    """Detect whether a response body is a JasperServer `reportUnit` descriptor (JSON or XML)."""
+    if not raw_bytes:
+        return None
+    ctype_low = (ctype or "").lower()
+    head = raw_bytes[:512].lstrip(b"\xef\xbb\xbf \t\r\n")
+
+    if "reportunit" in ctype_low or "json" in ctype_low or head.startswith(b"{"):
+        try:
+            parsed = json.loads(raw_bytes.decode("utf-8", errors="replace"))
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict) and not isinstance(parsed.get("content"), str):
+            if "reportunit" in ctype_low or any(
+                k in parsed
+                for k in ("jrxml", "jrxmlFileReference", "jrxmlFile", "alwaysPromptControls", "dataSource")
+            ):
+                return parsed
+
+    if head.startswith(b"<") and b"<reportUnit" in raw_bytes[:4096]:
+        return {}
+
+    return None
 
 
 # =============================================================================
@@ -1321,8 +1580,552 @@ class JasperServerService:
         return jrxml_text, effective_main_uri
 
     # -------------------------------------------------------------------------
-    # Hybrid Subreport Sync & Project Import
+    # Hybrid Subreport & `repo:/...` Resource Mirroring, Cache & Inspection
     # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _get_repo_cache_dir(profile_id: str) -> Path:
+        safe_pid = _sanitize_local_filename(profile_id, fallback="default")
+        return get_data_dir() / "jasperserver_repo_cache" / safe_pid
+
+    def _fetch_remote_repo_resource(
+        self,
+        row: dict[str, Any],
+        candidate_uri: str,
+    ) -> tuple[bytes | None, str, str]:
+        """
+        Fetch a remote `repo:` resource from JasperServer supporting:
+        - Exact URI (XML `.jrxml`, binary `.jasper`, images, `.jrtx`, `.properties`);
+        - `reportUnit` descriptor used as subreport (resolves `{uri}?file=jrxml` / `main_jrxml_uri` / `{uri}_files/main_jrxml`);
+        - Extensionless URI fallbacks (`{uri}.jrxml`, `{uri}.jasper`, `{uri}?file=jrxml`, `{uri}_files/main_jrxml`).
+        """
+        normalized = _normalize_repo_uri(candidate_uri)
+        low = normalized.lower()
+        download_candidates: list[str] = [normalized]
+        if low.endswith(".jasper"):
+            stem_uri = normalized[:-7]
+            download_candidates.extend([f"{stem_uri}.jrxml", stem_uri])
+        elif low.endswith(".jrxml"):
+            stem_uri = normalized[:-6]
+            download_candidates.extend([stem_uri, f"{stem_uri}.jasper"])
+        else:
+            has_known_ext = any(low.endswith(ext) for ext in _REPO_COMMON_EXTENSIONS)
+            if not has_known_ext:
+                download_candidates.extend([f"{normalized}.jrxml", f"{normalized}.jasper"])
+
+        def _resolve_report_unit_jrxml(unit_uri: str, descriptor: dict[str, Any]) -> tuple[bytes | None, str, str]:
+            # 1. Try ?file=jrxml on the reportUnit URI
+            try:
+                primary_bytes, primary_type = self._download_raw_resource(
+                    row, unit_uri, params={"file": "jrxml"}, allow_404=True
+                )
+                if primary_bytes and (
+                    _looks_like_jrxml_bytes(primary_bytes)
+                    or primary_bytes.startswith(_JAVA_SERIALIZED_MAGIC)
+                    or "jrxml" in primary_type.lower()
+                    or "jasper" in primary_type.lower()
+                ):
+                    resolved_type = "jrxml" if _looks_like_jrxml_bytes(primary_bytes) else (primary_type or "jasper")
+                    return primary_bytes, resolved_type, unit_uri
+            except JasperServerHttpError:
+                pass
+
+            # 2. Try parsed main_jrxml_uri and `{unit_uri}_files/main_jrxml`
+            ru_detail = self._parse_report_unit_descriptor(unit_uri, descriptor)
+            fallback_uris: list[str] = []
+            if ru_detail.main_jrxml_uri:
+                fallback_uris.append(_normalize_repo_uri(ru_detail.main_jrxml_uri))
+            default_main = _normalize_repo_uri(f"{unit_uri}_files/main_jrxml")
+            if default_main not in fallback_uris:
+                fallback_uris.append(default_main)
+
+            for main_uri in fallback_uris:
+                try:
+                    fb_bytes, fb_type = self._download_raw_resource(row, main_uri, allow_404=True)
+                except JasperServerHttpError:
+                    continue
+                if fb_bytes is not None and _is_report_unit_descriptor(fb_bytes, fb_type) is None:
+                    resolved_type = "jrxml" if _looks_like_jrxml_bytes(fb_bytes) else (fb_type or "jasper")
+                    return fb_bytes, resolved_type, main_uri
+            return None, "", unit_uri
+
+        for cand in download_candidates:
+            raw_bytes, resolved_type = self._download_raw_resource(row, cand, allow_404=True)
+            if raw_bytes is None:
+                continue
+            ru_desc = _is_report_unit_descriptor(raw_bytes, resolved_type)
+            if ru_desc is not None:
+                ru_bytes, ru_type, ru_uri = _resolve_report_unit_jrxml(cand, ru_desc)
+                if ru_bytes is not None:
+                    return ru_bytes, ru_type, ru_uri
+                continue
+            return raw_bytes, resolved_type, cand
+
+        # Final fallback for extensionless reportUnit where direct GET returned 404
+        if not any(low.endswith(ext) for ext in _REPO_COMMON_EXTENSIONS):
+            ru_bytes, ru_type, ru_uri = _resolve_report_unit_jrxml(normalized, {})
+            if ru_bytes is not None:
+                return ru_bytes, ru_type, ru_uri
+
+        return None, "", normalized
+
+    def _mirror_and_compile_resource(
+        self,
+        *,
+        raw_bytes: bytes,
+        res_type: str,
+        target_uri: str,
+        repo_rel_segments: list[str] | None,
+        cache_dir: Path | None,
+        cache_segments: list[str] | None,
+        resources_dir: Path,
+        name_hint: str,
+        jasper_daemon: Any,
+        compiled_subreports: list[str],
+        warnings: list[str],
+    ) -> tuple[str, str | None]:
+        """
+        Save a downloaded resource mirroring its exact repository tree under:
+        - `resources_dir / "repo" / <rel_path>` (when `repo_rel_segments` is provided)
+        - `cache_dir / <cache_rel_path>` (shared server cache, when `cache_dir` + `cache_segments` are provided)
+        - `resources_dir / <basename>` (flat compatibility copy)
+
+        Auto-compiles `.jrxml` -> `.jasper` in place using `subreport_dir=resources_dir`.
+        Returns `(saved_label, jrxml_text_if_jrxml)`.
+        """
+        is_jrxml = (
+            res_type.lower() == "jrxml"
+            or name_hint.lower().endswith(".jrxml")
+            or target_uri.lower().endswith(".jrxml")
+            or _looks_like_jrxml_bytes(raw_bytes)
+        )
+        is_jasper = (
+            not is_jrxml
+            and (
+                res_type.lower() == "jasper"
+                or name_hint.lower().endswith(".jasper")
+                or target_uri.lower().endswith(".jasper")
+                or raw_bytes.startswith(_JAVA_SERIALIZED_MAGIC)
+            )
+        )
+
+        safe_basename = _sanitize_local_filename(name_hint, fallback="resource")
+        repo_root = resources_dir / "repo"
+
+        def _adjust_filename(orig_name: str, desired_ext: str) -> str:
+            low = orig_name.lower()
+            if low.endswith(desired_ext):
+                return orig_name
+            if desired_ext == ".jrxml" and low.endswith(".jasper"):
+                return orig_name[:-7] + ".jrxml"
+            if desired_ext == ".jasper" and low.endswith(".jrxml"):
+                return orig_name[:-6] + ".jasper"
+            return orig_name + desired_ext
+
+        if is_jrxml:
+            jrxml_text = raw_bytes.decode("utf-8-sig", errors="replace")
+            flat_jrxml_name = _adjust_filename(safe_basename, ".jrxml")
+            flat_jrxml_path = resources_dir / flat_jrxml_name
+            flat_jasper_path = resources_dir / f"{Path(flat_jrxml_name).stem}.jasper"
+
+            primary_jrxml_path = flat_jrxml_path
+            primary_jasper_path = flat_jasper_path
+            saved_label = flat_jrxml_name
+
+            if repo_rel_segments:
+                tree_filename = _adjust_filename(repo_rel_segments[-1], ".jrxml")
+                tree_jrxml_path = _safe_join_under(repo_root, repo_rel_segments, tree_filename)
+                if tree_jrxml_path is not None:
+                    tree_jrxml_path.parent.mkdir(parents=True, exist_ok=True)
+                    tree_jrxml_path.write_text(jrxml_text, encoding="utf-8")
+                    primary_jrxml_path = tree_jrxml_path
+                    primary_jasper_path = tree_jrxml_path.with_suffix(".jasper")
+                    saved_label = "/".join(repo_rel_segments[:-1] + [tree_filename])
+
+            # Flat compatibility copy
+            if primary_jrxml_path.resolve() != flat_jrxml_path.resolve():
+                flat_jrxml_path.parent.mkdir(parents=True, exist_ok=True)
+                flat_jrxml_path.write_text(jrxml_text, encoding="utf-8")
+            elif not flat_jrxml_path.is_file():
+                flat_jrxml_path.write_text(jrxml_text, encoding="utf-8")
+
+            # Shared cache mirror for .jrxml
+            cache_jasper_path: Path | None = None
+            if cache_dir is not None and cache_segments:
+                cache_filename = _adjust_filename(cache_segments[-1], ".jrxml")
+                cache_jrxml_path = _safe_join_under(cache_dir, cache_segments, cache_filename)
+                if cache_jrxml_path is not None:
+                    cache_jrxml_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_jrxml_path.write_text(jrxml_text, encoding="utf-8")
+                    cache_jasper_path = cache_jrxml_path.with_suffix(".jasper")
+
+            # Compile once in place with subreport_dir=resources_dir, then mirror compiled .jasper
+            try:
+                _call_daemon_compile(
+                    jasper_daemon,
+                    primary_jrxml_path,
+                    primary_jasper_path,
+                    resources_dir,
+                )
+                compiled_subreports.append(primary_jasper_path.name)
+                if primary_jasper_path.is_file():
+                    if primary_jasper_path.resolve() != flat_jasper_path.resolve():
+                        shutil.copy2(primary_jasper_path, flat_jasper_path)
+                    if cache_jasper_path is not None:
+                        cache_jasper_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(primary_jasper_path, cache_jasper_path)
+            except Exception as exc:
+                warnings.append(f"Falha ao compilar subreport '{saved_label}': {exc}")
+
+            return saved_label, jrxml_text
+
+        if is_jasper:
+            flat_jasper_name = _adjust_filename(safe_basename, ".jasper")
+            flat_jasper_path = resources_dir / flat_jasper_name
+            flat_jasper_path.write_bytes(raw_bytes)
+            saved_label = flat_jasper_name
+
+            if repo_rel_segments:
+                tree_filename = _adjust_filename(repo_rel_segments[-1], ".jasper")
+                tree_path = _safe_join_under(repo_root, repo_rel_segments, tree_filename)
+                if tree_path is not None:
+                    tree_path.parent.mkdir(parents=True, exist_ok=True)
+                    tree_path.write_bytes(raw_bytes)
+                    saved_label = "/".join(repo_rel_segments[:-1] + [tree_filename])
+
+            if cache_dir is not None and cache_segments:
+                cache_filename = _adjust_filename(cache_segments[-1], ".jasper")
+                cache_path = _safe_join_under(cache_dir, cache_segments, cache_filename)
+                if cache_path is not None:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_bytes(raw_bytes)
+
+            return saved_label, None
+
+        # Non-report resource (images, styles .jrtx, properties, etc.)
+        flat_path = resources_dir / safe_basename
+        flat_path.write_bytes(raw_bytes)
+        saved_label = safe_basename
+
+        if repo_rel_segments:
+            tree_path = _safe_join_under(repo_root, repo_rel_segments)
+            if tree_path is not None:
+                tree_path.parent.mkdir(parents=True, exist_ok=True)
+                tree_path.write_bytes(raw_bytes)
+                saved_label = "/".join(repo_rel_segments)
+
+        if cache_dir is not None and cache_segments:
+            cache_path = _safe_join_under(cache_dir, cache_segments)
+            if cache_path is not None:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(raw_bytes)
+
+        return saved_label, None
+
+    def _hydrate_from_repo_cache(
+        self,
+        *,
+        cache_dir: Path,
+        cache_segments: list[str],
+        repo_rel_segments: list[str],
+        resources_dir: Path,
+        kind: Literal["subreport", "image", "style", "other"],
+        jasper_daemon: Any,
+        compiled_subreports: list[str],
+        warnings: list[str],
+    ) -> tuple[bool, str | None, str | None]:
+        """
+        Try to satisfy a `repo:` reference from the shared per-profile cache
+        (`get_data_dir() / "jasperserver_repo_cache" / <profile_id>`).
+        Returns `(hit, saved_label, jrxml_text_if_any)`.
+        """
+        if not cache_dir.is_dir():
+            return False, None, None
+
+        cache_ref = "/" + "/".join(cache_segments)
+        found = _resolve_local_repo_resource(cache_dir, cache_ref, kind)
+        if not found["resolved"]:
+            return False, None, None
+
+        repo_root = resources_dir / "repo"
+        jrxml_text: str | None = None
+        saved_label: str | None = None
+
+        cached_jrxml: Path | None = found["jrxml_path"]
+        cached_jasper: Path | None = found["jasper_path"]
+        cached_file: Path | None = found["file_path"]
+
+        if cached_jrxml is not None and cached_jrxml.is_file():
+            jrxml_text = cached_jrxml.read_text(encoding="utf-8", errors="replace")
+            tree_jrxml_name = cached_jrxml.name
+            tree_jrxml = _safe_join_under(repo_root, repo_rel_segments, tree_jrxml_name)
+            flat_jrxml = resources_dir / _sanitize_local_filename(tree_jrxml_name, fallback="subreport.jrxml")
+            if tree_jrxml is not None:
+                tree_jrxml.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cached_jrxml, tree_jrxml)
+                saved_label = "/".join(repo_rel_segments[:-1] + [tree_jrxml_name])
+            shutil.copy2(cached_jrxml, flat_jrxml)
+
+            target_jasper = tree_jrxml.with_suffix(".jasper") if tree_jrxml is not None else flat_jrxml.with_suffix(".jasper")
+            flat_jasper = resources_dir / f"{flat_jrxml.stem}.jasper"
+
+            if cached_jasper is not None and cached_jasper.is_file():
+                target_jasper.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cached_jasper, target_jasper)
+                if target_jasper.resolve() != flat_jasper.resolve():
+                    shutil.copy2(cached_jasper, flat_jasper)
+            else:
+                src_to_compile = tree_jrxml if tree_jrxml is not None else flat_jrxml
+                try:
+                    _call_daemon_compile(jasper_daemon, src_to_compile, target_jasper, resources_dir)
+                    compiled_subreports.append(target_jasper.name)
+                    if target_jasper.is_file():
+                        if target_jasper.resolve() != flat_jasper.resolve():
+                            shutil.copy2(target_jasper, flat_jasper)
+                        cache_jasper_dst = cached_jrxml.with_suffix(".jasper")
+                        shutil.copy2(target_jasper, cache_jasper_dst)
+                except Exception as exc:
+                    warnings.append(f"Falha ao compilar subreport em cache '{saved_label or flat_jrxml.name}': {exc}")
+            return True, saved_label or flat_jrxml.name, jrxml_text
+
+        if cached_file is not None and cached_file.is_file():
+            tree_name = cached_file.name
+            tree_dst = _safe_join_under(repo_root, repo_rel_segments, tree_name)
+            if tree_dst is not None:
+                tree_dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cached_file, tree_dst)
+                saved_label = "/".join(repo_rel_segments[:-1] + [tree_name])
+            flat_dst = resources_dir / _sanitize_local_filename(tree_name, fallback="resource.bin")
+            shutil.copy2(cached_file, flat_dst)
+            return True, saved_label or flat_dst.name, None
+
+        return False, None, None
+
+    @staticmethod
+    def inspect_project_repo_resources(
+        jrxml_text: str,
+        resources_dir: Path | str,
+        *,
+        can_sync_remote: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Inspect all `repo:...` references (recursively across main JRXML and any locally
+        available `.jrxml` subreports) and report resolution & compilation status matching
+        `RepoResourcesStatus`.
+        """
+        res_dir = Path(resources_dir)
+        pending: list[tuple[str, Literal["subreport", "image", "style", "other"]]] = (
+            _extract_repo_references_with_kind(jrxml_text)
+        )
+        seen_refs: dict[str, Literal["subreport", "image", "style", "other"]] = {
+            ref: kind for ref, kind in pending
+        }
+        scanned_jrxml_paths: set[Path] = set()
+
+        items: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        idx = 0
+        while idx < len(pending):
+            ref, kind = pending[idx]
+            idx += 1
+            effective_kind = seen_refs.get(ref, kind)
+
+            lookup = _resolve_local_repo_resource(res_dir, ref, effective_kind)
+            uri_label = ref if ref.lower().startswith("repo:") else f"repo:{ref}"
+
+            items.append(
+                {
+                    "uri": uri_label,
+                    "local_path": lookup["local_path"],
+                    "resolved": bool(lookup["resolved"]),
+                    "compiled": bool(lookup["compiled"]),
+                    "kind": effective_kind,
+                }
+            )
+
+            if not lookup["resolved"]:
+                warnings.append(f"Recurso '{uri_label}' não encontrado localmente em report_unit_resources.")
+            elif effective_kind == "subreport" and not lookup["compiled"]:
+                warnings.append(
+                    f"Subreport '{uri_label}' encontrado em JRXML mas ainda sem versão compilada (.jasper)."
+                )
+
+            # Recursively inspect nested `repo:...` references inside resolved `.jrxml` subreports
+            local_jrxml: Path | None = lookup["jrxml_path"]
+            if local_jrxml is not None and local_jrxml.is_file():
+                norm_jrxml = local_jrxml.resolve()
+                if norm_jrxml not in scanned_jrxml_paths:
+                    scanned_jrxml_paths.add(norm_jrxml)
+                    try:
+                        nested_xml = norm_jrxml.read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        nested_xml = ""
+                    for nested_ref, nested_kind in _extract_repo_references_with_kind(nested_xml):
+                        if nested_ref not in seen_refs:
+                            seen_refs[nested_ref] = nested_kind
+                            pending.append((nested_ref, nested_kind))
+                        elif seen_refs[nested_ref] == "other" and nested_kind != "other":
+                            seen_refs[nested_ref] = nested_kind
+
+        resolved_count = sum(1 for item in items if item["resolved"])
+        missing_count = len(items) - resolved_count
+        return {
+            "total": len(items),
+            "resolved_count": resolved_count,
+            "missing_count": missing_count,
+            "can_sync_remote": bool(can_sync_remote),
+            "items": items,
+            "warnings": warnings,
+        }
+
+    def sync_missing_repo_resources(
+        self,
+        profile_id: str,
+        jrxml_text: str,
+        resources_dir: Path | str,
+        jasper_daemon: Any,
+        *,
+        resource_uri: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Sync any missing (or uncompiled) `repo:...` resources referenced by `jrxml_text`
+        (recursively across nested `.jrxml` subreports) from shared server cache or remote
+        JasperReports Server, mirroring into `resources_dir/repo/...` + flat basename copy
+        and auto-compiling `.jrxml` -> `.jasper`.
+        """
+        row = self._require_profile_row(profile_id)
+        res_dir = Path(resources_dir)
+        res_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = self._get_repo_cache_dir(profile_id)
+
+        synced_uris: list[str] = []
+        compiled_files: list[str] = []
+        sync_warnings: list[str] = []
+
+        pending: list[tuple[str, Literal["subreport", "image", "style", "other"]]] = (
+            _extract_repo_references_with_kind(jrxml_text)
+        )
+        seen_refs: dict[str, Literal["subreport", "image", "style", "other"]] = {
+            ref: kind for ref, kind in pending
+        }
+        processed_refs: set[str] = set()
+
+        def _enqueue_nested(nested_xml: str) -> None:
+            for nested_ref, nested_kind in _extract_repo_references_with_kind(nested_xml):
+                if nested_ref not in seen_refs:
+                    seen_refs[nested_ref] = nested_kind
+                    pending.append((nested_ref, nested_kind))
+                elif seen_refs[nested_ref] == "other" and nested_kind != "other":
+                    seen_refs[nested_ref] = nested_kind
+
+        idx = 0
+        while idx < len(pending):
+            ref, kind = pending[idx]
+            idx += 1
+            if ref in processed_refs:
+                continue
+            processed_refs.add(ref)
+            effective_kind = seen_refs.get(ref, kind)
+
+            rel_segments = _repo_ref_to_rel_segments(ref)
+            if not rel_segments:
+                sync_warnings.append(f"URI repo inválida ignorada: 'repo:{ref}'.")
+                continue
+
+            # 1. Already present locally? Ensure compiled if JRXML and scan nested refs.
+            local_check = _resolve_local_repo_resource(res_dir, ref, effective_kind)
+            if local_check["resolved"]:
+                local_jrxml: Path | None = local_check["jrxml_path"]
+                if local_jrxml is not None and local_jrxml.is_file():
+                    try:
+                        _enqueue_nested(local_jrxml.read_text(encoding="utf-8", errors="replace"))
+                    except OSError:
+                        pass
+                    if not local_check["compiled"]:
+                        target_jasper = local_jrxml.with_suffix(".jasper")
+                        try:
+                            _call_daemon_compile(jasper_daemon, local_jrxml, target_jasper, res_dir)
+                            compiled_files.append(target_jasper.name)
+                            flat_jasper = res_dir / target_jasper.name
+                            if target_jasper.is_file() and target_jasper.resolve() != flat_jasper.resolve():
+                                shutil.copy2(target_jasper, flat_jasper)
+                        except Exception as exc:
+                            sync_warnings.append(f"Falha ao compilar subreport local 'repo:{ref}': {exc}")
+                continue
+
+            # Determine remote absolute candidate URI and cache segments
+            is_absolute = ref.startswith("/")
+            if is_absolute:
+                candidate_uri = _normalize_repo_uri(ref)
+                cache_segments = list(rel_segments)
+            elif resource_uri:
+                candidate_uri = _normalize_repo_uri(f"{_normalize_repo_uri(resource_uri)}_files/{ref}")
+                cache_segments = _repo_ref_to_rel_segments(candidate_uri) or list(rel_segments)
+            else:
+                candidate_uri = _normalize_repo_uri(ref)
+                cache_segments = list(rel_segments)
+
+            # 2. Check shared server cache first (reusing headers/logos across reports)
+            if is_absolute:
+                hit, _saved_label, cached_xml = self._hydrate_from_repo_cache(
+                    cache_dir=cache_dir,
+                    cache_segments=cache_segments,
+                    repo_rel_segments=rel_segments,
+                    resources_dir=res_dir,
+                    kind=effective_kind,
+                    jasper_daemon=jasper_daemon,
+                    compiled_subreports=compiled_files,
+                    warnings=sync_warnings,
+                )
+                if hit:
+                    synced_uris.append(f"repo:{ref}")
+                    if cached_xml:
+                        _enqueue_nested(cached_xml)
+                    continue
+
+            # 3. Fetch from remote JasperReports Server
+            try:
+                raw_bytes, resolved_type, resolved_uri = self._fetch_remote_repo_resource(
+                    row, candidate_uri
+                )
+            except JasperServerHttpError as exc:
+                sync_warnings.append(f"Erro ao baixar recurso 'repo:{ref}': {exc}")
+                continue
+
+            if raw_bytes is None:
+                sync_warnings.append(f"Recurso referenciado via repo não encontrado no servidor: 'repo:{ref}'.")
+                continue
+
+            _saved_label, downloaded_xml = self._mirror_and_compile_resource(
+                raw_bytes=raw_bytes,
+                res_type=resolved_type,
+                target_uri=resolved_uri,
+                repo_rel_segments=rel_segments,
+                cache_dir=cache_dir if is_absolute else None,
+                cache_segments=cache_segments if is_absolute else None,
+                resources_dir=res_dir,
+                name_hint=posixpath.basename(ref) or posixpath.basename(resolved_uri),
+                jasper_daemon=jasper_daemon,
+                compiled_subreports=compiled_files,
+                warnings=sync_warnings,
+            )
+            synced_uris.append(f"repo:{ref}")
+            if downloaded_xml:
+                _enqueue_nested(downloaded_xml)
+
+        status = self.inspect_project_repo_resources(
+            jrxml_text,
+            res_dir,
+            can_sync_remote=True,
+        )
+        merged_warnings = list(dict.fromkeys(list(status["warnings"]) + sync_warnings))
+        return {
+            **status,
+            "warnings": merged_warnings,
+            "synced": synced_uris,
+            "compiled": compiled_files,
+        }
 
     def _sync_report_unit_subreports(
         self,
@@ -1336,75 +2139,36 @@ class JasperServerService:
         jasper_daemon: Any,
     ) -> dict[str, Any]:
         """
-        Download and compile BOTH subreport patterns into `workspaces/<proj>/report_unit_resources/`:
+        Download and compile BOTH subreport/resource patterns into `workspaces/<proj>/report_unit_resources/`:
         1. Embedded resources attached to the Report Unit (`{uri}_files/*`).
-        2. Shared repository subreports referenced via `repo:/...` in `<subreportExpression>`.
+        2. Shared repository resources referenced via `repo:/...` across `<subreportExpression>`,
+           `<imageExpression>`, `<template>`, and expressions recursively, mirrored into
+           `report_unit_resources/repo/<rel_path>` + shared per-profile cache + flat basename copy.
         """
         resources_dir.mkdir(parents=True, exist_ok=True)
+        profile_id = str(row["id"])
+        cache_dir = self._get_repo_cache_dir(profile_id)
+
         synced_embedded: list[str] = []
         synced_repo: list[str] = []
         compiled_subreports: list[str] = []
         warnings: list[str] = []
 
         visited_uris: set[str] = {_normalize_repo_uri(main_jrxml_uri)}
-        pending_repo_refs: list[str] = _extract_repo_uris_from_jrxml(main_jrxml_text)
+        pending_repo_refs: list[tuple[str, Literal["subreport", "image", "style", "other"]]] = (
+            _extract_repo_references_with_kind(main_jrxml_text)
+        )
+        known_ref_kinds: dict[str, Literal["subreport", "image", "style", "other"]] = {
+            ref: kind for ref, kind in pending_repo_refs
+        }
 
-        def _save_and_maybe_compile(
-            target_uri: str,
-            raw_bytes: bytes,
-            name_hint: str,
-            res_type: str,
-            bucket: list[str],
-        ) -> None:
-            is_jrxml = (
-                res_type.lower() == "jrxml"
-                or name_hint.lower().endswith(".jrxml")
-                or target_uri.lower().endswith(".jrxml")
-                or _looks_like_jrxml_bytes(raw_bytes)
-            )
-            is_jasper = (
-                not is_jrxml
-                and (
-                    res_type.lower() == "jasper"
-                    or name_hint.lower().endswith(".jasper")
-                    or target_uri.lower().endswith(".jasper")
-                    or raw_bytes.startswith(_JAVA_SERIALIZED_MAGIC)
-                )
-            )
-
-            safe_name = _sanitize_local_filename(name_hint, fallback="subreport")
-            if is_jrxml:
-                if not safe_name.lower().endswith(".jrxml"):
-                    stem = Path(safe_name).stem if safe_name.lower().endswith(".jasper") else safe_name
-                    safe_name = f"{stem}.jrxml"
-                jrxml_path = resources_dir / safe_name
-                jrxml_text = raw_bytes.decode("utf-8-sig", errors="replace")
-                jrxml_path.write_text(jrxml_text, encoding="utf-8")
-                bucket.append(safe_name)
-
-                # Discover nested `repo:...` subreports inside this subreport too
-                for nested_ref in _extract_repo_uris_from_jrxml(jrxml_text):
-                    if nested_ref not in pending_repo_refs:
-                        pending_repo_refs.append(nested_ref)
-
-                jasper_path = resources_dir / f"{jrxml_path.stem}.jasper"
-                try:
-                    jasper_daemon.compile(
-                        jrxml_path,
-                        jasper_path,
-                        subreport_dir=resources_dir,
-                    )
-                    compiled_subreports.append(jasper_path.name)
-                except Exception as exc:
-                    warnings.append(f"Falha ao compilar subreport '{safe_name}': {exc}")
-            elif is_jasper:
-                if not safe_name.lower().endswith(".jasper"):
-                    safe_name = f"{safe_name}.jasper"
-                (resources_dir / safe_name).write_bytes(raw_bytes)
-                bucket.append(safe_name)
-            else:
-                (resources_dir / safe_name).write_bytes(raw_bytes)
-                bucket.append(safe_name)
+        def _enqueue_from_xml(xml_text: str) -> None:
+            for nested_ref, nested_kind in _extract_repo_references_with_kind(xml_text):
+                if nested_ref not in known_ref_kinds:
+                    known_ref_kinds[nested_ref] = nested_kind
+                    pending_repo_refs.append((nested_ref, nested_kind))
+                elif known_ref_kinds[nested_ref] == "other" and nested_kind != "other":
+                    known_ref_kinds[nested_ref] = nested_kind
 
         # Pattern 1: Embedded unit resources (`{uri}_files/*`)
         for res in detail.resources:
@@ -1425,62 +2189,97 @@ class JasperServerService:
                 warnings.append(f"Recurso embutido não encontrado no servidor: '{res_uri}'.")
                 continue
 
-            _save_and_maybe_compile(
-                res_uri,
-                raw_bytes,
-                res.name or posixpath.basename(res_uri),
-                res.type or ctype,
-                synced_embedded,
+            embedded_name = res.name or posixpath.basename(res_uri)
+            embedded_segments = _repo_ref_to_rel_segments(embedded_name)
+            saved_label, jrxml_text = self._mirror_and_compile_resource(
+                raw_bytes=raw_bytes,
+                res_type=res.type or ctype,
+                target_uri=res_uri,
+                repo_rel_segments=embedded_segments,
+                cache_dir=None,
+                cache_segments=None,
+                resources_dir=resources_dir,
+                name_hint=embedded_name,
+                jasper_daemon=jasper_daemon,
+                compiled_subreports=compiled_subreports,
+                warnings=warnings,
             )
+            synced_embedded.append(saved_label)
+            if jrxml_text:
+                _enqueue_from_xml(jrxml_text)
 
-        # Pattern 2: Shared repository subreports referenced via `repo:/...` (or relative `repo:name`)
+        # Pattern 2: Shared repository resources referenced via `repo:/...` (or relative `repo:name`)
         idx = 0
         while idx < len(pending_repo_refs):
-            ref = pending_repo_refs[idx]
+            ref, kind = pending_repo_refs[idx]
             idx += 1
-            if ref.startswith("/"):
-                candidate_uri = _normalize_repo_uri(ref)
-            else:
-                candidate_uri = _normalize_repo_uri(f"{resource_uri}_files/{ref}")
+            effective_kind = known_ref_kinds.get(ref, kind)
+
+            is_absolute = ref.startswith("/")
+            try:
+                if is_absolute:
+                    candidate_uri = _normalize_repo_uri(ref)
+                else:
+                    candidate_uri = _normalize_repo_uri(f"{resource_uri}_files/{ref}")
+            except JasperServerValidationError:
+                warnings.append(f"URI repo inválida ignorada: 'repo:{ref}'.")
+                continue
 
             if candidate_uri in visited_uris:
                 continue
             visited_uris.add(candidate_uri)
 
-            # Try exact URI first; if `.jasper` is missing in repo, fallback to `.jrxml` or stem
-            download_candidates = [candidate_uri]
-            if candidate_uri.lower().endswith(".jasper"):
-                stem_uri = candidate_uri[:-7]
-                download_candidates.extend([f"{stem_uri}.jrxml", stem_uri])
-            elif candidate_uri.lower().endswith(".jrxml"):
-                download_candidates.append(candidate_uri[:-6])
+            rel_segments = _repo_ref_to_rel_segments(ref)
+            if not rel_segments:
+                warnings.append(f"URI repo inválida ignorada: 'repo:{ref}'.")
+                continue
 
-            raw_bytes: bytes | None = None
-            resolved_uri = candidate_uri
-            resolved_type = ""
-            for cand in download_candidates:
-                try:
-                    raw_bytes, resolved_type = self._download_raw_resource(
-                        row, cand, allow_404=True
-                    )
-                except JasperServerHttpError as exc:
-                    warnings.append(f"Erro ao baixar subreport '{cand}': {exc}")
-                    break
-                if raw_bytes is not None:
-                    resolved_uri = cand
-                    break
+            # Try shared per-profile cache for absolute `repo:/...` paths first
+            if is_absolute:
+                hit, cached_label, cached_xml = self._hydrate_from_repo_cache(
+                    cache_dir=cache_dir,
+                    cache_segments=rel_segments,
+                    repo_rel_segments=rel_segments,
+                    resources_dir=resources_dir,
+                    kind=effective_kind,
+                    jasper_daemon=jasper_daemon,
+                    compiled_subreports=compiled_subreports,
+                    warnings=warnings,
+                )
+                if hit:
+                    synced_repo.append(cached_label or ref)
+                    if cached_xml:
+                        _enqueue_from_xml(cached_xml)
+                    continue
+
+            try:
+                raw_bytes, resolved_type, resolved_uri = self._fetch_remote_repo_resource(
+                    row, candidate_uri
+                )
+            except JasperServerHttpError as exc:
+                warnings.append(f"Erro ao baixar recurso '{candidate_uri}': {exc}")
+                continue
 
             if raw_bytes is None:
                 warnings.append(f"Subreport referenciado via repo não encontrado: 'repo:{ref}'.")
                 continue
 
-            _save_and_maybe_compile(
-                resolved_uri,
-                raw_bytes,
-                posixpath.basename(ref) or posixpath.basename(resolved_uri),
-                resolved_type,
-                synced_repo,
+            saved_label, jrxml_text = self._mirror_and_compile_resource(
+                raw_bytes=raw_bytes,
+                res_type=resolved_type,
+                target_uri=resolved_uri,
+                repo_rel_segments=rel_segments,
+                cache_dir=cache_dir if is_absolute else None,
+                cache_segments=rel_segments if is_absolute else None,
+                resources_dir=resources_dir,
+                name_hint=posixpath.basename(ref) or posixpath.basename(resolved_uri),
+                jasper_daemon=jasper_daemon,
+                compiled_subreports=compiled_subreports,
+                warnings=warnings,
             )
+            synced_repo.append(saved_label)
+            if jrxml_text:
+                _enqueue_from_xml(jrxml_text)
 
         return {
             "embedded_resources": synced_embedded,

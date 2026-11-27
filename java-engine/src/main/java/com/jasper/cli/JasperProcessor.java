@@ -155,7 +155,8 @@ public final class JasperProcessor {
         this.context = new SimpleJasperReportsContext(DefaultJasperReportsContext.getInstance());
         // Preview tolerante: fontes ausentes na JVM não abortam o preenchimento/exportação.
         context.setProperty("net.sf.jasperreports.awt.ignore.missing.font", "true");
-        List<RepositoryService> repos = new ArrayList<>(3);
+        List<RepositoryService> repos = new ArrayList<>(4);
+        repos.add(new RepoSchemeRepositoryService(context, this.subreportDirOverride, this.baseDir));
         if (this.subreportDirOverride != null) {
             repos.add(new FileRepositoryService(context, this.subreportDirOverride.toString(), true));
         }

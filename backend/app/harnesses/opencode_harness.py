@@ -93,6 +93,15 @@ class OpenCodeHarness(BaseSubprocessHarness):
         """Normaliza eventos JSON/SSE do OpenCode (`opencode serve` ou `opencode run --format json`)."""
         events: list[HarnessEvent] = []
 
+        raw_sid = (
+            obj.get("session_id")
+            or obj.get("sessionID")
+            or (obj.get("properties") or {}).get("sessionID")
+            or (obj.get("properties") or {}).get("session_id")
+        )
+        if raw_sid:
+            state["session_id"] = str(raw_sid)
+
         # Caso 1: Resposta agregada HTTP `/session/{id}/message` contendo `parts: [...]`
         parts = obj.get("parts")
         if isinstance(parts, list):
@@ -275,18 +284,21 @@ class OpenCodeHarness(BaseSubprocessHarness):
             transport=self._http_transport,
             timeout=httpx.Timeout(request.timeout_seconds),
         ) as client:
-            sess_resp = await client.post(
-                "/session",
-                json={
-                    "title": f"Salutem Ficha Studio ({request.phase})",
-                    "directory": str(request.workspace_dir.resolve()),
-                },
-            )
-            sess_resp.raise_for_status()
-            sess_data = sess_resp.json()
-            session_id = sess_data.get("id")
-            if not session_id:
-                raise RuntimeError("Resposta inválida de /session no OpenCode Server (sem id).")
+            if request.resume_session_id:
+                session_id = request.resume_session_id
+            else:
+                sess_resp = await client.post(
+                    "/session",
+                    json={
+                        "title": f"Salutem Ficha Studio ({request.phase})",
+                        "directory": str(request.workspace_dir.resolve()),
+                    },
+                )
+                sess_resp.raise_for_status()
+                sess_data = sess_resp.json()
+                session_id = sess_data.get("id")
+                if not session_id:
+                    raise RuntimeError("Resposta inválida de /session no OpenCode Server (sem id).")
 
             parts: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
             for img in request.image_paths:
@@ -393,6 +405,8 @@ class OpenCodeHarness(BaseSubprocessHarness):
     def build_cli_command(self, executable: str, request: HarnessRunRequest) -> list[str]:
         """Monta o comando `opencode run --format json`."""
         cmd = [executable, "run", "--format", "json"]
+        if request.resume_session_id:
+            cmd.extend(["--session", request.resume_session_id])
         if request.model:
             cmd.extend(["--model", request.model])
         for img in request.image_paths:
@@ -455,10 +469,14 @@ class OpenCodeHarness(BaseSubprocessHarness):
             gate_ev = self._make_gate_event_if_needed(request)
             if gate_ev is not None:
                 yield gate_ev
+            cli_meta: dict[str, Any] = {"mode": "cli"}
+            resolved_sid = state.get("session_id") or request.resume_session_id
+            if resolved_sid:
+                cli_meta["session_id"] = resolved_sid
             yield HarnessEvent(
                 type=EventType.DONE,
                 harness=self.kind,
-                metadata={"mode": "cli"},
+                metadata=cli_meta,
             )
 
     async def stream(self, request: HarnessRunRequest) -> AsyncIterator[HarnessEvent]:

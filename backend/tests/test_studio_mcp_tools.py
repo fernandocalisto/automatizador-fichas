@@ -510,12 +510,15 @@ def test_unified_registry_contains_all_8_tools_and_preserves_legacy_api() -> Non
         "save_validated_json",
         "validate_and_compile_jrxml",
         "render_preview_images",
+        "list_db_tables",
+        "describe_db_table",
+        "preview_db_select",
     ]
     assert set(STUDIO_TOOL_HANDLERS.keys()) == set(all_names)
-    assert len(get_all_mcp_tool_descriptors()) == 8
-    assert len(get_all_sdk_tool_callables()) == 8
-    assert len(get_mcp_tool_descriptors(include_artifact_tools=True)) == 8
-    assert len(get_sdk_tool_callables(include_artifact_tools=True)) == 8
+    assert len(get_all_mcp_tool_descriptors()) == 11
+    assert len(get_all_sdk_tool_callables()) == 11
+    assert len(get_mcp_tool_descriptors(include_artifact_tools=True)) == 11
+    assert len(get_sdk_tool_callables(include_artifact_tools=True)) == 11
     # Retrocompatibilidade com Fase 1
     assert len(get_mcp_tool_descriptors()) == 4
     assert len(get_sdk_tool_callables()) == 4
@@ -558,14 +561,17 @@ def test_mcp_server_jsonrpc_protocol_and_tool_calls(
     ping_resp = server.handle_message({"jsonrpc": "2.0", "id": 2, "method": "ping"})
     assert ping_resp == {"jsonrpc": "2.0", "id": 2, "result": {}}
 
-    # 4. tools/list retorna todas as 8 ferramentas
+    # 4. tools/list retorna todas as 11 ferramentas (8 v1.0 + 3 DB READ ONLY v1.1)
     list_resp = server.handle_message({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     assert list_resp is not None
     tool_names = [t["name"] for t in list_resp["result"]["tools"]]
-    assert len(tool_names) == 8
+    assert len(tool_names) == 11
     assert "save_validated_json" in tool_names
     assert "validate_and_compile_jrxml" in tool_names
     assert "render_preview_images" in tool_names
+    assert "list_db_tables" in tool_names
+    assert "describe_db_table" in tool_names
+    assert "preview_db_select" in tool_names
 
     # 5. tools/call -> extract_pdf_geometry (via project_id)
     geo_call = server.handle_message(
@@ -704,7 +710,7 @@ def test_mcp_server_stdio_loop_and_cli_module_execution() -> None:
     StudioMcpServer().serve_stdio(stdin=stdin_buf, stdout=stdout_buf)
     responses = [json.loads(line) for line in stdout_buf.getvalue().splitlines() if line.strip()]
     assert [r["id"] for r in responses] == [1, 2, 3]
-    assert len(responses[2]["result"]["tools"]) == 8
+    assert len(responses[2]["result"]["tools"]) == 11
 
     # Smoke test real via `python -m backend.app.mcp_tools.mcp_server`
     repo_root = Path(__file__).resolve().parents[2]
@@ -724,4 +730,4 @@ def test_mcp_server_stdio_loop_and_cli_module_execution() -> None:
     cli_responses = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     assert [r["id"] for r in cli_responses] == [1, 2, 3]
     assert cli_responses[0]["result"]["capabilities"] == {"tools": {}}
-    assert len(cli_responses[2]["result"]["tools"]) == 8
+    assert len(cli_responses[2]["result"]["tools"]) == 11

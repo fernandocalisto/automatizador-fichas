@@ -17,6 +17,7 @@ from typing import Any
 
 from backend.app.core.json_utils import parse_and_validate_clinical_json
 from backend.app.db.schemas import (
+    AgentSessionRead,
     ArtifactType,
     ChatMessageCreate,
     ChatMessageRead,
@@ -33,6 +34,7 @@ from backend.app.harnesses import (
     HarnessRegistry,
     HarnessRunRequest,
     PhaseKind,
+    compose_phase_system_prompt,
     get_default_registry,
 )
 from backend.app.mcp_tools.studio_tools import get_all_mcp_tool_descriptors
@@ -405,6 +407,7 @@ class AgentOrchestratorService:
         recent_messages: list[ChatMessageRead],
         model: str | None = None,
         timeout_seconds: float = 300.0,
+        resume_session_id: str | None = None,
     ) -> HarnessRunRequest:
         workspace_dir = Path(project.workspace_dir)
         image_paths = _collect_preview_image_paths(workspace_dir, phase)
@@ -452,10 +455,13 @@ class AgentOrchestratorService:
             "slug": project.slug,
             "name": project.name,
             "description": project.description,
+            "project_kind": project.project_kind,
             "current_stage": project.current_stage,
             "entry_mode": project.entry_mode,
             "preferred_harness": project.preferred_harness,
             "template_db_id": project.template_db_id,
+            "default_db_profile_id": project.default_db_profile_id,
+            "source_origin": dict(project.source_origin),
             "has_pdf": project.has_pdf,
             "latest_artifacts": dict(project.latest_artifacts),
             "gates": gates_context,
@@ -464,6 +470,10 @@ class AgentOrchestratorService:
             project_context["source_pdf_path"] = str(
                 (workspace_dir / "uploads" / "source.pdf").resolve()
             )
+
+        selected_skill = (
+            "manutencao_relatorio" if project.project_kind == "free_report" else None
+        )
 
         extra_context: dict[str, Any] = {
             "project": project_context,
@@ -475,8 +485,19 @@ class AgentOrchestratorService:
             "recent_chat": recent_chat_context,
             "available_tools": available_tools,
         }
+        if selected_skill is not None:
+            extra_context["skill_name"] = selected_skill
         if visual_feedbacks:
             extra_context["visual_region_feedbacks"] = visual_feedbacks
+
+        system_prompt_override: str | None = None
+        if selected_skill is not None:
+            system_prompt_override = compose_phase_system_prompt(
+                phase=phase,
+                gate_authorized=gate_authorized,
+                workspace_dir=workspace_dir,
+                skill_name=selected_skill,
+            )
 
         return HarnessRunRequest(
             workspace_dir=workspace_dir,
@@ -487,6 +508,8 @@ class AgentOrchestratorService:
             image_paths=image_paths,
             extra_context=extra_context,
             timeout_seconds=timeout_seconds,
+            system_prompt_override=system_prompt_override,
+            resume_session_id=resume_session_id,
         )
 
     # -------------------------------------------------------------------------
@@ -641,15 +664,13 @@ class AgentOrchestratorService:
                 ),
             )
 
-        run_request = self._build_run_request(
-            project,
-            phase=phase,
-            prompt=prompt,
-            gate_name=gate_name,
-            gate_authorized=gate_authorized,
-            recent_messages=recent_messages,
-            model=model,
-            timeout_seconds=timeout_seconds,
+        saved_session = self.workspace_service.store.get_agent_session(
+            project_id, phase, harness_kind.value
+        )
+        active_resume_session_id: str | None = (
+            str(saved_session["external_session_id"]).strip()
+            if saved_session and saved_session.get("external_session_id")
+            else None
         )
 
         workspace_dir = Path(project.workspace_dir)
@@ -677,87 +698,149 @@ class AgentOrchestratorService:
         had_error = False
         cancelled = False
         buffered_done: HarnessEvent | None = None
+        fallback_from_resume = False
 
-        aiter = harness.stream(run_request).__aiter__()
+        aiter: AsyncIterator[HarnessEvent] | None = None
         cancel_wait_task = asyncio.create_task(cancel_event.wait())
 
         try:
-            while True:
-                if cancel_event.is_set():
-                    cancelled = True
-                    break
-
-                next_task = asyncio.create_task(aiter.__anext__())
-                done_tasks, _ = await asyncio.wait(
-                    {next_task, cancel_wait_task},
-                    return_when=asyncio.FIRST_COMPLETED,
+            max_attempts = 2 if active_resume_session_id else 1
+            for attempt in range(max_attempts):
+                attempt_resume_id = active_resume_session_id if attempt == 0 else None
+                run_request = self._build_run_request(
+                    project,
+                    phase=phase,
+                    prompt=prompt,
+                    gate_name=gate_name,
+                    gate_authorized=gate_authorized,
+                    recent_messages=recent_messages,
+                    model=model,
+                    timeout_seconds=timeout_seconds,
+                    resume_session_id=attempt_resume_id,
                 )
+                aiter = harness.stream(run_request).__aiter__()
+                retry_fresh = False
 
-                if cancel_wait_task in done_tasks:
-                    cancelled = True
-                    if not next_task.done():
-                        next_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
-                            await next_task
-                    else:
-                        with contextlib.suppress(StopAsyncIteration, Exception):
-                            next_task.result()
-                    break
+                while True:
+                    if cancel_event.is_set():
+                        cancelled = True
+                        break
 
-                try:
-                    event = next_task.result()
-                except StopAsyncIteration:
-                    break
-                except Exception as exc:
-                    had_error = True
-                    err_event = HarnessEvent(
-                        type=EventType.ERROR,
-                        content=f"Erro durante execução do harness '{harness_kind.value}': {exc}",
-                        harness=harness_kind,
-                        metadata={"exception_type": type(exc).__name__, "phase": phase},
+                    next_task = asyncio.create_task(aiter.__anext__())
+                    done_tasks, _ = await asyncio.wait(
+                        {next_task, cancel_wait_task},
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
-                    yield err_event
-                    break
 
-                ev_type = _event_type_value(event)
-                if event.harness is None:
-                    event = event.model_copy(update={"harness": harness_kind})
+                    if cancel_wait_task in done_tasks:
+                        cancelled = True
+                        if not next_task.done():
+                            next_task.cancel()
+                            with contextlib.suppress(
+                                asyncio.CancelledError, StopAsyncIteration, Exception
+                            ):
+                                await next_task
+                        else:
+                            with contextlib.suppress(StopAsyncIteration, Exception):
+                                next_task.result()
+                        break
 
-                if ev_type == EventType.DONE.value:
-                    buffered_done = event
-                    break
+                    try:
+                        event = next_task.result()
+                    except StopAsyncIteration:
+                        break
+                    except Exception as exc:
+                        can_retry = (
+                            attempt_resume_id is not None
+                            and attempt + 1 < max_attempts
+                            and not text_parts
+                            and not thought_parts
+                            and not tool_calls_log
+                        )
+                        if can_retry:
+                            self.workspace_service.store.delete_agent_session(
+                                project_id,
+                                phase=phase,
+                                harness_id=harness_kind.value,
+                            )
+                            active_resume_session_id = None
+                            fallback_from_resume = True
+                            retry_fresh = True
+                            break
+                        had_error = True
+                        err_event = HarnessEvent(
+                            type=EventType.ERROR,
+                            content=f"Erro durante execução do harness '{harness_kind.value}': {exc}",
+                            harness=harness_kind,
+                            metadata={"exception_type": type(exc).__name__, "phase": phase},
+                        )
+                        yield err_event
+                        break
 
-                if ev_type == EventType.TEXT_DELTA.value:
-                    if event.content:
-                        text_parts.append(event.content)
-                elif ev_type == EventType.THOUGHT_DELTA.value:
-                    if event.content:
-                        thought_parts.append(event.content)
-                elif ev_type == EventType.TOOL_CALL.value:
-                    tool_calls_log.append(
-                        {
+                    ev_type = _event_type_value(event)
+                    if event.harness is None:
+                        event = event.model_copy(update={"harness": harness_kind})
+
+                    if ev_type == EventType.DONE.value:
+                        buffered_done = event
+                        break
+
+                    if ev_type == EventType.ERROR.value:
+                        can_retry = (
+                            attempt_resume_id is not None
+                            and attempt + 1 < max_attempts
+                            and not text_parts
+                            and not thought_parts
+                            and not tool_calls_log
+                        )
+                        if can_retry:
+                            self.workspace_service.store.delete_agent_session(
+                                project_id,
+                                phase=phase,
+                                harness_id=harness_kind.value,
+                            )
+                            active_resume_session_id = None
+                            fallback_from_resume = True
+                            retry_fresh = True
+                            break
+                        had_error = True
+                    elif ev_type == EventType.TEXT_DELTA.value:
+                        if event.content:
+                            text_parts.append(event.content)
+                    elif ev_type == EventType.THOUGHT_DELTA.value:
+                        if event.content:
+                            thought_parts.append(event.content)
+                    elif ev_type == EventType.TOOL_CALL.value:
+                        tool_calls_log.append(
+                            {
+                                "tool_name": event.tool_name,
+                                "tool_call_id": event.tool_call_id,
+                                "tool_args": event.tool_args,
+                                "status": "running",
+                            }
+                        )
+                    elif ev_type == EventType.TOOL_RESULT.value:
+                        result_record = {
                             "tool_name": event.tool_name,
                             "tool_call_id": event.tool_call_id,
-                            "tool_args": event.tool_args,
-                            "status": "running",
+                            "tool_output": event.tool_output,
+                            "content": event.content,
+                            "metadata": dict(event.metadata),
                         }
-                    )
-                elif ev_type == EventType.TOOL_RESULT.value:
-                    result_record = {
-                        "tool_name": event.tool_name,
-                        "tool_call_id": event.tool_call_id,
-                        "tool_output": event.tool_output,
-                        "content": event.content,
-                        "metadata": dict(event.metadata),
-                    }
-                    tool_results_log.append(result_record)
-                    self._attach_tool_result(tool_calls_log, result_record)
-                elif ev_type == EventType.GATE_REQUEST.value:
-                    saw_gate_request = True
-                elif ev_type == EventType.ERROR.value:
-                    had_error = True
+                        tool_results_log.append(result_record)
+                        self._attach_tool_result(tool_calls_log, result_record)
+                    elif ev_type == EventType.GATE_REQUEST.value:
+                        saw_gate_request = True
 
-                yield event
+                    yield event
+
+                if retry_fresh:
+                    if hasattr(aiter, "aclose"):
+                        with contextlib.suppress(Exception):
+                            await aiter.aclose()
+                    aiter = None
+                    continue
+                break
 
             if cancelled:
                 for item in tool_calls_log:
@@ -950,6 +1033,25 @@ class AgentOrchestratorService:
 
             latest_proj_state = self.workspace_service.get_project(project_id)
             final_done_meta = dict(buffered_done.metadata) if buffered_done is not None else {}
+
+            # Persiste sessão externa do harness para continuidade nos próximos turnos
+            persisted_session_id: str | None = None
+            if not cancelled and not had_error:
+                raw_sid = (
+                    final_done_meta.get("session_id")
+                    or final_done_meta.get("conversation_id")
+                    or final_done_meta.get("thread_id")
+                    or active_resume_session_id
+                )
+                if isinstance(raw_sid, str) and raw_sid.strip():
+                    persisted_session_id = raw_sid.strip()
+                    self.workspace_service.store.upsert_agent_session(
+                        project_id,
+                        phase,
+                        harness_kind.value,
+                        persisted_session_id,
+                    )
+
             final_done_meta.update(
                 {
                     "phase": phase,
@@ -962,6 +1064,10 @@ class AgentOrchestratorService:
                     "had_error": had_error,
                 }
             )
+            if persisted_session_id:
+                final_done_meta["session_id"] = persisted_session_id
+            if fallback_from_resume:
+                final_done_meta["session_fallback"] = True
             if saved_assistant_msg is not None:
                 final_done_meta["assistant_message_id"] = saved_assistant_msg.id
 
@@ -976,7 +1082,7 @@ class AgentOrchestratorService:
                 cancel_wait_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await cancel_wait_task
-            if hasattr(aiter, "aclose"):
+            if aiter is not None and hasattr(aiter, "aclose"):
                 with contextlib.suppress(Exception):
                     await aiter.aclose()
             if self._active_runs.get(project_id) is active_run:
@@ -1091,8 +1197,32 @@ class AgentOrchestratorService:
                 pending += 1
         return pending
 
+    def list_sessions(self, project_id: str) -> list[AgentSessionRead]:
+        """Retorna todas as sessões persistidas dos harnesses para o projeto."""
+        self.workspace_service.get_project(project_id)
+        rows = self.workspace_service.store.list_agent_sessions(project_id)
+        return [AgentSessionRead.model_validate(r) for r in rows]
+
+    def reset_session(
+        self,
+        project_id: str,
+        *,
+        phase: PhaseKind | None = None,
+        harness_id: str | None = None,
+    ) -> int:
+        """Remove sessão(ões) salva(s) para forçar início de uma conversa limpa."""
+        self.workspace_service.get_project(project_id)
+        if phase is not None:
+            self.get_gate_for_phase(phase)
+        normalized_harness = harness_id.strip().lower() if harness_id else None
+        return self.workspace_service.store.delete_agent_session(
+            project_id,
+            phase=phase,
+            harness_id=normalized_harness,
+        )
+
     def get_agent_status(self, project_id: str) -> dict[str, Any]:
-        """Retorna diagnóstico completo do agente, harnesses, gates e feedbacks visuais pendentes."""
+        """Retorna diagnóstico completo do agente, harnesses, gates, sessões e feedbacks visuais pendentes."""
         project = self.workspace_service.get_project(project_id)
         statuses = self.harness_registry.list_statuses()
         serialized_harnesses = [
@@ -1100,6 +1230,9 @@ class AgentOrchestratorService:
             for st in statuses
         ]
         serialized_gates = [g.model_dump(mode="json") for g in project.gates]
+        serialized_sessions = [
+            s.model_dump(mode="json") for s in self.list_sessions(project_id)
+        ]
 
         return {
             "project_id": project.id,
@@ -1107,5 +1240,6 @@ class AgentOrchestratorService:
             "preferred_harness": project.preferred_harness,
             "harnesses": serialized_harnesses,
             "gates": serialized_gates,
+            "sessions": serialized_sessions,
             "pending_visual_feedback_count": self._count_pending_visual_feedback(project_id),
         }

@@ -1,5 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { SplitPane, useToast } from "@/components/ui";
+import {
+  ArrowDownToLine,
+  ArrowRight,
+  ArrowUpFromLine,
+  Database,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Play,
+  PlugZap,
+  Save,
+  ShieldCheck,
+} from "lucide-react";
+import {
+  Badge,
+  Button,
+  CodeEditor,
+  Select,
+  SplitPane,
+  useToast,
+} from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import type { SqlDbViewProps } from "@/types/feature-props";
 import type {
@@ -9,17 +28,21 @@ import type {
   DbProfileRead,
   DryRunInsertResult,
   InspectSelectResult,
+  SelectPreviewResult,
   SqlValidateResponse,
 } from "@/types/studio";
 import {
   DbGovernancePane,
   type DryRunInvalidationReason,
 } from "./DbGovernancePane";
+import { SchemaExplorerPane } from "./SchemaExplorerPane";
+import { SelectPreviewGrid } from "./SelectPreviewGrid";
 import { SqlEditorPane, type SqlTabId } from "./SqlEditorPane";
 import {
   DEFAULT_SQL_SELECT_OPTIONS,
   type SqlSelectRegenerateOptions,
 } from "./SqlRegenerateControls";
+import { previewProfileSelect, syncProjectQuery } from "./workbenchApi";
 
 interface DryRunState {
   result: DryRunInsertResult;
@@ -54,19 +77,32 @@ export function SqlDbView({
   artifactSyncTick = 0,
 }: SqlDbViewProps) {
   const { pushToast } = useToast();
+  const isFreeReport = project.project_kind === "free_report";
   const loadedInsertVerRef = useRef<number | null>(null);
   const loadedSelectVerRef = useRef<number | null>(null);
   const initialLoadedRef = useRef(false);
 
   // Artifacts & drafts
   const [loadingArtifacts, setLoadingArtifacts] = useState(true);
-  const [activeTab, setActiveTab] = useState<SqlTabId>("sql_insert");
+  const [activeTab, setActiveTab] = useState<SqlTabId>(
+    isFreeReport ? "sql_select" : "sql_insert",
+  );
   const [insertArtifact, setInsertArtifact] =
     useState<ArtifactRevisionRead | null>(null);
   const [selectArtifact, setSelectArtifact] =
     useState<ArtifactRevisionRead | null>(null);
   const [insertDraft, setInsertDraft] = useState("");
   const [selectDraft, setSelectDraft] = useState("");
+
+  // SQL Workbench (free_report & optional Schema Explorer)
+  const [schemaExplorerOpen, setSchemaExplorerOpen] = useState(isFreeReport);
+  const [runningPreviewSelect, setRunningPreviewSelect] = useState(false);
+  const [previewSelectResult, setPreviewSelectResult] =
+    useState<SelectPreviewResult | null>(null);
+  const [previewSelectError, setPreviewSelectError] = useState<string | null>(
+    null,
+  );
+  const [syncingQuery, setSyncingQuery] = useState(false);
 
   // Regeneration options
   const [selectOptions, setSelectOptions] =
@@ -127,8 +163,13 @@ export function SqlDbView({
     setCommitError(null);
     setInspectResult(null);
     setInspectError(null);
+    setPreviewSelectResult(null);
+    setPreviewSelectError(null);
     setConnectionTestResult(null);
     setConnectionTestError(null);
+    if (project.project_kind === "free_report") {
+      setActiveTab("sql_select");
+    }
 
     Promise.all([
       fetchArtifactOrNull(project.id, "sql_insert"),
@@ -163,7 +204,11 @@ export function SqlDbView({
       .then((list) => {
         if (cancelled) return;
         setProfiles(list);
-        const preferred = list.find((p) => p.is_default) ?? list[0] ?? null;
+        const byProject = project.default_db_profile_id
+          ? list.find((p) => p.id === project.default_db_profile_id)
+          : null;
+        const preferred =
+          byProject ?? list.find((p) => p.is_default) ?? list[0] ?? null;
         setSelectedProfileId(preferred?.id ?? "");
       })
       .catch((err) => {
@@ -561,68 +606,347 @@ export function SqlDbView({
     [project.id, selectedProfileId, selectDraft],
   );
 
+  const handleRunPreviewSelect = useCallback(async () => {
+    if (!selectedProfileId || !selectDraft.trim()) return;
+    setRunningPreviewSelect(true);
+    setPreviewSelectError(null);
+    try {
+      const res = await previewProfileSelect(selectedProfileId, {
+        sql_select: selectDraft,
+        limit: 50,
+      });
+      setPreviewSelectResult(res);
+    } catch (err) {
+      setPreviewSelectResult(null);
+      setPreviewSelectError(getErrorMessage(err));
+    } finally {
+      setRunningPreviewSelect(false);
+    }
+  }, [selectedProfileId, selectDraft]);
+
+  const handleSyncQuery = useCallback(
+    async (direction: "jrxml_to_sql" | "sql_to_jrxml") => {
+      setSyncingQuery(true);
+      try {
+        const res = await syncProjectQuery(project.id, {
+          direction,
+          sql_select: direction === "sql_to_jrxml" ? selectDraft : undefined,
+          save_artifact: true,
+        });
+        if (direction === "jrxml_to_sql") {
+          setSelectDraft(res.sql_select);
+          if (res.saved_revision) {
+            loadedSelectVerRef.current = res.saved_revision.version_num;
+            setSelectArtifact(res.saved_revision);
+            onProjectUpdated({
+              ...project,
+              latest_artifacts: {
+                ...project.latest_artifacts,
+                sql_select: res.saved_revision.version_num,
+              },
+            });
+          }
+          pushToast({
+            tone: "success",
+            title: "Query extraída do JRXML",
+            description: "Tag <queryString> carregada no SQL Workbench.",
+          });
+        } else {
+          if (res.saved_revision) {
+            onProjectUpdated({
+              ...project,
+              latest_artifacts: {
+                ...project.latest_artifacts,
+                jrxml: res.saved_revision.version_num,
+              },
+            });
+          }
+          pushToast({
+            tone: "success",
+            title: "Query aplicada no JRXML",
+            description: res.saved_revision
+              ? `Revisão JRXML v${res.saved_revision.version_num} salva.`
+              : "Tag <queryString> atualizada.",
+          });
+        }
+      } catch (err) {
+        pushToast({
+          tone: "error",
+          title:
+            direction === "jrxml_to_sql"
+              ? "Falha ao extrair query do JRXML"
+              : "Falha ao aplicar query no JRXML",
+          description: getErrorMessage(err),
+        });
+      } finally {
+        setSyncingQuery(false);
+      }
+    },
+    [onProjectUpdated, project, pushToast, selectDraft],
+  );
+
+  const handleInsertSnippet = useCallback((snippet: string) => {
+    setSelectDraft((prev) => (prev.trim() ? `${prev.trimEnd()}\n\n${snippet}` : snippet));
+  }, []);
+
+  if (isFreeReport) {
+    const selectDirty =
+      selectArtifact !== null
+        ? selectDraft !== selectArtifact.content
+        : selectDraft.trim().length > 0;
+
+    return (
+      <div
+        data-testid="free-report-sql-workbench"
+        className="flex h-full w-full flex-col overflow-hidden bg-canvas"
+      >
+        {/* Top Workbench Toolbar */}
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="xs"
+              variant={schemaExplorerOpen ? "secondary" : "outline"}
+              onClick={() => setSchemaExplorerOpen((prev) => !prev)}
+              icon={
+                schemaExplorerOpen ? (
+                  <PanelLeftClose className="h-3.5 w-3.5" />
+                ) : (
+                  <PanelLeftOpen className="h-3.5 w-3.5" />
+                )
+              }
+            >
+              Schema Explorer
+            </Button>
+
+            <div className="flex items-center gap-1.5">
+              <Database className="h-3.5 w-3.5 text-blueprint" />
+              <Select
+                aria-label="Perfil PostgreSQL do Workbench"
+                value={selectedProfileId}
+                onChange={(e) => handleSelectProfileId(e.target.value)}
+                className="h-7 w-56 text-xs"
+              >
+                {profiles.length === 0 ? (
+                  <option value="">Nenhum perfil cadastrado</option>
+                ) : (
+                  profiles.map((prof) => (
+                    <option key={prof.id} value={prof.id}>
+                      {prof.name} ({prof.host}/{prof.dbname || "postgres"})
+                    </option>
+                  ))
+                )}
+              </Select>
+              <Button
+                size="xs"
+                variant="outline"
+                loading={testingConnection}
+                disabled={!selectedProfileId}
+                onClick={handleTestConnection}
+                icon={<PlugZap className="h-3.5 w-3.5 text-blueprint" />}
+              >
+                Testar
+              </Button>
+            </div>
+
+            {connectionTestResult && (
+              <Badge tone={connectionTestResult.ok ? "success" : "danger"} dot>
+                {connectionTestResult.ok
+                  ? `OK · ${connectionTestResult.latency_ms} ms`
+                  : "Falha na conexão"}
+              </Badge>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Button
+              size="xs"
+              variant="outline"
+              loading={syncingQuery}
+              onClick={() => void handleSyncQuery("jrxml_to_sql")}
+              icon={<ArrowDownToLine className="h-3.5 w-3.5" />}
+            >
+              Extrair do JRXML
+            </Button>
+
+            <Button
+              size="xs"
+              variant="outline"
+              loading={syncingQuery}
+              disabled={!selectDraft.trim()}
+              onClick={() => void handleSyncQuery("sql_to_jrxml")}
+              icon={<ArrowUpFromLine className="h-3.5 w-3.5" />}
+            >
+              Aplicar no JRXML
+            </Button>
+
+            <Button
+              size="xs"
+              variant="outline"
+              loading={validating}
+              disabled={!selectDraft.trim()}
+              onClick={handleValidateSql}
+              icon={<ShieldCheck className="h-3.5 w-3.5 text-blueprint" />}
+            >
+              Validar sintaxe
+            </Button>
+
+            <Button
+              size="xs"
+              variant={selectDirty ? "primary" : "outline"}
+              loading={saving}
+              disabled={!selectDraft.trim() || !selectDirty}
+              onClick={handleSaveRevision}
+              icon={<Save className="h-3.5 w-3.5" />}
+            >
+              Salvar revisão
+            </Button>
+
+            <Button
+              size="xs"
+              variant="blueprint"
+              loading={runningPreviewSelect}
+              disabled={!selectedProfileId || !selectDraft.trim()}
+              onClick={() => void handleRunPreviewSelect()}
+              icon={<Play className="h-3.5 w-3.5" />}
+            >
+              Executar Preview (READ ONLY · LIMIT 50)
+            </Button>
+
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => onNavigateSection("jasper_studio")}
+              icon={<ArrowRight className="h-3.5 w-3.5" />}
+            >
+              Jasper Studio
+            </Button>
+          </div>
+        </div>
+
+        {/* Main Area: Collapsible Schema Explorer + SQL Editor & Preview Grid */}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          {schemaExplorerOpen && (
+            <SchemaExplorerPane
+              profileId={selectedProfileId}
+              onInsertSqlSnippet={handleInsertSnippet}
+              onClose={() => setSchemaExplorerOpen(false)}
+            />
+          )}
+
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <div className="min-h-0 flex-1 border-b border-border bg-surface">
+              {loadingArtifacts ? (
+                <div className="flex h-full items-center justify-center text-xs text-ink-muted">
+                  Carregando SQL SELECT do relatório...
+                </div>
+              ) : (
+                <CodeEditor
+                  language="sql"
+                  value={selectDraft}
+                  onChange={handleSelectChange}
+                  ariaLabel="Editor SQL SELECT Workbench"
+                />
+              )}
+            </div>
+
+            <div className="max-h-[45%] shrink-0 overflow-y-auto bg-canvas p-3">
+              {validationByTab.sql_select && (
+                <div
+                  role="status"
+                  className="mb-2 rounded-md border border-border bg-surface px-3 py-1.5 text-xs"
+                >
+                  <strong>
+                    {validationByTab.sql_select.valid
+                      ? "Sintaxe válida:"
+                      : "Erro de sintaxe:"}
+                  </strong>{" "}
+                  {validationByTab.sql_select.message}
+                </div>
+              )}
+
+              <SelectPreviewGrid
+                result={previewSelectResult}
+                error={previewSelectError}
+                loading={runningPreviewSelect}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="h-full w-full overflow-hidden">
-      <SplitPane
-        storageKey="salutem-sql-db-split"
-        initialRatio={0.56}
-        minRatio={0.32}
-        maxRatio={0.74}
-        left={
-          <SqlEditorPane
-            projectSlug={project.slug}
-            loading={loadingArtifacts}
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            insertArtifact={insertArtifact}
-            selectArtifact={selectArtifact}
-            insertDraft={insertDraft}
-            selectDraft={selectDraft}
-            onInsertChange={handleInsertChange}
-            onSelectChange={handleSelectChange}
-            selectOptions={selectOptions}
-            onSelectOptionsChange={setSelectOptions}
-            regenerating={regenerating}
-            onRegenerateSql={handleRegenerateSql}
-            validating={validating}
-            validationResult={validationByTab[activeTab]}
-            onValidateSql={handleValidateSql}
-            saving={saving}
-            onSaveRevision={handleSaveRevision}
-            onRevertCurrent={handleRevertCurrent}
-            onCopySql={handleCopySql}
-          />
-        }
-        right={
-          <DbGovernancePane
-            project={project}
-            profiles={profiles}
-            loadingProfiles={loadingProfiles}
-            selectedProfileId={selectedProfileId}
-            onSelectProfileId={handleSelectProfileId}
-            onNavigateSection={onNavigateSection}
-            testingConnection={testingConnection}
-            connectionTestResult={connectionTestResult}
-            connectionTestError={connectionTestError}
-            onTestConnection={handleTestConnection}
-            hasInsertSql={insertDraft.trim().length > 0}
-            runningDryRun={runningDryRun}
-            dryRunResult={activeDryRunResult}
-            dryRunError={dryRunError}
-            invalidationReason={invalidationReason}
-            onRunDryRun={handleRunDryRun}
-            committing={committing}
-            commitResult={commitResult}
-            commitError={commitError}
-            onConfirmCommit={handleConfirmCommit}
-            hasSelectSql={selectDraft.trim().length > 0}
-            inspectingSelect={inspectingSelect}
-            inspectResult={inspectResult}
-            inspectError={inspectError}
-            onInspectSelect={handleInspectSelect}
-          />
-        }
-      />
+    <div className="flex h-full w-full overflow-hidden">
+      {schemaExplorerOpen && (
+        <SchemaExplorerPane
+          profileId={selectedProfileId}
+          onInsertSqlSnippet={handleInsertSnippet}
+          onClose={() => setSchemaExplorerOpen(false)}
+        />
+      )}
+      <div className="min-w-0 flex-1 overflow-hidden">
+        <SplitPane
+          storageKey="salutem-sql-db-split"
+          initialRatio={0.56}
+          minRatio={0.32}
+          maxRatio={0.74}
+          left={
+            <SqlEditorPane
+              projectSlug={project.slug}
+              loading={loadingArtifacts}
+              activeTab={activeTab}
+              onTabChange={setActiveTab}
+              insertArtifact={insertArtifact}
+              selectArtifact={selectArtifact}
+              insertDraft={insertDraft}
+              selectDraft={selectDraft}
+              onInsertChange={handleInsertChange}
+              onSelectChange={handleSelectChange}
+              selectOptions={selectOptions}
+              onSelectOptionsChange={setSelectOptions}
+              regenerating={regenerating}
+              onRegenerateSql={handleRegenerateSql}
+              validating={validating}
+              validationResult={validationByTab[activeTab]}
+              onValidateSql={handleValidateSql}
+              saving={saving}
+              onSaveRevision={handleSaveRevision}
+              onRevertCurrent={handleRevertCurrent}
+              onCopySql={handleCopySql}
+            />
+          }
+          right={
+            <DbGovernancePane
+              project={project}
+              profiles={profiles}
+              loadingProfiles={loadingProfiles}
+              selectedProfileId={selectedProfileId}
+              onSelectProfileId={handleSelectProfileId}
+              onNavigateSection={onNavigateSection}
+              testingConnection={testingConnection}
+              connectionTestResult={connectionTestResult}
+              connectionTestError={connectionTestError}
+              onTestConnection={handleTestConnection}
+              hasInsertSql={insertDraft.trim().length > 0}
+              runningDryRun={runningDryRun}
+              dryRunResult={activeDryRunResult}
+              dryRunError={dryRunError}
+              invalidationReason={invalidationReason}
+              onRunDryRun={handleRunDryRun}
+              committing={committing}
+              commitResult={commitResult}
+              commitError={commitError}
+              onConfirmCommit={handleConfirmCommit}
+              hasSelectSql={selectDraft.trim().length > 0}
+              inspectingSelect={inspectingSelect}
+              inspectResult={inspectResult}
+              inspectError={inspectError}
+              onInspectSelect={handleInspectSelect}
+            />
+          }
+        />
+      </div>
     </div>
   );
 }

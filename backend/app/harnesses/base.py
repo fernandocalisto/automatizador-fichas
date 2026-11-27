@@ -35,6 +35,9 @@ STUDIO_MCP_TOOL_NAMES: tuple[str, ...] = (
     "save_validated_json",
     "validate_and_compile_jrxml",
     "render_preview_images",
+    "list_db_tables",
+    "describe_db_table",
+    "preview_db_select",
 )
 
 
@@ -61,15 +64,20 @@ SKILL_FOLDER_BY_PHASE: dict[str, str] = {
 }
 
 
+def load_skill_markdown(skill_folder: str) -> str:
+    """Carrega o conteúdo integral do SKILL.md embutido pelo nome da pasta da skill."""
+    skill_path = SKILLS_DIR / skill_folder / "SKILL.md"
+    if not skill_path.is_file():
+        raise FileNotFoundError(f"Arquivo SKILL.md não encontrado em: {skill_path}")
+    return skill_path.read_text(encoding="utf-8")
+
+
 def load_phase_skill_markdown(phase: PhaseKind) -> str:
     """Carrega o conteúdo integral do SKILL.md embutido correspondente à fase."""
     folder = SKILL_FOLDER_BY_PHASE.get(phase)
     if not folder:
         raise ValueError(f"Fase inválida '{phase}'. Esperado: 'extraction' ou 'jrxml'.")
-    skill_path = SKILLS_DIR / folder / "SKILL.md"
-    if not skill_path.is_file():
-        raise FileNotFoundError(f"Arquivo SKILL.md não encontrado em: {skill_path}")
-    return skill_path.read_text(encoding="utf-8")
+    return load_skill_markdown(folder)
 
 
 def compose_phase_system_prompt(
@@ -77,6 +85,7 @@ def compose_phase_system_prompt(
     skill_markdown: str | None = None,
     gate_authorized: bool = False,
     workspace_dir: str | Path | None = None,
+    skill_name: str | None = None,
 ) -> str:
     """
     Compõe o System Prompt da fase combinando o SKILL.md oficial do Salutem com as travas
@@ -86,9 +95,12 @@ def compose_phase_system_prompt(
     if phase not in SKILL_FOLDER_BY_PHASE:
         raise ValueError(f"Fase inválida '{phase}'. Esperado: 'extraction' ou 'jrxml'.")
 
-    resolved_skill = (
-        skill_markdown if skill_markdown is not None else load_phase_skill_markdown(phase)
-    )
+    if skill_markdown is not None:
+        resolved_skill = skill_markdown
+    elif skill_name:
+        resolved_skill = load_skill_markdown(skill_name)
+    else:
+        resolved_skill = load_phase_skill_markdown(phase)
     ws_text = str(Path(workspace_dir).resolve()) if workspace_dir is not None else "(workspace atual)"
 
     if not gate_authorized:
@@ -362,11 +374,18 @@ class BaseSubprocessHarness:
 
     def _build_prompts(self, request: HarnessRunRequest) -> tuple[str, str]:
         """Retorna `(system_prompt, enriched_user_prompt)` para a requisição atual."""
+        extra = request.extra_context if isinstance(request.extra_context, dict) else {}
+        explicit_skill = extra.get("skill_name")
+        if not explicit_skill:
+            proj = extra.get("project")
+            if isinstance(proj, dict) and proj.get("project_kind") == "free_report":
+                explicit_skill = "manutencao_relatorio"
         system_prompt = request.system_prompt_override or compose_phase_system_prompt(
             phase=request.phase,
             skill_markdown=None,
             gate_authorized=request.gate_authorized,
             workspace_dir=request.workspace_dir,
+            skill_name=str(explicit_skill) if explicit_skill else None,
         )
         user_prompt = compose_user_prompt_with_context(request)
         return system_prompt, user_prompt

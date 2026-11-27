@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import shutil
 import time
 import zipfile
 from pathlib import Path
@@ -37,6 +38,13 @@ from backend.app.jrxml.mock_data import (
     build_offline_mock_subreports_jrxml,
     generate_fictitious_row,
     prepare_preview_jrxml,
+)
+from backend.app.jrxml.parameters import (
+    JrxmlParameterInfo,
+    coerce_report_param_value,
+    extract_jrxml_parameters,
+    extract_jrxml_query,
+    replace_jrxml_query,
 )
 from backend.app.mcp_tools.pdf_tools import crop_pdf_region_to_png, render_pdf_to_pngs
 from backend.app.services.subreport_service import SubreportService
@@ -74,12 +82,24 @@ class JasperPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     scenario: ScenarioType = "full"
-    mode: Literal["auto", "offline", "db_hybrid"] = "auto"
+    mode: Literal["auto", "offline", "db_hybrid", "db_live"] = "auto"
     db_profile_id: str | None = None
     atendimento_id: int | None = None
+    report_params: dict[str, Any] = Field(default_factory=dict)
     inline_jrxml: str | None = None
     dpi: int = Field(default=150, ge=36, le=600)
     unit_name: str = "HOSPITAL SALUTEM — AMBIENTE DE VALIDAÇÃO"
+
+
+class SyncQueryRequest(BaseModel):
+    """Payload para sincronização bidirecional entre `<queryString>` do JRXML e `sql_select`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    direction: Literal["jrxml_to_sql", "sql_to_jrxml"]
+    sql_select: str | None = None
+    inline_jrxml: str | None = None
+    save_artifact: bool = True
 
 
 class PreviewPageInfo(BaseModel):
@@ -272,19 +292,43 @@ def _ensure_offline_mock_subreports_compiled(
 
 def _resolve_preview_mode_and_db(
     *,
-    requested_mode: Literal["auto", "offline", "db_hybrid"],
+    requested_mode: Literal["auto", "offline", "db_hybrid", "db_live"],
     db_profile_id: str | None,
     requested_atendimento_id: int | None,
     postgres_service: Any | None,
-) -> tuple[Literal["offline", "db_hybrid"], dict[str, Any] | None, int, str | None]:
+) -> tuple[Literal["offline", "db_hybrid", "db_live"], dict[str, Any] | None, int, str | None]:
     """
-    Determina o modo efetivo (`"offline"` vs `"db_hybrid"`), credenciais JDBC, `atendimento_id`
-    e eventual motivo de fallback quando `requested_mode == "auto"`.
+    Determina o modo efetivo (`"offline"`, `"db_hybrid"` ou `"db_live"`), credenciais JDBC,
+    `atendimento_id` e eventual motivo de fallback quando `requested_mode == "auto"`.
     """
     default_atend_id = requested_atendimento_id if requested_atendimento_id is not None else 10042
 
     if requested_mode == "offline":
         return "offline", None, default_atend_id, None
+
+    if requested_mode == "db_live":
+        if not db_profile_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="O parâmetro 'db_profile_id' é obrigatório quando mode='db_live'.",
+            )
+        if postgres_service is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="PostgresService indisponível para execução em modo 'db_live'.",
+            )
+        try:
+            creds = postgres_service.get_jdbc_credentials(db_profile_id)
+            if not isinstance(creds, dict) or not creds.get("db_url"):
+                raise ValueError(f"Perfil PostgreSQL '{db_profile_id}' sem 'db_url' válido.")
+            return "db_live", creds, default_atend_id, None
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Falha ao obter credenciais PostgreSQL para modo 'db_live': {exc}",
+            ) from exc
 
     if requested_mode == "db_hybrid":
         if not db_profile_id:
@@ -366,25 +410,16 @@ def _execute_preview_pipeline(
     json_data = _load_optional_project_json(workspace_service, project_id)
     lint_report = lint_jrxml(jrxml_text).to_dict()
 
+    effective_db_profile_id = payload.db_profile_id or (
+        project.default_db_profile_id if payload.mode == "db_live" else None
+    )
     effective_mode, db_creds, effective_atendimento_id, fallback_reason = (
         _resolve_preview_mode_and_db(
             requested_mode=payload.mode,
-            db_profile_id=payload.db_profile_id,
+            db_profile_id=effective_db_profile_id,
             requested_atendimento_id=payload.atendimento_id,
             postgres_service=postgres_service,
         )
-    )
-
-    mock_row = generate_fictitious_row(
-        jrxml_text,
-        json_data=json_data,
-        scenario=payload.scenario,
-        atendimento_id=effective_atendimento_id,
-    )
-    rewritten_jrxml = prepare_preview_jrxml(
-        jrxml_text,
-        mode=effective_mode,
-        mock_row=mock_row,
     )
 
     ws_dir = Path(project.workspace_dir)
@@ -393,6 +428,23 @@ def _execute_preview_pipeline(
     pages_dir = exports_dir / f"pages_{payload.scenario}"
     for d in (exports_dir, build_dir, pages_dir):
         d.mkdir(parents=True, exist_ok=True)
+
+    mock_row: dict[str, Any] | None = None
+    if effective_mode == "db_live":
+        # Modo Live: preserva o JRXML e sua <queryString> originais sem reescrita CTE
+        rewritten_jrxml = jrxml_text
+    else:
+        mock_row = generate_fictitious_row(
+            jrxml_text,
+            json_data=json_data,
+            scenario=payload.scenario,
+            atendimento_id=effective_atendimento_id,
+        )
+        rewritten_jrxml = prepare_preview_jrxml(
+            jrxml_text,
+            mode=effective_mode,
+            mock_row=mock_row,
+        )
 
     preview_jrxml_path = build_dir / f"preview_{payload.scenario}_{effective_mode}.jrxml"
     preview_jrxml_path.write_text(rewritten_jrxml, encoding="utf-8")
@@ -406,17 +458,54 @@ def _execute_preview_pipeline(
         caminho_relatorio = mock_runtime_dir.resolve().as_posix().rstrip("/") + "/"
     else:
         real_runtime_dir = subreport_service.materialize_runtime_dir()
-        subreport_dir = str(real_runtime_dir.resolve())
-        caminho_relatorio = subreport_service.get_caminho_relatorio()
+        unit_resources_dir = ws_dir / "report_unit_resources"
+        if unit_resources_dir.is_dir() and any(unit_resources_dir.iterdir()):
+            merged_subreports_dir = build_dir / "_subreports"
+            merged_subreports_dir.mkdir(parents=True, exist_ok=True)
+            for src_dir in (real_runtime_dir, unit_resources_dir):
+                for item in src_dir.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, merged_subreports_dir / item.name)
+            subreport_dir = str(merged_subreports_dir.resolve())
+            caminho_relatorio = merged_subreports_dir.resolve().as_posix().rstrip("/") + "/"
+        else:
+            subreport_dir = str(real_runtime_dir.resolve())
+            caminho_relatorio = subreport_service.get_caminho_relatorio()
 
     pdf_output_path = exports_dir / f"preview_{payload.scenario}.pdf"
-    params: dict[str, Any] = {
-        "id": int(effective_atendimento_id),
-        "caminho_relatorio": caminho_relatorio,
-    }
+    if effective_mode == "db_live":
+        declared_params = {
+            p.name: p for p in extract_jrxml_parameters(jrxml_text)
+        }
+        params: dict[str, Any] = {
+            "caminho_relatorio": caminho_relatorio,
+            "SUBREPORT_DIR": caminho_relatorio,
+        }
+        if payload.atendimento_id is not None and "id" not in payload.report_params:
+            params["id"] = int(payload.atendimento_id)
+        for p_name, raw_val in (payload.report_params or {}).items():
+            coerced = coerce_report_param_value(raw_val, declared_params.get(p_name))
+            if coerced is not None:
+                params[p_name] = coerced
+    else:
+        params = {
+            "id": int(effective_atendimento_id),
+            "caminho_relatorio": caminho_relatorio,
+        }
+        if payload.report_params:
+            declared_params = {
+                p.name: p for p in extract_jrxml_parameters(jrxml_text)
+            }
+            for p_name, raw_val in payload.report_params.items():
+                if p_name in params:
+                    continue
+                coerced = coerce_report_param_value(raw_val, declared_params.get(p_name))
+                if coerced is not None:
+                    params[p_name] = coerced
 
     try:
         if effective_mode == "offline":
+            assert mock_row is not None
             daemon_res = jasper_daemon.export_pdf(
                 str(preview_jrxml_path),
                 str(pdf_output_path),
@@ -540,6 +629,103 @@ def _resolve_active_scenario(exports_dir: Path, scenario: ScenarioType | None) -
 # -----------------------------------------------------------------------------
 # Rotas FastAPI
 # -----------------------------------------------------------------------------
+
+
+@router.get("/{project_id}/jasper/parameters")
+def get_project_jasper_parameters(
+    project_id: str,
+    workspace_service: WorkspaceSvcDep,
+) -> dict[str, Any]:
+    """Extrai os `<parameter>` declarados e a `<queryString>` do `.jrxml` atual do projeto."""
+    try:
+        project = workspace_service.get_project(project_id)
+        jrxml_text = _resolve_jrxml_source(workspace_service, project_id, None)
+        params: list[JrxmlParameterInfo] = extract_jrxml_parameters(jrxml_text)
+        query_text = extract_jrxml_query(jrxml_text)
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
+
+    return {
+        "project_id": project.id,
+        "parameters": [p.model_dump() for p in params],
+        "query": query_text,
+    }
+
+
+@router.post("/{project_id}/jasper/sync-query")
+def sync_project_jasper_query(
+    project_id: str,
+    payload: SyncQueryRequest,
+    workspace_service: WorkspaceSvcDep,
+) -> dict[str, Any]:
+    """
+    Sincroniza bidirecionalmente a `<queryString>` do `.jrxml` com o artefato `sql_select`:
+    - `jrxml_to_sql`: extrai `<queryString>` do `.jrxml` e salva como nova revisão `sql_select`.
+    - `sql_to_jrxml`: aplica `sql_select` dentro de `<queryString>` e salva nova revisão `jrxml`.
+    """
+    try:
+        project = workspace_service.get_project(project_id)
+        jrxml_text = _resolve_jrxml_source(workspace_service, project_id, payload.inline_jrxml)
+
+        if payload.direction == "jrxml_to_sql":
+            extracted_sql = extract_jrxml_query(jrxml_text)
+            if not extracted_sql:
+                raise WorkspaceValidationError(
+                    "O arquivo .jrxml atual não possui uma tag <queryString> com consulta SQL."
+                )
+            saved_rev = None
+            if payload.save_artifact:
+                save_res = workspace_service.save_artifact(
+                    project.id,
+                    "sql_select",
+                    extracted_sql,
+                    summary="Extraído da tag <queryString> do JRXML",
+                    created_by="user",
+                )
+                saved_rev = save_res.artifact.model_dump(mode="json")
+            return {
+                "ok": True,
+                "project_id": project.id,
+                "direction": "jrxml_to_sql",
+                "sql_select": extracted_sql,
+                "saved_revision": saved_rev,
+            }
+
+        # sql_to_jrxml
+        if payload.sql_select is not None:
+            target_sql = payload.sql_select.strip()
+        else:
+            target_sql = workspace_service.get_latest_artifact(project.id, "sql_select").content.strip()
+
+        if not target_sql:
+            raise WorkspaceValidationError(
+                "Consulta SQL SELECT vazia; informe 'sql_select' ou salve um artefato 'sql_select' antes de aplicar."
+            )
+
+        updated_jrxml = replace_jrxml_query(jrxml_text, target_sql)
+        saved_rev = None
+        if payload.save_artifact:
+            save_res = workspace_service.save_artifact(
+                project.id,
+                "jrxml",
+                updated_jrxml,
+                summary="Tag <queryString> atualizada a partir do SQL Workbench",
+                created_by="user",
+            )
+            saved_rev = save_res.artifact.model_dump(mode="json")
+
+        return {
+            "ok": True,
+            "project_id": project.id,
+            "direction": "sql_to_jrxml",
+            "sql_select": target_sql,
+            "jrxml": updated_jrxml,
+            "saved_revision": saved_rev,
+        }
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
 
 
 @router.post("/{project_id}/jasper/compile")
@@ -848,15 +1034,17 @@ def export_salutem_delivery_bundle(
     jasper_daemon: JasperDaemonDep,
     postgres_service: PostgresSvcDep,
     scenario: ScenarioType = Query(default="full"),
-    mode: Literal["auto", "offline", "db_hybrid"] = Query(default="auto"),
+    mode: Literal["auto", "offline", "db_hybrid", "db_live"] = Query(default="auto"),
     db_profile_id: str | None = Query(default=None),
 ) -> FileResponse:
     """
     Gera e transmite o pacote final `<slug>_entrega_salutem.zip` contendo:
       1. `<slug>.jrxml` (limpo, com `$P{REPORT_CONNECTION}` e `<queryString>` originais intactos)
       2. `<slug>_relatorio_ficticio.pdf`
-      3. `<slug>_insert_template.sql`
+      3. `<slug>_insert_template.sql` (para fichas clínicas) ou `<slug>_select.sql` (para relatórios livres)
     """
+    sql_insert_content: str | None = None
+    sql_select_content: str | None = None
     try:
         project = workspace_service.get_project(project_id)
         clean_jrxml = workspace_service.get_latest_artifact(project_id, "jrxml").content
@@ -866,13 +1054,21 @@ def export_salutem_delivery_bundle(
                 project_id, "sql_insert"
             ).content
         except ArtifactNotFoundError:
-            json_rev = workspace_service.get_latest_artifact(project_id, "json")
-            parsed_json = parse_and_validate_clinical_json(
-                json_rev.content,
-                require_clinical_structure=True,
-                apply_uppercase=True,
-            )
-            sql_insert_content = generate_insert_sql(parsed_json)
+            if project.project_kind == "free_report":
+                try:
+                    sql_select_content = workspace_service.get_latest_artifact(
+                        project_id, "sql_select"
+                    ).content
+                except ArtifactNotFoundError:
+                    sql_select_content = extract_jrxml_query(clean_jrxml) or None
+            else:
+                json_rev = workspace_service.get_latest_artifact(project_id, "json")
+                parsed_json = parse_and_validate_clinical_json(
+                    json_rev.content,
+                    require_clinical_structure=True,
+                    apply_uppercase=True,
+                )
+                sql_insert_content = generate_insert_sql(parsed_json)
     except Exception as exc:
         _raise_http_for_workspace_error(exc)
         raise
@@ -900,16 +1096,24 @@ def export_salutem_delivery_bundle(
     bundle_path = exports_dir / bundle_filename
 
     jrxml_entry = clean_jrxml if clean_jrxml.endswith("\n") else clean_jrxml + "\n"
-    sql_entry = (
-        sql_insert_content
-        if sql_insert_content.endswith("\n")
-        else sql_insert_content + "\n"
-    )
 
     with zipfile.ZipFile(bundle_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{slug}.jrxml", jrxml_entry.encode("utf-8"))
         zf.writestr(f"{slug}_relatorio_ficticio.pdf", pdf_path.read_bytes())
-        zf.writestr(f"{slug}_insert_template.sql", sql_entry.encode("utf-8"))
+        if sql_insert_content is not None:
+            sql_entry = (
+                sql_insert_content
+                if sql_insert_content.endswith("\n")
+                else sql_insert_content + "\n"
+            )
+            zf.writestr(f"{slug}_insert_template.sql", sql_entry.encode("utf-8"))
+        elif sql_select_content:
+            sel_entry = (
+                sql_select_content
+                if sql_select_content.endswith("\n")
+                else sql_select_content + "\n"
+            )
+            zf.writestr(f"{slug}_select.sql", sel_entry.encode("utf-8"))
 
     return FileResponse(
         path=str(bundle_path),
@@ -923,6 +1127,7 @@ __all__ = [
     "JasperCompileRequest",
     "JasperPreviewRequest",
     "PreviewPageInfo",
+    "SyncQueryRequest",
     "get_jasper_daemon",
     "get_jasper_daemon_dep",
     "get_postgres_service",

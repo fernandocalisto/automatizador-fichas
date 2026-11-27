@@ -87,6 +87,11 @@ export const PREVIEW_MODE_OPTIONS: {
     label: "Banco Híbrido (CTE)",
     description: "Consulta cabeçalho/paciente reais no PostgreSQL + CTE mock.",
   },
+  {
+    id: "db_live",
+    label: "Live (Banco Real)",
+    description: "Executa a query original do relatório direto no PostgreSQL com os parâmetros $P{}.",
+  },
 ];
 
 export const ZOOM_PRESETS: { value: ZoomPreset; label: string }[] = [

@@ -9,6 +9,13 @@ from .artifact_tools import (
     save_validated_json,
     validate_and_compile_jrxml,
 )
+from .db_tools import (
+    DB_TOOL_DEFINITIONS,
+    DB_TOOL_HANDLERS,
+    describe_db_table,
+    list_db_tables,
+    preview_db_select,
+)
 from .pdf_tools import (
     SALUTEM_BOTTOM_MARGIN,
     SALUTEM_LEFT_MARGIN,
@@ -39,6 +46,8 @@ from .studio_tools import (
 
 __all__ = [
     "CroppedRegionPath",
+    "DB_TOOL_DEFINITIONS",
+    "DB_TOOL_HANDLERS",
     "LEGACY_STUDIO_TOOL_NAMES",
     "SALUTEM_BOTTOM_MARGIN",
     "SALUTEM_LEFT_MARGIN",
@@ -52,6 +61,7 @@ __all__ = [
     "StudioMcpServer",
     "crop_pdf_feedback_region",
     "crop_pdf_region_to_png",
+    "describe_db_table",
     "dispatch_studio_tool",
     "extract_pdf_geometry",
     "get_all_mcp_tool_descriptors",
@@ -60,7 +70,9 @@ __all__ = [
     "get_salutem_skill",
     "get_sdk_tool_callables",
     "inspect_clinical_pdf",
+    "list_db_tables",
     "map_pdf_rect_to_detail_band",
+    "preview_db_select",
     "render_pdf_preview_pages",
     "render_pdf_to_pngs",
     "render_preview_images",

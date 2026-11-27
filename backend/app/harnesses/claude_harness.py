@@ -150,6 +150,8 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
             cmd.extend(["--permission-mode", "plan"])
         if mcp_config_path is not None:
             cmd.extend(["--mcp-config", str(mcp_config_path.resolve())])
+        if request.resume_session_id:
+            cmd.extend(["--resume", request.resume_session_id])
         if request.model:
             cmd.extend(["--model", request.model])
         return cmd
@@ -180,6 +182,10 @@ class ClaudeCodeHarness(BaseSubprocessHarness):
 
         events: list[HarnessEvent] = []
         ev_type = str(obj.get("type") or "")
+
+        if ev_type == "system" and obj.get("session_id"):
+            state["session_id"] = obj.get("session_id")
+            return events
 
         if ev_type == "assistant":
             message = obj.get("message") or {}

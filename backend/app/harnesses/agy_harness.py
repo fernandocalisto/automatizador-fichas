@@ -148,9 +148,18 @@ class AgyHarness(BaseSubprocessHarness):
 
         config = config_cls(**cfg_kwargs)
 
+        sdk_session_id: str | None = None
         async with asyncio.timeout(request.timeout_seconds):
             async with agent_cls(config) as agent:
                 response = await agent.chat(user_prompt)
+                raw_sid = (
+                    getattr(response, "conversation_id", None)
+                    or getattr(response, "session_id", None)
+                    or getattr(agent, "conversation_id", None)
+                    or getattr(agent, "session_id", None)
+                )
+                if raw_sid:
+                    sdk_session_id = str(raw_sid)
 
                 queue: asyncio.Queue[HarnessEvent | BaseException | None] = asyncio.Queue()
 
@@ -236,10 +245,14 @@ class AgyHarness(BaseSubprocessHarness):
         gate_ev = self._make_gate_event_if_needed(request)
         if gate_ev is not None:
             yield gate_ev
+        sdk_meta: dict[str, Any] = {"mode": "sdk"}
+        if sdk_session_id:
+            sdk_meta["session_id"] = sdk_session_id
+            sdk_meta["conversation_id"] = sdk_session_id
         yield HarnessEvent(
             type=EventType.DONE,
             harness=self.kind,
-            metadata={"mode": "sdk"},
+            metadata=sdk_meta,
         )
 
     @staticmethod
@@ -317,6 +330,8 @@ class AgyHarness(BaseSubprocessHarness):
         ]
         if self._dangerously_skip_permissions:
             cmd.append("--dangerously-skip-permissions")
+        if request.resume_session_id:
+            cmd.extend(["--conversation", request.resume_session_id])
         if request.model:
             cmd.extend(["--model", request.model])
         if request.timeout_seconds and request.timeout_seconds > 0:
@@ -727,6 +742,7 @@ class AgyHarness(BaseSubprocessHarness):
             done_meta: dict[str, Any] = {"mode": "cli"}
             if parse_state.get("conversation_id"):
                 done_meta["conversation_id"] = parse_state["conversation_id"]
+                done_meta["session_id"] = parse_state["conversation_id"]
             if parse_state.get("usage"):
                 done_meta["usage"] = parse_state["usage"]
             yield HarnessEvent(

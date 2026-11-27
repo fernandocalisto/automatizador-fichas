@@ -1,5 +1,6 @@
 import { ApiError } from "@/lib/api";
 import type {
+  AgentSessionRead,
   ChatMessageRead,
   ChatPhase,
   ChatRole,
@@ -34,6 +35,7 @@ export interface AgentStatusResponse {
   preferred_harness: string;
   harnesses: HarnessStatus[];
   gates: GateApprovalRead[];
+  sessions?: AgentSessionRead[];
   pending_visual_feedback_count: number;
 }
 
@@ -400,6 +402,38 @@ export async function cancelAgentRun(
     throw await parseErrorResponse(response);
   }
   return (await response.json()) as CancelAgentResponse;
+}
+
+export async function fetchAgentSessions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<AgentSessionRead[]> {
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/agent/sessions`,
+    { signal },
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(response);
+  }
+  return (await response.json()) as AgentSessionRead[];
+}
+
+export async function resetAgentSession(
+  projectId: string,
+  opts?: { phase?: ChatPhase; harnessId?: string },
+): Promise<{ ok: boolean; deleted: number }> {
+  const params = new URLSearchParams();
+  if (opts?.phase) params.set("phase", opts.phase);
+  if (opts?.harnessId) params.set("harness_id", opts.harnessId);
+  const qs = params.toString();
+  const response = await fetch(
+    `/api/projects/${encodeURIComponent(projectId)}/agent/session${qs ? `?${qs}` : ""}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    throw await parseErrorResponse(response);
+  }
+  return (await response.json()) as { ok: boolean; deleted: number };
 }
 
 export function isAbortError(err: unknown): boolean {

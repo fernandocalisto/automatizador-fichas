@@ -89,3 +89,4 @@ class HarnessRunRequest(BaseModel):
     extra_context: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: float = 300.0
     system_prompt_override: str | None = None
+    resume_session_id: str | None = None

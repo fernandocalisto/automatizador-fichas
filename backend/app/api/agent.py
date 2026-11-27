@@ -8,12 +8,12 @@ import contextlib
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.requests import HTTPConnection
 
-from backend.app.db.schemas import ChatMessageRead, GateApprovalRead
+from backend.app.db.schemas import AgentSessionRead, ChatMessageRead, ChatPhase, GateApprovalRead
 from backend.app.harnesses import EventType, HarnessEvent, PhaseKind, get_default_registry
 from backend.app.services.agent_orchestrator import (
     AgentOrchestratorService,
@@ -198,6 +198,45 @@ def cancel_project_agent(
     try:
         cancelled = orchestrator.cancel_run(project_id)
         return CancelAgentResponse(ok=True, cancelled=cancelled)
+    except Exception as exc:
+        _raise_http_for_agent_error(exc)
+        raise
+
+
+@router.get("/{project_id}/agent/sessions", response_model=list[AgentSessionRead])
+def list_project_agent_sessions(
+    project_id: str,
+    orchestrator: AgentOrchestratorDep,
+) -> list[AgentSessionRead]:
+    """Lista todas as sessões persistidas dos harnesses de IA para o projeto."""
+    try:
+        return orchestrator.list_sessions(project_id)
+    except Exception as exc:
+        _raise_http_for_agent_error(exc)
+        raise
+
+
+@router.delete("/{project_id}/agent/session")
+def reset_project_agent_session(
+    project_id: str,
+    orchestrator: AgentOrchestratorDep,
+    phase: ChatPhase | None = Query(default=None),
+    harness_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """Remove sessão(ões) persistida(s) para iniciar uma nova conversa limpa no harness."""
+    try:
+        deleted = orchestrator.reset_session(
+            project_id,
+            phase=phase,
+            harness_id=harness_id,
+        )
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "phase": phase,
+            "harness_id": harness_id,
+            "deleted": deleted,
+        }
     except Exception as exc:
         _raise_http_for_agent_error(exc)
         raise

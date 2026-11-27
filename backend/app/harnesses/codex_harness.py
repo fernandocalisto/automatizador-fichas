@@ -83,15 +83,18 @@ class CodexHarness(BaseSubprocessHarness):
         )
 
     def build_command(self, executable: str, request: HarnessRunRequest) -> list[str]:
-        """Constrói o comando `codex exec --json --skip-git-repo-check -C <workspace_dir>`."""
-        cmd = [
-            executable,
-            "exec",
-            "--json",
-            "-C",
-            str(request.workspace_dir.resolve()),
-            "--skip-git-repo-check",
-        ]
+        """Constrói o comando `codex exec [resume <id>] --json --skip-git-repo-check -C <workspace_dir>`."""
+        cmd = [executable, "exec"]
+        if request.resume_session_id:
+            cmd.extend(["resume", request.resume_session_id])
+        cmd.extend(
+            [
+                "--json",
+                "-C",
+                str(request.workspace_dir.resolve()),
+                "--skip-git-repo-check",
+            ]
+        )
         if request.gate_authorized:
             if self._dangerously_skip_permissions:
                 cmd.append("--dangerously-bypass-approvals-and-sandbox")
@@ -401,6 +404,7 @@ class CodexHarness(BaseSubprocessHarness):
                 done_meta: dict[str, Any] = {"mode": "cli"}
                 if state.get("thread_id"):
                     done_meta["thread_id"] = state["thread_id"]
+                    done_meta["session_id"] = state["thread_id"]
                 if state.get("usage"):
                     done_meta["usage"] = state["usage"]
                 yield HarnessEvent(

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, CloudDownload, Server } from "lucide-react";
 import {
   Badge,
@@ -6,7 +6,7 @@ import {
   EmptyState,
   FieldLabel,
   Input,
-  Select,
+  SearchableSelect,
   Switch,
   useToast,
 } from "@/components/ui";
@@ -90,6 +90,29 @@ export function JasperServerImportTab({
   const activeProfile =
     profiles.find((p) => p.id === selectedProfileId) || null;
 
+  const profileOptions = useMemo(
+    () =>
+      profiles.map((p) => ({
+        value: p.id,
+        label: p.name,
+        sublabel: p.base_url,
+        badge: p.environment,
+        keywords: `${p.organization} ${p.username}`,
+      })),
+    [profiles],
+  );
+
+  const dbOptions = useMemo(
+    () =>
+      dbProfiles.map((db) => ({
+        value: db.id,
+        label: db.name,
+        sublabel: `${db.host}:${db.port}/${db.dbname || "—"}`,
+        badge: db.environment || undefined,
+      })),
+    [dbProfiles],
+  );
+
   const handleProfileChange = (nextId: string) => {
     setSelectedProfileId(nextId);
     setSelectedResource(null);
@@ -171,35 +194,34 @@ export function JasperServerImportTab({
           <FieldLabel htmlFor="js-import-profile">
             Servidor JasperReports *
           </FieldLabel>
-          <Select
+          <SearchableSelect
             id="js-import-profile"
+            ariaLabel="Servidor JasperReports"
             value={selectedProfileId}
-            onChange={(e) => handleProfileChange(e.target.value)}
-          >
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.environment}) — {p.base_url}
-              </option>
-            ))}
-          </Select>
+            onChange={handleProfileChange}
+            options={profileOptions}
+            placeholder="Selecionar servidor JasperReports..."
+            searchPlaceholder="Buscar por nome, URL ou ambiente..."
+            emptyLabel="Nenhum servidor encontrado."
+          />
         </div>
 
         <div>
           <FieldLabel htmlFor="js-import-db">
             Banco PostgreSQL vinculado (opcional)
           </FieldLabel>
-          <Select
+          <SearchableSelect
             id="js-import-db"
+            ariaLabel="Banco PostgreSQL vinculado"
             value={selectedDbProfileId}
-            onChange={(e) => setSelectedDbProfileId(e.target.value)}
-          >
-            <option value="">Sem vínculo padrão</option>
-            {dbProfiles.map((db) => (
-              <option key={db.id} value={db.id}>
-                {db.name} ({db.host}/{db.dbname || "—"})
-              </option>
-            ))}
-          </Select>
+            onChange={setSelectedDbProfileId}
+            options={dbOptions}
+            placeholder="Sem vínculo padrão"
+            searchPlaceholder="Buscar banco por nome ou host..."
+            emptyLabel="Nenhum banco encontrado."
+            allowClear
+            clearLabel="Sem vínculo padrão"
+          />
         </div>
       </div>
 

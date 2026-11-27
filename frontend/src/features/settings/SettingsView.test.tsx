@@ -324,7 +324,7 @@ describe("SettingsView", () => {
 
     // Harnesses & Skills tab
     await user.click(
-      screen.getByRole("tab", { name: /Harnesses & Skills/i }),
+      screen.getByRole("tab", { name: /Assistentes IA \(Harnesses\)/i }),
     );
     await waitFor(() => {
       expect(screen.getByText("Antigravity (AGY)")).toBeInTheDocument();
@@ -338,7 +338,7 @@ describe("SettingsView", () => {
 
     // Studio Preferences tab
     await user.click(
-      screen.getByRole("tab", { name: /Preferências do Studio/i }),
+      screen.getByRole("tab", { name: /^Preferências$/i }),
     );
     const unitInput = await screen.findByLabelText(
       /Nome padrão da unidade de saúde/i,
@@ -364,6 +364,74 @@ describe("SettingsView", () => {
           default_preview_dpi: 150,
         }),
       );
+    });
+  });
+
+  it("renders categorized sidebar groups and filters/paginates PostgreSQL profiles", async () => {
+    const user = userEvent.setup();
+    const manyProfiles: DbProfileRead[] = Array.from({ length: 28 }, (_, idx) => ({
+      id: `pg-${idx + 1}`,
+      name: idx === 0 ? "Hospital PRD Central" : `Unidade HML ${idx + 1}`,
+      host: `10.0.0.${idx + 1}`,
+      port: 5432,
+      dbname: idx === 0 ? "salutem_prd" : `salutem_hml_${idx + 1}`,
+      user: "postgres",
+      sslmode: "prefer",
+      environment: idx === 0 ? "PRD" : "HML",
+      read_only: idx === 0,
+      is_default: idx === 0,
+      has_password: true,
+      created_at: "2026-03-01T10:00:00Z",
+      updated_at: "2026-03-01T10:00:00Z",
+    }));
+
+    vi.spyOn(api, "listDbProfiles").mockResolvedValue(manyProfiles);
+    vi.spyOn(api, "listSubreports").mockResolvedValue(SAMPLE_SUBREPORTS);
+    vi.spyOn(api, "listHarnesses").mockResolvedValue(SAMPLE_HARNESSES);
+    vi.spyOn(api, "listSkills").mockResolvedValue(SAMPLE_SKILLS);
+    vi.spyOn(api, "getSettings").mockResolvedValue({});
+
+    render(
+      <ToastProvider>
+        <SettingsView />
+      </ToastProvider>,
+    );
+
+    // Categorized sidebar groups visible
+    expect(screen.getByText("Acesso & Cofre")).toBeInTheDocument();
+    expect(screen.getByText("Conexões")).toBeInTheDocument();
+    expect(screen.getByText("Studio & IA")).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("Hospital PRD Central")).toBeInTheDocument();
+      expect(screen.getByText(/Mostrando 1–25 de 28 perfis/i)).toBeInTheDocument();
+    });
+
+    // Go to page 2
+    await user.click(screen.getByRole("button", { name: /Próxima/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Unidade HML 28")).toBeInTheDocument();
+    });
+
+    // Filter by PRD pill
+    const envGroup = screen.getByRole("group", {
+      name: /Filtrar PostgreSQL por ambiente/i,
+    });
+    await user.click(within(envGroup).getByRole("button", { name: /PRD/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Hospital PRD Central")).toBeInTheDocument();
+      expect(screen.queryByText("Unidade HML 28")).not.toBeInTheDocument();
+    });
+
+    // Search by dbname
+    await user.click(within(envGroup).getByRole("button", { name: /Todos/i }));
+    await user.type(
+      screen.getByLabelText(/Buscar perfis PostgreSQL/i),
+      "salutem_hml_28",
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Unidade HML 28")).toBeInTheDocument();
+      expect(screen.queryByText("Hospital PRD Central")).not.toBeInTheDocument();
     });
   });
 });

@@ -37,6 +37,8 @@ class DefaultCredentialRead(BaseModel):
     default_dbname_ambulatorial: str = ""
     default_dbname_hospitalar: str = ""
     default_remote_base_dir: str = "/"
+    private_key_filename: str = ""
+    private_key_path: str = ""
     has_password: bool = False
     has_private_key: bool = False
     has_passphrase: bool = False
@@ -56,6 +58,8 @@ class DefaultCredentialUpdate(BaseModel):
     default_dbname_ambulatorial: str | None = Field(default=None, max_length=128)
     default_dbname_hospitalar: str | None = Field(default=None, max_length=128)
     default_remote_base_dir: str | None = Field(default=None, max_length=512)
+    private_key_filename: str | None = Field(default=None, max_length=255)
+    private_key_path: str | None = Field(default=None, max_length=1024)
     password: str | None = Field(default=None, repr=False)
     private_key: str | None = Field(default=None, repr=False)
     passphrase: str | None = Field(default=None, repr=False)
@@ -93,8 +97,15 @@ class DefaultCredentialsService:
         """Return redacted metadata and secret presence flags for `kind`."""
         meta = self._load_meta_map().get(kind, {})
         has_password = self.vault.has_secret(self._secret_account(kind, "password"))
+        private_key_filename = (
+            str(meta.get("private_key_filename") or "").strip() if kind == "sftp" else ""
+        )
+        private_key_path = (
+            str(meta.get("private_key_path") or "").strip() if kind == "sftp" else ""
+        )
         has_private_key = (
             self.vault.has_secret(self._secret_account(kind, "private_key"))
+            or bool(private_key_path)
             if kind == "sftp"
             else False
         )
@@ -116,6 +127,8 @@ class DefaultCredentialsService:
             default_dbname_ambulatorial=str(meta.get("default_dbname_ambulatorial") or "").strip(),
             default_dbname_hospitalar=str(meta.get("default_dbname_hospitalar") or "").strip(),
             default_remote_base_dir=str(meta.get("default_remote_base_dir") or "/").strip() or "/",
+            private_key_filename=private_key_filename,
+            private_key_path=private_key_path,
             has_password=has_password,
             has_private_key=has_private_key,
             has_passphrase=has_passphrase,
@@ -144,6 +157,8 @@ class DefaultCredentialsService:
             account = self._secret_account(kind, secret_field)
             if raw_val == "":
                 self.vault.delete_secret(account)
+                if secret_field == "private_key" and "private_key_filename" not in fields:
+                    fields["private_key_filename"] = ""
             else:
                 self.vault.set_secret(account, raw_val)
 
@@ -157,6 +172,8 @@ class DefaultCredentialsService:
             "default_dbname_ambulatorial",
             "default_dbname_hospitalar",
             "default_remote_base_dir",
+            "private_key_filename",
+            "private_key_path",
         ):
             if key in fields and fields[key] is not None:
                 current[key] = str(fields[key]).strip()
@@ -218,8 +235,10 @@ class DefaultCredentialsService:
         custom_user: str = "",
         custom_auth_type: str = "password",
         custom_remote_base_dir: str = "/",
+        custom_private_key_filename: str = "",
+        custom_private_key_path: str = "",
     ) -> dict[str, Any]:
-        """Resolve effective SFTP credentials (`username`, `auth_type`, `password`, `private_key`, `passphrase`, `remote_base_dir`)."""
+        """Resolve effective SFTP credentials (`username`, `auth_type`, `password`, `private_key`, `private_key_filename`, `private_key_path`, `passphrase`, `remote_base_dir`)."""
         mode = "default" if credential_mode == "default" else "custom"
         defaults = self.get_default("sftp")
 
@@ -233,6 +252,8 @@ class DefaultCredentialsService:
                 "auth_type": defaults.auth_type,
                 "password": self.vault.get_secret(self._secret_account("sftp", "password")),
                 "private_key": self.vault.get_secret(self._secret_account("sftp", "private_key")),
+                "private_key_filename": defaults.private_key_filename,
+                "private_key_path": defaults.private_key_path,
                 "passphrase": self.vault.get_secret(self._secret_account("sftp", "passphrase")),
                 "remote_base_dir": remote_base_dir,
             }
@@ -242,6 +263,8 @@ class DefaultCredentialsService:
             "auth_type": "private_key" if custom_auth_type == "private_key" else "password",
             "password": self.vault.get_secret(f"sftp_password:{profile_id}"),
             "private_key": self.vault.get_secret(f"sftp_key:{profile_id}"),
+            "private_key_filename": (custom_private_key_filename or "").strip(),
+            "private_key_path": (custom_private_key_path or "").strip(),
             "passphrase": self.vault.get_secret(f"sftp_passphrase:{profile_id}"),
             "remote_base_dir": remote_base_dir,
         }

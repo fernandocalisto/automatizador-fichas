@@ -29,11 +29,14 @@ from backend.app.services.jasper_daemon import JasperDaemonError
 from backend.app.services.secret_vault import SecretVaultService
 from backend.app.services.sftp_service import (
     ReadOnlySftpProfileError,
+    SftpConnectionError,
     SftpDeployTokenError,
     SftpProfileCreate,
     SftpProfileUpdate,
     SftpService,
     SftpValidationError,
+    _load_paramiko_pkey,
+    _resolve_private_key_text,
     resolve_safe_remote_path,
 )
 from backend.app.services.workspace_service import WorkspaceService
@@ -917,3 +920,262 @@ def test_fastapi_sftp_endpoints_end_to_end(isolated_env: dict[str, Any]) -> None
     assert del_res.status_code == 200
     assert del_res.json()["deleted"] == hml_id
     assert client.get(f"/api/sftp/profiles/{hml_id}").status_code == 404
+
+
+# =============================================================================
+# Tests: SSH `.key` File Upload (Vault + Filename) & Local `.key` Path Support
+# =============================================================================
+
+
+def _generate_synthetic_keys() -> dict[str, str]:
+    """Generate real ephemeral RSA (PEM), Ed25519 (OpenSSH), and ECDSA (PEM) keys in memory."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
+
+    rsa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    rsa_pem = rsa_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+
+    ed_key = ed25519.Ed25519PrivateKey.generate()
+    ed_openssh = ed_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.OpenSSH,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+
+    ec_key = ec.generate_private_key(ec.SECP256R1())
+    ec_pem = ec_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode("utf-8")
+
+    return {
+        "rsa_pem": rsa_pem,
+        "ed25519_openssh": ed_openssh,
+        "ecdsa_pem": ec_pem,
+    }
+
+
+def test_load_paramiko_pkey_supports_openssh_rsa_ed25519_ecdsa_and_crlf() -> None:
+    keys = _generate_synthetic_keys()
+
+    # OpenSSH Ed25519 (with Windows CRLF + UTF-8 BOM)
+    ed_crlf = "\ufeff" + keys["ed25519_openssh"].replace("\n", "\r\n")
+    loaded_ed = _load_paramiko_pkey(ed_crlf)
+    assert loaded_ed.get_name() == "ssh-ed25519"
+
+    # Traditional RSA PEM
+    loaded_rsa = _load_paramiko_pkey(keys["rsa_pem"])
+    assert loaded_rsa.get_name() == "ssh-rsa"
+
+    # ECDSA PEM
+    loaded_ec = _load_paramiko_pkey(keys["ecdsa_pem"])
+    assert "ecdsa" in loaded_ec.get_name()
+
+
+def test_sftp_profile_idempotent_migration_adds_key_columns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_keyring(*_args: Any, **_kwargs: Any) -> Any:
+        raise KeyringError("headless test keyring disabled")
+
+    monkeypatch.setattr(secret_vault_mod.keyring, "set_password", _fail_keyring)
+    monkeypatch.setattr(secret_vault_mod.keyring, "get_password", _fail_keyring)
+    monkeypatch.setattr(secret_vault_mod.keyring, "delete_password", _fail_keyring)
+    monkeypatch.setenv("FICHA_STUDIO_VAULT_KEY", "test-only-sftp-migration-key-12345")
+
+    store = SQLiteStore(tmp_path / "legacy_sftp.db")
+    # Create legacy sftp_profiles table without private_key_filename / private_key_path
+    with store.connection() as conn:
+        conn.execute(
+            """
+            CREATE TABLE sftp_profiles (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                username TEXT NOT NULL DEFAULT '',
+                auth_type TEXT NOT NULL DEFAULT 'password',
+                credential_mode TEXT NOT NULL DEFAULT 'custom',
+                remote_base_dir TEXT NOT NULL DEFAULT '/',
+                environment TEXT NOT NULL DEFAULT 'HML',
+                read_only INTEGER NOT NULL DEFAULT 1,
+                linked_db_profile_id TEXT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO sftp_profiles (
+                id, name, host, port, username, auth_type, credential_mode,
+                remote_base_dir, environment, read_only, linked_db_profile_id,
+                created_at, updated_at
+            ) VALUES (
+                'legacy-1', 'Legacy SFTP', '10.0.0.5', 22, 'ops', 'password', 'custom',
+                '/', 'HML', 0, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'
+            )
+            """
+        )
+
+    vault = SecretVaultService(vault_path=tmp_path / ".vault_mig.json")
+    sftp = SftpService(store=store, vault=vault)
+    profiles = sftp.list_profiles()
+    assert len(profiles) == 1
+    assert profiles[0].id == "legacy-1"
+    assert profiles[0].private_key_filename == ""
+    assert profiles[0].private_key_path == ""
+
+    # Second initialization is idempotent
+    sftp2 = SftpService(store=store, vault=vault)
+    assert len(sftp2.list_profiles()) == 1
+
+
+def test_sftp_key_file_upload_and_local_path_for_profile_and_default(
+    isolated_env: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path: Path = isolated_env["tmp_path"]
+    store: SQLiteStore = isolated_env["store"]
+    vault: SecretVaultService = isolated_env["vault"]
+    default_creds: DefaultCredentialsService = isolated_env["default_creds"]
+    fake_fs: FakeSftpClient = isolated_env["fake_fs"]
+    client: TestClient = isolated_env["client"]
+
+    keys = _generate_synthetic_keys()
+    ed_key_file = tmp_path / "unidade_default.key"
+    ed_key_file.write_text(keys["ed25519_openssh"], encoding="utf-8")
+
+    rsa_key_file = tmp_path / "perfil_custom.key"
+    rsa_key_file.write_text(keys["rsa_pem"], encoding="utf-8")
+
+    # 1. Per-profile upload via HTTP API (vault + private_key_filename)
+    res_upload = client.post(
+        "/api/sftp/profiles",
+        json={
+            "name": "SFTP Upload Key",
+            "host": "10.0.2.10",
+            "username": "deploy_key",
+            "auth_type": "private_key",
+            "credential_mode": "custom",
+            "private_key": keys["ed25519_openssh"],
+            "private_key_filename": "acesso_unidade.key",
+            "remote_base_dir": "/opt/salutem/relatorios",
+            "environment": "HML",
+        },
+    )
+    assert res_upload.status_code == 201
+    uploaded_prof = res_upload.json()
+    assert uploaded_prof["has_secret"] is True
+    assert uploaded_prof["private_key_filename"] == "acesso_unidade.key"
+    assert uploaded_prof["private_key_path"] == ""
+    assert "BEGIN OPENSSH PRIVATE KEY" not in res_upload.text
+    assert vault.get_secret(f"sftp_key:{uploaded_prof['id']}") == keys["ed25519_openssh"]
+
+    # Clearing vault private_key clears filename too
+    res_clear = client.patch(
+        f"/api/sftp/profiles/{uploaded_prof['id']}",
+        json={"private_key": ""},
+    )
+    assert res_clear.status_code == 200
+    assert res_clear.json()["has_secret"] is False
+    assert res_clear.json()["private_key_filename"] == ""
+
+    # 2. Exercise real `_open_sftp` Paramiko path (client_factory=None) with monkeypatched SSHClient
+    connect_calls: list[dict[str, Any]] = []
+
+    class _FakeSSHClient:
+        def set_missing_host_key_policy(self, _policy: Any) -> None:
+            pass
+
+        def connect(self, **kwargs: Any) -> None:
+            connect_calls.append(kwargs)
+
+        def open_sftp(self) -> FakeSftpClient:
+            return fake_fs
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("backend.app.services.sftp_service.paramiko.SSHClient", _FakeSSHClient)
+
+    real_sftp = SftpService(
+        store=store,
+        client_factory=None,
+        vault=vault,
+        default_credentials_service=default_creds,
+    )
+
+    # 2a. Custom profile using local private_key_path on disk (no vault secret)
+    custom_path_prof = real_sftp.create_profile(
+        SftpProfileCreate(
+            name="SFTP Local Path Custom",
+            host="10.0.2.20",
+            username="ops_local",
+            auth_type="private_key",
+            credential_mode="custom",
+            private_key_path=str(rsa_key_file),
+            remote_base_dir="/opt/salutem/relatorios",
+            environment="HML",
+        )
+    )
+    assert custom_path_prof.has_secret is True
+    assert custom_path_prof.private_key_path == str(rsa_key_file)
+
+    res_custom = real_sftp.test_connection(custom_path_prof.id)
+    assert res_custom.ok is True
+    assert connect_calls[-1]["pkey"].get_name() == "ssh-rsa"
+
+    # 2b. Default SFTP credentials using local private_key_path on disk
+    default_creds.update_default(
+        "sftp",
+        DefaultCredentialUpdate(
+            username="ops_default_key",
+            auth_type="private_key",
+            private_key_path=str(ed_key_file),
+            default_remote_base_dir="/opt/salutem/relatorios",
+        ),
+    )
+    inherited_prof = real_sftp.create_profile(
+        SftpProfileCreate(
+            name="SFTP Inherited Default Path",
+            host="10.0.2.30",
+            credential_mode="default",
+            remote_base_dir="/",
+            environment="HML",
+        )
+    )
+    assert inherited_prof.has_secret is True
+
+    res_default = real_sftp.test_connection(inherited_prof.id)
+    assert res_default.ok is True
+    assert connect_calls[-1]["username"] == "ops_default_key"
+    assert connect_calls[-1]["pkey"].get_name() == "ssh-ed25519"
+
+    # 2c. Missing local `.key` file raises friendly SftpConnectionError
+    missing_path = str(tmp_path / "does_not_exist.key")
+    with pytest.raises(SftpConnectionError, match="não encontrado"):
+        _resolve_private_key_text(None, missing_path)
+
+    broken_prof = real_sftp.create_profile(
+        SftpProfileCreate(
+            name="SFTP Missing Key",
+            host="10.0.2.40",
+            username="ops_broken",
+            auth_type="private_key",
+            credential_mode="custom",
+            private_key_path=missing_path,
+            remote_base_dir="/opt/salutem/relatorios",
+            environment="HML",
+        )
+    )
+    broken_test = real_sftp.test_connection(broken_prof.id)
+    assert broken_test.ok is False
+    assert broken_test.error is not None
+    assert "não encontrado" in broken_test.error

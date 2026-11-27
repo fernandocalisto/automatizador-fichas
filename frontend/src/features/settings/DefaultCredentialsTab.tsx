@@ -1,14 +1,26 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import {
   AlertCircle,
+  CheckCircle2,
   Database,
   FileCode2,
+  FolderKey,
   KeyRound,
   Lock,
+  RefreshCw,
   Save,
   Server,
   ShieldCheck,
   Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 import {
   Badge,
@@ -42,6 +54,9 @@ interface SftpFormState {
   auth_type: SftpAuthType;
   password: string;
   private_key: string;
+  private_key_filename: string;
+  private_key_path: string;
+  clear_private_key: boolean;
   passphrase: string;
   default_remote_base_dir: string;
 }
@@ -65,6 +80,9 @@ const EMPTY_SFTP: SftpFormState = {
   auth_type: "password",
   password: "",
   private_key: "",
+  private_key_filename: "",
+  private_key_path: "",
+  clear_private_key: false,
   passphrase: "",
   default_remote_base_dir: "/",
 };
@@ -74,6 +92,19 @@ const EMPTY_JASPER: JasperFormState = {
   organization: "",
   password: "",
 };
+
+async function readKeyFileText(file: File): Promise<string> {
+  if (typeof file.text === "function") {
+    return file.text();
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("Falha ao ler arquivo selecionado."));
+    reader.readAsText(file);
+  });
+}
 
 export function DefaultCredentialsTab() {
   const { pushToast } = useToast();
@@ -90,6 +121,8 @@ export function DefaultCredentialsTab() {
 
   const [savingKind, setSavingKind] = useState<CredentialKind | null>(null);
   const [clearingKind, setClearingKind] = useState<CredentialKind | null>(null);
+
+  const sftpKeyInputRef = useRef<HTMLInputElement | null>(null);
 
   const hydrateFromResponse = useCallback(
     (data: Record<CredentialKind, DefaultCredentialRead>) => {
@@ -111,6 +144,9 @@ export function DefaultCredentialsTab() {
           auth_type: data.sftp.auth_type || "password",
           password: "",
           private_key: "",
+          private_key_filename: data.sftp.private_key_filename || "",
+          private_key_path: data.sftp.private_key_path || "",
+          clear_private_key: false,
           passphrase: "",
           default_remote_base_dir: data.sftp.default_remote_base_dir || "/",
         });
@@ -164,6 +200,9 @@ export function DefaultCredentialsTab() {
           ...f,
           password: "",
           private_key: "",
+          private_key_filename: updated.private_key_filename || "",
+          private_key_path: updated.private_key_path || "",
+          clear_private_key: false,
           passphrase: "",
         }));
       } else if (kind === "jasperserver") {
@@ -210,6 +249,49 @@ export function DefaultCredentialsTab() {
     }
   };
 
+  const handleSftpKeyFileSelected = async (
+    e: ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const content = await readKeyFileText(file);
+      if (!content.trim()) {
+        setError(`O arquivo '${file.name}' está vazio.`);
+        return;
+      }
+      setError(null);
+      setSftpForm((f) => ({
+        ...f,
+        private_key: content,
+        private_key_filename: file.name,
+        clear_private_key: false,
+      }));
+      pushToast({
+        tone: "info",
+        title: `Chave '${file.name}' carregada`,
+        description: "Clique em Salvar SFTP padrão para guardar no cofre local.",
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Não foi possível ler o arquivo de chave privada.",
+      );
+    } finally {
+      e.target.value = "";
+    }
+  };
+
+  const handleRemoveSftpKey = () => {
+    setSftpForm((f) => ({
+      ...f,
+      private_key: "",
+      private_key_filename: "",
+      clear_private_key: true,
+    }));
+  };
+
   const handleSavePostgres = (e: FormEvent) => {
     e.preventDefault();
     const payload: DefaultCredentialUpdatePayload = {
@@ -232,8 +314,14 @@ export function DefaultCredentialsTab() {
     if (sftpForm.auth_type === "password") {
       if (sftpForm.password !== "") payload.password = sftpForm.password;
     } else {
-      if (sftpForm.private_key.trim() !== "")
+      payload.private_key_path = sftpForm.private_key_path.trim();
+      if (sftpForm.private_key.trim() !== "") {
         payload.private_key = sftpForm.private_key;
+        payload.private_key_filename = sftpForm.private_key_filename.trim();
+      } else if (sftpForm.clear_private_key) {
+        payload.private_key = "";
+        payload.private_key_filename = "";
+      }
       if (sftpForm.passphrase !== "") payload.passphrase = sftpForm.passphrase;
     }
     void handleSave("sftp", payload, "SSH / SFTP");
@@ -252,6 +340,18 @@ export function DefaultCredentialsTab() {
   const pgMeta = defaults.postgres;
   const sftpMeta = defaults.sftp;
   const jasperMeta = defaults.jasperserver;
+
+  const hasSelectedOrSavedVaultKey =
+    Boolean(sftpForm.private_key.trim()) ||
+    (!sftpForm.clear_private_key &&
+      Boolean(sftpMeta?.has_private_key && !sftpMeta?.private_key_path)) ||
+    (!sftpForm.clear_private_key && Boolean(sftpForm.private_key_filename));
+
+  const activeKeyChipLabel =
+    sftpForm.private_key_filename ||
+    (sftpForm.private_key.trim()
+      ? "Chave PEM pronta para salvar"
+      : "Chave privada salva no cofre");
 
   return (
     <div className="space-y-4">
@@ -440,7 +540,7 @@ export function DefaultCredentialsTab() {
           <Card>
             <CardBody className="space-y-3.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Server className="h-4 w-4 text-accent" />
                   <h3 className="text-sm font-semibold text-ink">
                     SSH / SFTP Padrão
@@ -461,7 +561,11 @@ export function DefaultCredentialsTab() {
                   {sftpMeta?.has_private_key && (
                     <Badge tone="blueprint">
                       <KeyRound className="h-3 w-3" />
-                      Chave privada no cofre
+                      {sftpMeta.private_key_filename
+                        ? sftpMeta.private_key_filename
+                        : sftpMeta.private_key_path
+                          ? "Chave local (.key)"
+                          : "Chave privada no cofre"}
                     </Badge>
                   )}
                 </div>
@@ -507,7 +611,9 @@ export function DefaultCredentialsTab() {
                       }
                     >
                       <option value="password">Senha</option>
-                      <option value="private_key">Chave privada (PEM/OpenSSH)</option>
+                      <option value="private_key">
+                        Chave privada (.key / .pem)
+                      </option>
                     </Select>
                   </div>
                   <div>
@@ -530,7 +636,9 @@ export function DefaultCredentialsTab() {
 
                 {sftpForm.auth_type === "password" ? (
                   <div>
-                    <FieldLabel htmlFor="def-sftp-pass">Senha SSH padrão</FieldLabel>
+                    <FieldLabel htmlFor="def-sftp-pass">
+                      Senha SSH padrão
+                    </FieldLabel>
                     <Input
                       id="def-sftp-pass"
                       type="password"
@@ -547,29 +655,120 @@ export function DefaultCredentialsTab() {
                     />
                   </div>
                 ) : (
-                  <div className="space-y-3">
-                    <div>
-                      <FieldLabel htmlFor="def-sftp-key">
-                        Chave privada SSH
+                  <div className="space-y-3 rounded-lg border border-border bg-surface-subtle/40 p-3">
+                    {/* Prominent .key / .pem file picker */}
+                    <div className="space-y-2">
+                      <FieldLabel className="mb-0">
+                        Arquivo de chave privada SSH (.key / .pem)
                       </FieldLabel>
-                      <Textarea
-                        id="def-sftp-key"
-                        rows={4}
+
+                      <input
+                        ref={sftpKeyInputRef}
+                        id="def-sftp-key-file"
+                        type="file"
+                        accept=".key,.pem,.rsa,.ed25519,.pub,*"
+                        aria-label="Selecionar arquivo .key ou .pem"
+                        onChange={(e) => void handleSftpKeyFileSelected(e)}
+                        className="sr-only"
+                      />
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => sftpKeyInputRef.current?.click()}
+                          icon={<Upload className="h-3.5 w-3.5" />}
+                        >
+                          Selecionar arquivo .key / .pem...
+                        </Button>
+
+                        {hasSelectedOrSavedVaultKey && (
+                          <div className="inline-flex items-center gap-1.5 rounded-full border border-success/30 bg-success-soft px-2.5 py-1 text-xs font-medium text-success">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                            <span className="max-w-[220px] truncate font-mono text-[11px]">
+                              {activeKeyChipLabel} ✓
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => sftpKeyInputRef.current?.click()}
+                              title="Substituir arquivo de chave"
+                              aria-label="Substituir arquivo de chave"
+                              className="ml-0.5 rounded p-0.5 text-success/80 hover:bg-success/15 hover:text-success cursor-pointer"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleRemoveSftpKey}
+                              title="Remover chave selecionada"
+                              aria-label="Remover chave selecionada"
+                              className="rounded p-0.5 text-success/80 hover:bg-danger-soft hover:text-danger cursor-pointer"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-ink-muted">
+                        O conteúdo do arquivo é importado de forma criptografada
+                        para o cofre local (suporta OpenSSH, RSA, Ed25519 e
+                        ECDSA).
+                      </p>
+                    </div>
+
+                    {/* Optional local .key path */}
+                    <div>
+                      <FieldLabel htmlFor="def-sftp-key-path">
+                        <span className="inline-flex items-center gap-1.5">
+                          <FolderKey className="h-3.5 w-3.5 text-ink-muted" />
+                          Ou caminho local do arquivo .key (opcional)
+                        </span>
+                      </FieldLabel>
+                      <Input
+                        id="def-sftp-key-path"
+                        placeholder="Ex.: C:\chaves\acesso.key ou ~/.ssh/id_ed25519"
                         className="font-mono text-xs"
-                        placeholder={
-                          sftpMeta?.has_private_key
-                            ? "Deixe em branco para manter a chave salva no cofre"
-                            : "-----BEGIN OPENSSH PRIVATE KEY-----"
-                        }
-                        value={sftpForm.private_key}
+                        value={sftpForm.private_key_path}
                         onChange={(e) =>
                           setSftpForm((f) => ({
                             ...f,
-                            private_key: e.target.value,
+                            private_key_path: e.target.value,
                           }))
                         }
                       />
                     </div>
+
+                    {/* Collapsible manual PEM paste */}
+                    <details className="rounded-md border border-border bg-surface px-3 py-2">
+                      <summary className="cursor-pointer select-none text-xs font-medium text-ink-secondary hover:text-ink">
+                        Colar texto PEM manualmente (avançado)
+                      </summary>
+                      <div className="mt-2.5">
+                        <FieldLabel htmlFor="def-sftp-key">
+                          Chave privada SSH
+                        </FieldLabel>
+                        <Textarea
+                          id="def-sftp-key"
+                          rows={4}
+                          className="font-mono text-xs"
+                          placeholder={
+                            sftpMeta?.has_private_key
+                              ? "Deixe em branco para manter a chave salva no cofre"
+                              : "-----BEGIN OPENSSH PRIVATE KEY-----"
+                          }
+                          value={sftpForm.private_key}
+                          onChange={(e) =>
+                            setSftpForm((f) => ({
+                              ...f,
+                              private_key: e.target.value,
+                              clear_private_key: false,
+                            }))
+                          }
+                        />
+                      </div>
+                    </details>
+
                     <div>
                       <FieldLabel htmlFor="def-sftp-passphrase">
                         Passphrase da chave (opcional)

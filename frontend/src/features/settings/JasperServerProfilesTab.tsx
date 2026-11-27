@@ -1,16 +1,26 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Edit3,
   KeyRound,
   Lock,
   Play,
   Plus,
+  Search,
   Server,
   ShieldAlert,
   Trash2,
+  X,
 } from "lucide-react";
 import {
   Badge,
@@ -21,9 +31,11 @@ import {
   EmptyState,
   FieldLabel,
   Input,
+  SearchableSelect,
   Select,
   Switch,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { jasperServerApi } from "@/features/jasperserver/jasperServerApi";
 import type {
@@ -69,6 +81,9 @@ const INITIAL_FORM: JsProfileFormState = {
   linked_db_profile_id: "",
 };
 
+type EnvFilter = "ALL" | EnvironmentKind;
+const PAGE_SIZE = 25;
+
 export function JasperServerProfilesTab({
   profiles: externalProfiles,
   dbProfiles = [],
@@ -86,6 +101,10 @@ export function JasperServerProfilesTab({
   const profiles = isControlled ? externalProfiles : internalProfiles;
   const loading = externalLoading ?? internalLoading;
 
+  const [searchQuery, setSearchQuery] = useState("");
+  const [envFilter, setEnvFilter] = useState<EnvFilter>("ALL");
+  const [page, setPage] = useState(1);
+
   const [modalOpen, setModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] =
     useState<JasperServerProfileRead | null>(null);
@@ -101,6 +120,50 @@ export function JasperServerProfilesTab({
   const [testResults, setTestResults] = useState<
     Record<string, JasperServerTestResult>
   >({});
+
+  const dbSelectOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      dbProfiles.map((db) => ({
+        value: db.id,
+        label: db.name,
+        sublabel: `${db.host}:${db.port}/${db.dbname}`,
+        badge: db.environment,
+        keywords: `${db.user} ${db.host} ${db.dbname} ${db.environment ?? ""}`,
+      })),
+    [dbProfiles],
+  );
+
+  const envCounts = useMemo(() => {
+    const counts = { ALL: profiles.length, PRD: 0, HML: 0, DEV: 0 };
+    for (const p of profiles) {
+      if (p.environment === "PRD") counts.PRD += 1;
+      else if (p.environment === "HML") counts.HML += 1;
+      else if (p.environment === "DEV") counts.DEV += 1;
+    }
+    return counts;
+  }, [profiles]);
+
+  const filteredProfiles = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return profiles.filter((p) => {
+      if (envFilter !== "ALL" && p.environment !== envFilter) return false;
+      if (!q) return true;
+      const hay =
+        `${p.name} ${p.base_url} ${p.organization} ${p.username}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [profiles, searchQuery, envFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProfiles.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paginatedProfiles = useMemo(() => {
+    const start = (safePage - 1) * PAGE_SIZE;
+    return filteredProfiles.slice(start, start + PAGE_SIZE);
+  }, [filteredProfiles, safePage]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, envFilter]);
 
   const loadInternal = useCallback(async () => {
     if (isControlled) return;
@@ -323,6 +386,65 @@ export function JasperServerProfilesTab({
         </Button>
       </div>
 
+      {/* Search & Environment Filter Bar */}
+      {profiles.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-border bg-surface p-2.5">
+          <div className="relative min-w-[200px] flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Buscar servidor por nome, URL ou organização..."
+              aria-label="Buscar servidores JasperServer"
+              className="h-8 w-full rounded-md border border-border bg-canvas pl-8 pr-7 text-xs text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                aria-label="Limpar busca JasperServer"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-ink-muted hover:text-ink cursor-pointer"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+
+          <div
+            role="group"
+            aria-label="Filtrar JasperServer por ambiente"
+            className="flex flex-wrap items-center gap-1"
+          >
+            {(["ALL", "PRD", "HML", "DEV"] as const).map((env) => {
+              const active = envFilter === env;
+              const label = env === "ALL" ? "Todos" : env;
+              return (
+                <button
+                  key={env}
+                  type="button"
+                  onClick={() => setEnvFilter(env)}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
+                    active
+                      ? "bg-accent text-accent-ink"
+                      : "bg-surface-subtle text-ink-secondary hover:bg-surface-subtle/80 hover:text-ink"
+                  }`}
+                >
+                  <span>{label}</span>
+                  <span
+                    className={`font-mono text-[10px] ${
+                      active ? "opacity-90" : "text-ink-muted"
+                    }`}
+                  >
+                    {envCounts[env]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {loading && profiles.length === 0 ? (
         <Card className="p-6 text-center text-xs text-ink-muted">
           Carregando perfis JasperReports Server...
@@ -343,9 +465,25 @@ export function JasperServerProfilesTab({
             </Button>
           }
         />
+      ) : filteredProfiles.length === 0 ? (
+        <Card className="p-6 text-center space-y-2">
+          <p className="text-xs text-ink-muted">
+            Nenhum servidor JasperReports encontrado para os filtros aplicados.
+          </p>
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={() => {
+              setSearchQuery("");
+              setEnvFilter("ALL");
+            }}
+          >
+            Limpar filtros
+          </Button>
+        </Card>
       ) : (
         <div className="space-y-3">
-          {profiles.map((profile) => {
+          {paginatedProfiles.map((profile) => {
             const testResult = testResults[profile.id];
             const isTesting = testingId === profile.id;
             const linkedDbName = profile.linked_db_profile_id
@@ -511,6 +649,40 @@ export function JasperServerProfilesTab({
               </Card>
             );
           })}
+
+          {/* Pagination Footer */}
+          {filteredProfiles.length > PAGE_SIZE && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-xs text-ink-muted">
+              <span>
+                Mostrando {(safePage - 1) * PAGE_SIZE + 1}–
+                {Math.min(safePage * PAGE_SIZE, filteredProfiles.length)} de{" "}
+                {filteredProfiles.length} servidores
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  icon={<ChevronLeft className="h-3.5 w-3.5" />}
+                >
+                  Anterior
+                </Button>
+                <span className="px-2 font-mono text-[11px] text-ink">
+                  {safePage} / {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  icon={<ChevronRight className="h-3.5 w-3.5" />}
+                >
+                  Próxima
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -702,23 +874,23 @@ export function JasperServerProfilesTab({
               <FieldLabel htmlFor="js-profile-db">
                 Perfil PostgreSQL vinculado
               </FieldLabel>
-              <Select
+              <SearchableSelect
                 id="js-profile-db"
+                ariaLabel="Perfil PostgreSQL vinculado"
                 value={form.linked_db_profile_id}
-                onChange={(e) =>
+                onChange={(nextVal) =>
                   setForm((f) => ({
                     ...f,
-                    linked_db_profile_id: e.target.value,
+                    linked_db_profile_id: nextVal,
                   }))
                 }
-              >
-                <option value="">Nenhum</option>
-                {dbProfiles.map((db) => (
-                  <option key={db.id} value={db.id}>
-                    {db.name} ({db.host})
-                  </option>
-                ))}
-              </Select>
+                options={dbSelectOptions}
+                placeholder="Nenhum banco vinculado"
+                searchPlaceholder="Buscar banco por nome, host ou dbname..."
+                emptyLabel="Nenhum perfil PostgreSQL encontrado."
+                allowClear
+                clearLabel="Nenhum banco vinculado"
+              />
             </div>
           </div>
 

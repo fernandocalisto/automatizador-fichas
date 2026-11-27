@@ -1,16 +1,31 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from "react";
 import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Edit3,
+  FolderKey,
   KeyRound,
   Lock,
   Play,
   Plus,
+  RefreshCw,
+  Search,
   Server,
   ShieldAlert,
   Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 import {
   Badge,
@@ -21,10 +36,12 @@ import {
   EmptyState,
   FieldLabel,
   Input,
+  SearchableSelect,
   Select,
   Switch,
   Textarea,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { sftpApi } from "@/features/sftp/sftpApi";
 import type {
@@ -54,6 +71,9 @@ interface SftpFormState {
   auth_type: SftpAuthType;
   password: string;
   private_key: string;
+  private_key_filename: string;
+  private_key_path: string;
+  clear_private_key: boolean;
   passphrase: string;
   remote_base_dir: string;
   environment: EnvironmentKind;
@@ -70,6 +90,9 @@ const INITIAL_FORM: SftpFormState = {
   auth_type: "password",
   password: "",
   private_key: "",
+  private_key_filename: "",
+  private_key_path: "",
+  clear_private_key: false,
   passphrase: "",
   remote_base_dir: "/",
   environment: "HML",
@@ -82,6 +105,22 @@ const ENV_BADGE_TONE: Record<EnvironmentKind, "neutral" | "warning" | "danger"> 
   HML: "warning",
   PRD: "danger",
 };
+
+type EnvFilter = "ALL" | EnvironmentKind;
+const PAGE_SIZE = 25;
+
+async function readKeyFileText(file: File): Promise<string> {
+  if (typeof file.text === "function") {
+    return file.text();
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ""));
+    reader.onerror = () =>
+      reject(reader.error ?? new Error("Falha ao ler arquivo selecionado."));
+    reader.readAsText(file);
+  });
+}
 
 export function SftpProfilesTab({
   profiles: externalProfiles,
@@ -100,6 +139,10 @@ export function SftpProfilesTab({
 
   const profiles = externalProfiles ?? internalProfiles;
   const loading = externalLoading ?? internalLoading;
+
+  const [searchQuery, setSearchQuery] = useState("");
+  const [envFilter, setEnvFilter] = useState<EnvFilter>("ALL");
+  const [page, setPage] = useState(1);
 
   const loadProfiles = useCallback(async () => {
     if (externalOnRefresh) {
@@ -145,6 +188,52 @@ export function SftpProfilesTab({
     Record<string, SftpConnectionTestResult>
   >({});
 
+  const keyFileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const dbSelectOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      dbProfiles.map((db) => ({
+        value: db.id,
+        label: db.name,
+        sublabel: `${db.host}:${db.port}/${db.dbname}`,
+        badge: db.environment,
+        keywords: `${db.user} ${db.host} ${db.dbname} ${db.environment ?? ""}`,
+      })),
+    [dbProfiles],
+  );
+
+  const envCounts = useMemo(() => {
+    const counts = { ALL: profiles.length, PRD: 0, HML: 0, DEV: 0 };
+    for (const p of profiles) {
+      if (p.environment === "PRD") counts.PRD += 1;
+      else if (p.environment === "HML") counts.HML += 1;
+      else if (p.environment === "DEV") counts.DEV += 1;
+    }
+    return counts;
+  }, [profiles]);
+
+  const filteredProfiles = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return profiles.filter((p) => {
+      if (envFilter !== "ALL" && p.environment !== envFilter) return false;
+      if (!q) return true;
+      const hay =
+        `${p.name} ${p.host} ${p.username} ${p.remote_base_dir}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [profiles, searchQuery, envFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredProfiles.length / PAGE_SIZE));
+  const safePage = Math.min(page, totalPages);
+  const paginatedProfiles = useMemo(() => {
+    const start = (safePage - 1) * PAGE_SIZE;
+    return filteredProfiles.slice(start, start + PAGE_SIZE);
+  }, [filteredProfiles, safePage]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [searchQuery, envFilter]);
+
   const openCreateModal = () => {
     setEditingProfile(null);
     setForm(INITIAL_FORM);
@@ -163,6 +252,9 @@ export function SftpProfilesTab({
       auth_type: profile.auth_type,
       password: "",
       private_key: "",
+      private_key_filename: profile.private_key_filename || "",
+      private_key_path: profile.private_key_path || "",
+      clear_private_key: false,
       passphrase: "",
       remote_base_dir: profile.remote_base_dir,
       environment: profile.environment,
@@ -178,6 +270,42 @@ export function SftpProfilesTab({
       ...prev,
       environment: nextEnv,
       read_only: nextEnv === "PRD" ? true : prev.read_only,
+    }));
+  };
+
+  const handleKeyFileSelected = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const content = await readKeyFileText(file);
+      if (!content.trim()) {
+        setFormError(`O arquivo '${file.name}' está vazio.`);
+        return;
+      }
+      setFormError(null);
+      setForm((prev) => ({
+        ...prev,
+        private_key: content,
+        private_key_filename: file.name,
+        clear_private_key: false,
+      }));
+    } catch (err) {
+      setFormError(
+        err instanceof Error
+          ? err.message
+          : "Não foi possível ler o arquivo de chave privada.",
+      );
+    } finally {
+      e.target.value = "";
+    }
+  };
+
+  const handleRemoveSelectedKey = () => {
+    setForm((prev) => ({
+      ...prev,
+      private_key: "",
+      private_key_filename: "",
+      clear_private_key: true,
     }));
   };
 
@@ -219,11 +347,18 @@ export function SftpProfilesTab({
           if (form.auth_type === "password" && form.password !== "") {
             payload.password = form.password;
           }
-          if (form.auth_type === "private_key" && form.private_key.trim() !== "") {
-            payload.private_key = form.private_key;
-          }
-          if (form.auth_type === "private_key" && form.passphrase !== "") {
-            payload.passphrase = form.passphrase;
+          if (form.auth_type === "private_key") {
+            payload.private_key_path = form.private_key_path.trim();
+            if (form.private_key.trim() !== "") {
+              payload.private_key = form.private_key;
+              payload.private_key_filename = form.private_key_filename.trim();
+            } else if (form.clear_private_key) {
+              payload.private_key = "";
+              payload.private_key_filename = "";
+            }
+            if (form.passphrase !== "") {
+              payload.passphrase = form.passphrase;
+            }
           }
         }
         await sftpApi.updateProfile(editingProfile.id, payload);
@@ -249,11 +384,15 @@ export function SftpProfilesTab({
           if (form.auth_type === "password" && form.password !== "") {
             payload.password = form.password;
           }
-          if (form.auth_type === "private_key" && form.private_key.trim() !== "") {
-            payload.private_key = form.private_key;
-          }
-          if (form.auth_type === "private_key" && form.passphrase !== "") {
-            payload.passphrase = form.passphrase;
+          if (form.auth_type === "private_key") {
+            payload.private_key_path = form.private_key_path.trim();
+            if (form.private_key.trim() !== "") {
+              payload.private_key = form.private_key;
+              payload.private_key_filename = form.private_key_filename.trim();
+            }
+            if (form.passphrase !== "") {
+              payload.passphrase = form.passphrase;
+            }
           }
         }
         await sftpApi.createProfile(payload);
@@ -338,6 +477,23 @@ export function SftpProfilesTab({
 
   const dbProfileNameById = new Map(dbProfiles.map((d) => [d.id, d.name]));
 
+  const hasSelectedOrSavedProfileKey =
+    Boolean(form.private_key.trim()) ||
+    (!form.clear_private_key &&
+      Boolean(
+        editingProfile?.has_secret &&
+          editingProfile.credential_mode === "custom" &&
+          editingProfile.auth_type === "private_key" &&
+          !editingProfile.private_key_path,
+      )) ||
+    (!form.clear_private_key && Boolean(form.private_key_filename));
+
+  const profileKeyChipLabel =
+    form.private_key_filename ||
+    (form.private_key.trim()
+      ? "Chave PEM pronta para salvar"
+      : "Chave privada salva no cofre");
+
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -362,6 +518,65 @@ export function SftpProfilesTab({
         </Button>
       </div>
 
+      {/* Search & Environment Filter Bar */}
+      {profiles.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-border bg-surface p-2.5">
+          <div className="relative min-w-[200px] flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Buscar servidor por nome, host ou usuário..."
+              aria-label="Buscar servidores SFTP"
+              className="h-8 w-full rounded-md border border-border bg-canvas pl-8 pr-7 text-xs text-ink placeholder:text-ink-muted focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/20"
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery("")}
+                aria-label="Limpar busca SFTP"
+                className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-ink-muted hover:text-ink cursor-pointer"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+
+          <div
+            role="group"
+            aria-label="Filtrar SFTP por ambiente"
+            className="flex flex-wrap items-center gap-1"
+          >
+            {(["ALL", "PRD", "HML", "DEV"] as const).map((env) => {
+              const active = envFilter === env;
+              const label = env === "ALL" ? "Todos" : env;
+              return (
+                <button
+                  key={env}
+                  type="button"
+                  onClick={() => setEnvFilter(env)}
+                  className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors cursor-pointer ${
+                    active
+                      ? "bg-accent text-accent-ink"
+                      : "bg-surface-subtle text-ink-secondary hover:bg-surface-subtle/80 hover:text-ink"
+                  }`}
+                >
+                  <span>{label}</span>
+                  <span
+                    className={`font-mono text-[10px] ${
+                      active ? "opacity-90" : "text-ink-muted"
+                    }`}
+                  >
+                    {envCounts[env]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {loading && profiles.length === 0 ? (
         <Card className="p-6 text-center text-xs text-ink-muted">
           Carregando servidores SFTP...
@@ -370,7 +585,7 @@ export function SftpProfilesTab({
         <EmptyState
           icon={<Server className="h-5 w-5" />}
           title="Nenhum servidor SFTP configurado"
-          description="Adicione um servidor Linux ambulatorial usando Credencial Padrão ou Personalizada (senha ou chave privada PEM)."
+          description="Adicione um servidor Linux ambulatorial usando Credencial Padrão ou Personalizada (senha ou arquivo .key)."
           action={
             <Button
               variant="primary"
@@ -382,9 +597,25 @@ export function SftpProfilesTab({
             </Button>
           }
         />
+      ) : filteredProfiles.length === 0 ? (
+        <Card className="p-6 text-center space-y-2">
+          <p className="text-xs text-ink-muted">
+            Nenhum servidor SFTP encontrado para os filtros aplicados.
+          </p>
+          <Button
+            variant="outline"
+            size="xs"
+            onClick={() => {
+              setSearchQuery("");
+              setEnvFilter("ALL");
+            }}
+          >
+            Limpar filtros
+          </Button>
+        </Card>
       ) : (
         <div className="space-y-3">
-          {profiles.map((profile) => {
+          {paginatedProfiles.map((profile) => {
             const testRes = testResults[profile.id];
             const linkedDbName = profile.linked_db_profile_id
               ? dbProfileNameById.get(profile.linked_db_profile_id)
@@ -419,7 +650,10 @@ export function SftpProfilesTab({
                           <Badge tone="neutral">
                             <KeyRound className="h-3 w-3" />
                             {profile.auth_type === "private_key"
-                              ? "Chave protegida"
+                              ? profile.private_key_filename ||
+                                (profile.private_key_path
+                                  ? "Chave local .key"
+                                  : "Chave protegida")
                               : "Senha protegida"}
                           </Badge>
                         )}
@@ -492,6 +726,40 @@ export function SftpProfilesTab({
               </Card>
             );
           })}
+
+          {/* Pagination Footer */}
+          {filteredProfiles.length > PAGE_SIZE && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-xs text-ink-muted">
+              <span>
+                Mostrando {(safePage - 1) * PAGE_SIZE + 1}–
+                {Math.min(safePage * PAGE_SIZE, filteredProfiles.length)} de{" "}
+                {filteredProfiles.length} servidores
+              </span>
+              <div className="flex items-center gap-1.5">
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={safePage <= 1}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  icon={<ChevronLeft className="h-3.5 w-3.5" />}
+                >
+                  Anterior
+                </Button>
+                <span className="px-2 font-mono text-[11px] text-ink">
+                  {safePage} / {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="xs"
+                  disabled={safePage >= totalPages}
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  icon={<ChevronRight className="h-3.5 w-3.5" />}
+                >
+                  Próxima
+                </Button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -608,23 +876,23 @@ export function SftpProfilesTab({
               <FieldLabel htmlFor="sftp-linked-db">
                 Perfil PostgreSQL vinculado (opcional)
               </FieldLabel>
-              <Select
+              <SearchableSelect
                 id="sftp-linked-db"
+                ariaLabel="Perfil PostgreSQL vinculado"
                 value={form.linked_db_profile_id}
-                onChange={(e) =>
+                onChange={(nextVal) =>
                   setForm((prev) => ({
                     ...prev,
-                    linked_db_profile_id: e.target.value,
+                    linked_db_profile_id: nextVal,
                   }))
                 }
-              >
-                <option value="">Nenhum banco vinculado</option>
-                {dbProfiles.map((db) => (
-                  <option key={db.id} value={db.id}>
-                    {db.name} ({db.host})
-                  </option>
-                ))}
-              </Select>
+                options={dbSelectOptions}
+                placeholder="Nenhum banco vinculado"
+                searchPlaceholder="Buscar banco por nome, host ou dbname..."
+                emptyLabel="Nenhum perfil PostgreSQL encontrado."
+                allowClear
+                clearLabel="Nenhum banco vinculado"
+              />
             </div>
           </div>
 
@@ -726,7 +994,9 @@ export function SftpProfilesTab({
                       }
                     >
                       <option value="password">Senha</option>
-                      <option value="private_key">Chave privada (PEM)</option>
+                      <option value="private_key">
+                        Chave privada (.key / .pem)
+                      </option>
                     </Select>
                   </div>
                 </div>
@@ -756,24 +1026,110 @@ export function SftpProfilesTab({
                   </div>
                 ) : (
                   <div className="space-y-3">
-                    <div>
-                      <FieldLabel htmlFor="sftp-private-key">
-                        Chave privada PEM (RSA / Ed25519 / ECDSA)
+                    {/* Prominent .key / .pem file picker */}
+                    <div className="space-y-2">
+                      <FieldLabel className="mb-0">
+                        Arquivo de chave privada SSH (.key / .pem)
                       </FieldLabel>
-                      <Textarea
-                        id="sftp-private-key"
-                        value={form.private_key}
+
+                      <input
+                        ref={keyFileInputRef}
+                        id="sftp-private-key-file"
+                        type="file"
+                        accept=".key,.pem,.rsa,.ed25519,.pub,*"
+                        aria-label="Selecionar arquivo .key ou .pem do servidor"
+                        onChange={(e) => void handleKeyFileSelected(e)}
+                        className="sr-only"
+                      />
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => keyFileInputRef.current?.click()}
+                          icon={<Upload className="h-3.5 w-3.5" />}
+                        >
+                          Selecionar arquivo .key / .pem...
+                        </Button>
+
+                        {hasSelectedOrSavedProfileKey && (
+                          <div className="inline-flex items-center gap-1.5 rounded-full border border-success/30 bg-success-soft px-2.5 py-1 text-xs font-medium text-success">
+                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                            <span className="max-w-[200px] truncate font-mono text-[11px]">
+                              {profileKeyChipLabel} ✓
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => keyFileInputRef.current?.click()}
+                              title="Substituir arquivo de chave"
+                              aria-label="Substituir arquivo de chave"
+                              className="ml-0.5 rounded p-0.5 text-success/80 hover:bg-success/15 hover:text-success cursor-pointer"
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleRemoveSelectedKey}
+                              title="Remover chave selecionada"
+                              aria-label="Remover chave selecionada"
+                              className="rounded p-0.5 text-success/80 hover:bg-danger-soft hover:text-danger cursor-pointer"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Local .key path input */}
+                    <div>
+                      <FieldLabel htmlFor="sftp-private-key-path">
+                        <span className="inline-flex items-center gap-1.5">
+                          <FolderKey className="h-3.5 w-3.5 text-ink-muted" />
+                          Ou caminho local do arquivo .key (opcional)
+                        </span>
+                      </FieldLabel>
+                      <Input
+                        id="sftp-private-key-path"
+                        value={form.private_key_path}
                         onChange={(e) =>
                           setForm((prev) => ({
                             ...prev,
-                            private_key: e.target.value,
+                            private_key_path: e.target.value,
                           }))
                         }
-                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        placeholder="Ex.: C:\chaves\acesso.key ou ~/.ssh/id_ed25519"
                         className="font-mono text-xs"
-                        rows={4}
                       />
                     </div>
+
+                    {/* Collapsible manual PEM paste */}
+                    <details className="rounded-md border border-border bg-surface px-3 py-2">
+                      <summary className="cursor-pointer select-none text-xs font-medium text-ink-secondary hover:text-ink">
+                        Colar texto PEM manualmente (avançado)
+                      </summary>
+                      <div className="mt-2.5">
+                        <FieldLabel htmlFor="sftp-private-key">
+                          Chave privada PEM (OpenSSH / RSA / Ed25519 / ECDSA)
+                        </FieldLabel>
+                        <Textarea
+                          id="sftp-private-key"
+                          value={form.private_key}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              private_key: e.target.value,
+                              clear_private_key: false,
+                            }))
+                          }
+                          placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                          className="font-mono text-xs"
+                          rows={4}
+                        />
+                      </div>
+                    </details>
+
                     <div>
                       <FieldLabel htmlFor="sftp-passphrase">
                         Passphrase da chave (opcional)

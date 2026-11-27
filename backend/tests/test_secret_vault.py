@@ -185,3 +185,92 @@ def test_default_credentials_inheritance_and_api_redaction(vault_env: Path) -> N
         assert del_res.status_code == 200
         assert del_res.json()["configured"] is False
         assert del_res.json()["has_password"] is False
+
+
+def test_default_sftp_key_upload_and_local_path_inheritance(vault_env: Path) -> None:
+    store = SQLiteStore(db_path=vault_env / "studio_sftp_keys.db")
+    vault = SecretVaultService(vault_path=vault_env / ".vault_sftp_keys.json")
+    defaults_svc = DefaultCredentialsService(store=store, vault=vault)
+
+    app = create_app(
+        store=store,
+        secret_vault=vault,
+        default_credentials_service=defaults_svc,
+    )
+    with TestClient(app) as client:
+        # 1. Uploaded .key file stored in vault + private_key_filename metadata
+        fake_pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC_DEFAULT_KEY_DATA\n-----END OPENSSH PRIVATE KEY-----"
+        res_upload = client.put(
+            "/api/credentials/defaults/sftp",
+            json={
+                "username": "deploy_default",
+                "auth_type": "private_key",
+                "private_key": fake_pem,
+                "private_key_filename": "acesso_producao.key",
+                "default_remote_base_dir": "/opt/salutem/relatorios",
+            },
+        )
+        assert res_upload.status_code == 200
+        body = res_upload.json()
+        assert body["configured"] is True
+        assert body["has_private_key"] is True
+        assert body["private_key_filename"] == "acesso_producao.key"
+        assert body["private_key_path"] == ""
+        assert "private_key" not in body
+        assert "SYNTHETIC_DEFAULT_KEY_DATA" not in res_upload.text
+        assert b"SYNTHETIC_DEFAULT_KEY_DATA" not in store.db_path.read_bytes()
+
+        resolved = defaults_svc.resolve_sftp_credentials(
+            credential_mode="default",
+            profile_id="prof-1",
+        )
+        assert resolved["auth_type"] == "private_key"
+        assert resolved["private_key"] == fake_pem
+        assert resolved["private_key_filename"] == "acesso_producao.key"
+        assert resolved["private_key_path"] == ""
+
+        # 2. Clearing vault key and switching to local private_key_path
+        local_key = vault_env / "local_default.key"
+        local_key.write_text(fake_pem, encoding="utf-8")
+        res_path = client.put(
+            "/api/credentials/defaults/sftp",
+            json={
+                "username": "",
+                "auth_type": "private_key",
+                "private_key": "",
+                "private_key_path": str(local_key),
+            },
+        )
+        assert res_path.status_code == 200
+        path_body = res_path.json()
+        assert path_body["private_key_filename"] == ""
+        assert path_body["private_key_path"] == str(local_key)
+        assert path_body["has_private_key"] is True
+        assert path_body["configured"] is True
+
+        resolved_path = defaults_svc.resolve_sftp_credentials(
+            credential_mode="default",
+            profile_id="prof-1",
+        )
+        assert resolved_path["private_key"] is None
+        assert resolved_path["private_key_path"] == str(local_key)
+
+        # 3. Custom mode does NOT inherit default private_key_path
+        resolved_custom = defaults_svc.resolve_sftp_credentials(
+            credential_mode="custom",
+            profile_id="prof-custom",
+            custom_user="custom_u",
+            custom_auth_type="private_key",
+            custom_private_key_filename="custom.key",
+            custom_private_key_path="/tmp/custom.key",
+        )
+        assert resolved_custom["private_key_filename"] == "custom.key"
+        assert resolved_custom["private_key_path"] == "/tmp/custom.key"
+
+        # 4. DELETE clears path, filename, and vault secrets
+        del_res = client.delete("/api/credentials/defaults/sftp")
+        assert del_res.status_code == 200
+        assert del_res.json()["has_private_key"] is False
+        assert del_res.json()["private_key_path"] == ""
+        assert del_res.json()["private_key_filename"] == ""
+        assert del_res.json()["configured"] is False

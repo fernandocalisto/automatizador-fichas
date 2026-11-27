@@ -129,3 +129,57 @@ export function triggerTextDownload(
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+/**
+ * Gera um template JRXML mínimo e válido (sem dependência de ficha.json),
+ * ideal para relatórios livres (free_report) ou início rápido a partir do zero.
+ */
+export function createBlankJrxmlTemplate(
+  orientation: ClinicalOrientation,
+  reportName = "relatorio_salutem",
+): string {
+  const safeName =
+    reportName
+      .trim()
+      .replace(/[^a-zA-Z0-9_]+/g, "_")
+      .replace(/^_+|_+$/g, "") || "relatorio_salutem";
+  const isLandscape = orientation === "PAISAGEM";
+  const pageWidth = isLandscape ? 842 : 595;
+  const pageHeight = isLandscape ? 595 : 842;
+  const columnWidth = pageWidth - 40;
+  const orientationAttr = isLandscape ? ' orientation="Landscape"' : "";
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports http://jasperreports.sourceforge.net/xsd/jasperreport.xsd"
+  name="${safeName}"${orientationAttr}
+  pageWidth="${pageWidth}" pageHeight="${pageHeight}" columnWidth="${columnWidth}"
+  leftMargin="20" rightMargin="20" topMargin="20" bottomMargin="20">
+  <queryString><![CDATA[SELECT 1 AS exemplo]]></queryString>
+  <field name="exemplo" class="java.lang.Integer"/>
+  <title>
+    <band height="40">
+      <staticText>
+        <reportElement x="0" y="6" width="${columnWidth}" height="24"/>
+        <textElement verticalAlignment="Middle">
+          <font fontName="DejaVu Sans" size="14" isBold="true"/>
+        </textElement>
+        <text><![CDATA[${safeName}]]></text>
+      </staticText>
+    </band>
+  </title>
+  <detail>
+    <band height="24">
+      <textField isBlankWhenNull="true">
+        <reportElement x="0" y="2" width="${columnWidth}" height="18"/>
+        <textElement verticalAlignment="Middle">
+          <font fontName="DejaVu Sans" size="10"/>
+        </textElement>
+        <textFieldExpression><![CDATA[$F{exemplo}]]></textFieldExpression>
+      </textField>
+    </band>
+  </detail>
+</jasperReport>
+`;
+}

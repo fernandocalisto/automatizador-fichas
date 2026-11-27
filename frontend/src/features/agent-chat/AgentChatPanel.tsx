@@ -91,7 +91,16 @@ const QUICK_PROMPTS_BY_PHASE: Record<ChatPhase, string[]> = {
   ],
 };
 
+const FREE_REPORT_QUICK_PROMPTS: string[] = [
+  "Inspecionar tabelas do banco e revisar query SQL",
+  "Ajustar layout, colunas e alinhamento do relatório",
+  "Corrigir campos nulos e quebras de página",
+];
+
 function defaultPhaseForProject(project: ProjectRead): ChatPhase {
+  if (project.project_kind === "free_report") {
+    return "jrxml";
+  }
   if (
     project.current_stage === "jrxml_design" ||
     project.current_stage === "completed"
@@ -233,12 +242,14 @@ export function AgentChatPanel({
   onClose,
 }: AgentChatPanelProps) {
   const { pushToast } = useToast();
+  const isFreeReport = project.project_kind === "free_report";
 
-  const [phase, setPhase] = useState<ChatPhase>(
-    () => initialPhase ?? defaultPhaseForProject(project),
+  const [phase, setPhase] = useState<ChatPhase>(() =>
+    isFreeReport ? "jrxml" : (initialPhase ?? defaultPhaseForProject(project)),
   );
   const [messages, setMessages] = useState<ChatTimelineItem[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [loadingHarnesses, setLoadingHarnesses] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
   const [harnesses, setHarnesses] = useState<HarnessStatus[]>(
@@ -267,12 +278,14 @@ export function AgentChatPanel({
   const timelineEndRef = useRef<HTMLDivElement | null>(null);
   const userSelectedHarnessRef = useRef(false);
 
-  // Sincroniza fase quando `initialPhase` muda explicitamente
+  // Sincroniza fase quando `initialPhase` ou tipo de projeto muda
   useEffect(() => {
-    if (initialPhase) {
+    if (isFreeReport) {
+      setPhase("jrxml");
+    } else if (initialPhase) {
       setPhase(initialPhase);
     }
-  }, [initialPhase]);
+  }, [initialPhase, isFreeReport]);
 
   // Sincroniza estado básico quando muda de projeto
   useEffect(() => {
@@ -325,6 +338,7 @@ export function AgentChatPanel({
         }
       } finally {
         setLoadingHistory(false);
+        setLoadingHarnesses(false);
       }
     },
     [],
@@ -781,7 +795,9 @@ export function AgentChatPanel({
     composerRef.current?.focus();
   };
 
-  const quickPrompts = QUICK_PROMPTS_BY_PHASE[phase];
+  const quickPrompts = isFreeReport
+    ? FREE_REPORT_QUICK_PROMPTS
+    : QUICK_PROMPTS_BY_PHASE[phase];
 
   return (
     <section
@@ -800,7 +816,9 @@ export function AgentChatPanel({
             </span>
             <div className="min-w-0 leading-tight">
               <h2 className="truncate text-xs font-semibold tracking-tight text-ink">
-                Agente Clínico IA
+                {isFreeReport
+                  ? "Assistente de Relatório IA"
+                  : "Agente Clínico IA"}
               </h2>
               <p className="truncate text-[11px] text-ink-muted">
                 {project.name}
@@ -847,13 +865,15 @@ export function AgentChatPanel({
           </div>
         </div>
 
-        {/* Abas de fase */}
-        <Tabs
-          options={PHASE_TABS}
-          value={phase}
-          onChange={(nextPhase) => setPhase(nextPhase)}
-          className="w-full grid grid-cols-2"
-        />
+        {/* Abas de fase (ocultas para Relatório Livre, sempre em modo JRXML/SQL) */}
+        {!isFreeReport && (
+          <Tabs
+            options={PHASE_TABS}
+            value={phase}
+            onChange={(nextPhase) => setPhase(nextPhase)}
+            className="w-full grid grid-cols-2"
+          />
+        )}
 
         {/* Seletor de Harness + Pill de Status do Gate */}
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -861,16 +881,26 @@ export function AgentChatPanel({
             <span
               data-testid="harness-install-indicator"
               aria-label={
-                isHarnessReady ? "Harness instalado" : "Harness não instalado"
+                loadingHarnesses
+                  ? "Verificando harnesses"
+                  : isHarnessReady
+                    ? "Harness instalado"
+                    : "Harness não instalado"
               }
               title={
-                isHarnessReady
-                  ? `${activeHarnessInfo?.display_name} instalado${activeHarnessInfo?.version ? ` (${activeHarnessInfo.version})` : ""}`
-                  : activeHarnessInfo?.auth_hint || "Harness não instalado"
+                loadingHarnesses
+                  ? "Verificando status dos harnesses..."
+                  : isHarnessReady
+                    ? `${activeHarnessInfo?.display_name} instalado${activeHarnessInfo?.version ? ` (${activeHarnessInfo.version})` : ""}`
+                    : activeHarnessInfo?.auth_hint || "Harness não instalado"
               }
               className={cn(
                 "h-2 w-2 shrink-0 rounded-full",
-                isHarnessReady ? "bg-success" : "bg-danger",
+                loadingHarnesses
+                  ? "bg-ink-muted/50 animate-pulse"
+                  : isHarnessReady
+                    ? "bg-success"
+                    : "bg-danger",
               )}
             />
             <label htmlFor="agent-harness-select" className="sr-only">
@@ -891,7 +921,9 @@ export function AgentChatPanel({
                 const ready = Boolean(h.installed || h.sdk_available);
                 return (
                   <option key={h.id} value={h.id}>
-                    {ready ? h.display_name : `${h.display_name} (não instalado)`}
+                    {loadingHarnesses || ready
+                      ? h.display_name
+                      : `${h.display_name} (não instalado)`}
                   </option>
                 );
               })}
@@ -957,14 +989,18 @@ export function AgentChatPanel({
           <EmptyState
             icon={<Bot className="h-5 w-5 text-accent" />}
             title={
-              phase === "extraction"
-                ? "Pronto para extrair a ficha clínica"
-                : "Pronto para projetar o layout JRXML"
+              isFreeReport
+                ? "Pronto para editar e manter o relatório"
+                : phase === "extraction"
+                  ? "Pronto para extrair a ficha clínica"
+                  : "Pronto para projetar o layout JRXML"
             }
             description={
-              phase === "extraction"
-                ? "Inicie uma análise do PDF em Gate 1 para mapear seções, perguntas e tipos do Salutem antes de gerar o JSON."
-                : "Planeje o layout JasperReports em Gate 1 ou aplique anotações visuais marcadas no Jasper Studio."
+              isFreeReport
+                ? "Peça ajustes na query SQL, parâmetros $P{}, colunas ou layout JRXML deste relatório."
+                : phase === "extraction"
+                  ? "Inicie uma análise do PDF em Gate 1 para mapear seções, perguntas e tipos do Salutem antes de gerar o JSON."
+                  : "Planeje o layout JasperReports em Gate 1 ou aplique anotações visuais marcadas no Jasper Studio."
             }
             className="my-4"
           />
@@ -1021,9 +1057,11 @@ export function AgentChatPanel({
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={handleComposerKeyDown}
             placeholder={
-              phase === "extraction"
-                ? "Descreva ajustes ou peça a análise do PDF... (Enter envia, Shift+Enter quebra linha)"
-                : "Descreva ajustes de layout JRXML ou coordenadas... (Enter envia, Shift+Enter quebra linha)"
+              isFreeReport
+                ? "Descreva ajustes na query SQL, colunas ou layout JRXML... (Enter envia, Shift+Enter quebra linha)"
+                : phase === "extraction"
+                  ? "Descreva ajustes ou peça a análise do PDF... (Enter envia, Shift+Enter quebra linha)"
+                  : "Descreva ajustes de layout JRXML ou coordenadas... (Enter envia, Shift+Enter quebra linha)"
             }
             className={cn(
               "w-full rounded-md border border-border bg-surface px-2.5 py-2 text-xs leading-relaxed text-ink placeholder:text-ink-muted/70",

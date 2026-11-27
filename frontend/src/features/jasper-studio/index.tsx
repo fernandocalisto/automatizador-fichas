@@ -4,15 +4,18 @@ import {
   useMemo,
   useRef,
   useState,
+  type ChangeEvent,
   type ReactNode,
 } from "react";
 import {
   Code2,
   Crosshair,
+  FilePlus2,
   FileText,
   Play,
   Sliders,
   Sparkles,
+  Upload,
 } from "lucide-react";
 import { Button, EmptyState, SplitPane, useToast } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
@@ -45,6 +48,7 @@ import {
   type VisualRegionAnnotation,
 } from "./types";
 import {
+  createBlankJrxmlTemplate,
   detectJrxmlOrientation,
   extractDaemonError,
   triggerTextDownload,
@@ -733,6 +737,163 @@ export function JasperStudioView({
     saveStoredReportParams(project.id, {});
   }, [project.id]);
 
+  const visualUploadInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleCreateBlankJrxml = useCallback(
+    async (targetOrientation: ClinicalOrientation) => {
+      const templateXml = createBlankJrxmlTemplate(
+        targetOrientation,
+        project.slug || project.name,
+      );
+      setSaving(true);
+      try {
+        const res = await api.saveArtifact(project.id, "jrxml", {
+          content: templateXml,
+          summary: `Template JRXML em branco (${targetOrientation}) criado no Jasper Studio`,
+          created_by: "user",
+        });
+        const savedXml = res.artifact.content || templateXml;
+        const parsedParams = parseJrxmlParametersLocally(savedXml);
+        userEditedRef.current = false;
+        loadedVersionRef.current = res.artifact.version_num;
+        jrxmlRef.current = savedXml;
+        setHasJrxml(true);
+        setJrxmlContent(savedXml);
+        setSavedContent(savedXml);
+        setVersionNum(res.artifact.version_num);
+        setReportParameters(parsedParams);
+        setLintReport(null);
+        setCompileResult(null);
+        setCompileError(null);
+
+        onProjectUpdated({
+          ...project,
+          latest_artifacts: {
+            ...project.latest_artifacts,
+            jrxml: res.artifact.version_num,
+          },
+        });
+
+        if (layoutMode === "visual") {
+          handleChangeLayoutMode("split");
+        }
+
+        pushToast({
+          tone: "success",
+          title: "JRXML em branco criado",
+          description: `Revisão v${res.artifact.version_num} salva e aberta no editor.`,
+        });
+
+        void runPreview({ inlineJrxml: savedXml, silent: true });
+      } catch (err) {
+        pushToast({
+          tone: "error",
+          title: "Falha ao criar JRXML em branco",
+          description: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setSaving(false);
+      }
+    },
+    [
+      handleChangeLayoutMode,
+      layoutMode,
+      onProjectUpdated,
+      project,
+      pushToast,
+      runPreview,
+    ],
+  );
+
+  const handleUploadJrxmlFile = useCallback(
+    async (file: File) => {
+      setSaving(true);
+      try {
+        const content = await file.text();
+        if (!content.trim()) {
+          pushToast({
+            tone: "error",
+            title: "Arquivo .jrxml vazio",
+            description: "Selecione um arquivo XML JasperReports válido.",
+          });
+          return;
+        }
+        const res = await api.saveArtifact(project.id, "jrxml", {
+          content,
+          summary: `Upload de ${file.name} no Jasper Studio`,
+          created_by: "user",
+        });
+        const savedXml = res.artifact.content || content;
+        const parsedParams = parseJrxmlParametersLocally(savedXml);
+        userEditedRef.current = false;
+        loadedVersionRef.current = res.artifact.version_num;
+        jrxmlRef.current = savedXml;
+        setHasJrxml(true);
+        setJrxmlContent(savedXml);
+        setSavedContent(savedXml);
+        setVersionNum(res.artifact.version_num);
+        setReportParameters(parsedParams);
+        setLintReport(null);
+        setCompileResult(null);
+        setCompileError(null);
+
+        onProjectUpdated({
+          ...project,
+          latest_artifacts: {
+            ...project.latest_artifacts,
+            jrxml: res.artifact.version_num,
+          },
+        });
+
+        void fetchRepoResources(project.id);
+
+        pushToast({
+          tone: "success",
+          title: `Arquivo "${file.name}" importado`,
+          description: `Salvo como revisão v${res.artifact.version_num}.`,
+        });
+
+        const missingNow = getMissingRequiredParams(
+          parsedParams,
+          reportParamValues,
+        );
+        if (isFreeReport && missingNow.length > 0) {
+          setPreviewDeferredForParams(true);
+        } else {
+          void runPreview({ inlineJrxml: savedXml, silent: true });
+        }
+      } catch (err) {
+        pushToast({
+          tone: "error",
+          title: "Falha ao enviar arquivo .jrxml",
+          description: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setSaving(false);
+      }
+    },
+    [
+      fetchRepoResources,
+      isFreeReport,
+      onProjectUpdated,
+      project,
+      pushToast,
+      reportParamValues,
+      runPreview,
+    ],
+  );
+
+  const handleVisualFileInputChange = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      e.target.value = "";
+      if (file) {
+        void handleUploadJrxmlFile(file);
+      }
+    },
+    [handleUploadJrxmlFile],
+  );
+
   const handleScaffold = useCallback(
     async (targetOrientation: ClinicalOrientation) => {
       setScaffolding(true);
@@ -960,6 +1121,21 @@ export function JasperStudioView({
   const handleChangeDbProfileId = useCallback(
     (nextProfileId: string) => {
       setSelectedDbProfileId(nextProfileId);
+
+      // Persiste a escolha no projeto para que F5 mantenha o banco selecionado
+      void api
+        .updateProject(project.id, {
+          default_db_profile_id: nextProfileId || null,
+        })
+        .then((updated) => {
+          if (updated && updated.id) {
+            onProjectUpdated(updated);
+          }
+        })
+        .catch(() => {
+          // Falha transitória de persistência não bloqueia o preview local
+        });
+
       if (
         hasJrxml &&
         (mode === "db_hybrid" || mode === "db_live") &&
@@ -980,7 +1156,9 @@ export function JasperStudioView({
       isFreeReport,
       missingRequiredParams.length,
       mode,
+      onProjectUpdated,
       previewDeferredForParams,
+      project.id,
       runPreview,
     ],
   );
@@ -1074,10 +1252,16 @@ export function JasperStudioView({
     !previewResult &&
     !previewLoading;
 
+  const activePdfScenario = previewResult?.scenario ?? scenario;
+  const suppressPdfFetch = Boolean(
+    previewLoading && previewResult?.scenario !== scenario,
+  );
+
   const editorPane = (
     <JrxmlEditorPane
       loading={loadingArtifact}
       hasJrxml={hasJrxml}
+      isFreeReport={isFreeReport}
       jrxmlContent={jrxmlContent}
       versionNum={versionNum}
       dirty={dirty}
@@ -1089,6 +1273,8 @@ export function JasperStudioView({
       onToggleLiveReload={setLiveReload}
       onChangeJrxml={handleChangeJrxml}
       onScaffold={handleScaffold}
+      onCreateBlank={handleCreateBlankJrxml}
+      onUploadJrxml={handleUploadJrxmlFile}
       onLint={handleLint}
       onCompile={handleCompile}
       onSave={handleSave}
@@ -1218,16 +1404,42 @@ export function JasperStudioView({
         </div>
       ) : layoutMode === "visual" && !loadingArtifact && !hasJrxml ? (
         <div className="flex min-h-0 flex-1 items-center justify-center bg-surface-subtle/60 p-6">
+          <input
+            ref={visualUploadInputRef}
+            type="file"
+            accept=".jrxml,.xml,application/xml,text/xml"
+            aria-label="Enviar arquivo .jrxml"
+            className="hidden"
+            onChange={handleVisualFileInputChange}
+          />
           <EmptyState
             className="max-w-lg"
             icon={<FileText className="h-5 w-5 text-accent" />}
             title="Nenhum arquivo .jrxml neste projeto ainda"
-            description="Peça à IA para criar o relatório ou abra o modo Código para gerar um template inicial."
+            description="Crie um template .jrxml em branco, envie um arquivo .jrxml do seu computador ou peça à IA para criar o relatório."
             action={
               <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={saving}
+                  icon={<FilePlus2 className="h-3.5 w-3.5" />}
+                  onClick={() => void handleCreateBlankJrxml("RETRATO")}
+                >
+                  Criar JRXML em branco
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  loading={saving}
+                  icon={<Upload className="h-3.5 w-3.5" />}
+                  onClick={() => visualUploadInputRef.current?.click()}
+                >
+                  Enviar arquivo .jrxml
+                </Button>
                 {openJrxmlChat && (
                   <Button
-                    variant="primary"
+                    variant="outline"
                     size="sm"
                     icon={<Sparkles className="h-3.5 w-3.5" />}
                     onClick={openJrxmlChat}
@@ -1236,7 +1448,7 @@ export function JasperStudioView({
                   </Button>
                 )}
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   icon={<Code2 className="h-3.5 w-3.5" />}
                   onClick={() => handleChangeLayoutMode("split")}
@@ -1251,10 +1463,11 @@ export function JasperStudioView({
         <PdfPreviewCanvas
           projectId={project.id}
           hasJrxml={hasJrxml}
-          scenario={scenario}
+          scenario={activePdfScenario}
           orientation={orientation}
           previewResult={previewResult}
           previewLoading={previewLoading}
+          suppressFetch={suppressPdfFetch}
           cacheBuster={cacheBuster}
           annotations={annotations}
           submittingAnnotation={submittingAnnotation}

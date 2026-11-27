@@ -15,8 +15,10 @@ import {
   Dialog,
   FieldLabel,
   Input,
+  SearchableSelect,
   Select,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type {
@@ -195,6 +197,17 @@ export function SftpDeployModal({
     () => profiles.find((p) => p.id === profileId) ?? null,
     [profiles, profileId],
   );
+  const profileOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      profiles.map((p) => ({
+        value: p.id,
+        label: p.name,
+        sublabel: `${p.host}:${p.port}${p.read_only ? " · Somente Leitura" : ""}`,
+        badge: p.environment,
+        keywords: `${p.name} ${p.host} ${p.port} ${p.environment} ${p.read_only ? "somente leitura" : ""}`,
+      })),
+    [profiles],
+  );
   const isReadOnly = Boolean(selectedProfile?.read_only);
 
   const handleProfileChange = (nextId: string) => {
@@ -367,23 +380,17 @@ export function SftpDeployModal({
                 <FieldLabel htmlFor="sftp-deploy-profile">
                   Servidor SFTP de destino
                 </FieldLabel>
-                <Select
+                <SearchableSelect
                   id="sftp-deploy-profile"
+                  ariaLabel="Servidor SFTP de destino"
                   value={profileId}
-                  onChange={(e) => handleProfileChange(e.target.value)}
+                  onChange={handleProfileChange}
+                  options={profileOptions}
                   disabled={loadingProfiles || profiles.length === 0}
-                >
-                  {profiles.length === 0 ? (
-                    <option value="">Nenhum perfil SFTP cadastrado</option>
-                  ) : (
-                    profiles.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        [{p.environment}] {p.name} ({p.host}:{p.port})
-                        {p.read_only ? " — Somente Leitura" : ""}
-                      </option>
-                    ))
-                  )}
-                </Select>
+                  placeholder="Nenhum perfil SFTP cadastrado"
+                  searchPlaceholder="Buscar servidor por nome, host ou ambiente..."
+                  emptyLabel="Nenhum servidor SFTP encontrado."
+                />
               </div>
 
               <div>

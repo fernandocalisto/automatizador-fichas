@@ -56,8 +56,24 @@ describe("form-builder model helpers", () => {
       }),
     );
     expect(valid.error).toBeNull();
+    expect(valid.schemaWarnings).toEqual([]);
     expect(valid.data?.template.nome).toBe("Ficha");
     expect(valid.data?.perguntas[0].respostas[0].label).toBe("Sim");
+
+    const mismatched = parseClinicalFormJson(
+      JSON.stringify({
+        template: { nome: "Ficha Incompatível" },
+        perguntas: [{ id: 1, titulo_errado: "Sem nome e sem respostas" }],
+      }),
+    );
+    expect(mismatched.error).toBeNull();
+    expect(mismatched.schemaWarnings.length).toBeGreaterThanOrEqual(2);
+    expect(mismatched.schemaWarnings.map((w) => w.code)).toContain(
+      "SCHEMA_MISSING_QUESTION_TEXT",
+    );
+    expect(mismatched.schemaWarnings.map((w) => w.code)).toContain(
+      "SCHEMA_MISSING_RESPOSTAS",
+    );
   });
 
   it("applies UPPERCASE to text fields while preserving layout and boolean titulo", () => {

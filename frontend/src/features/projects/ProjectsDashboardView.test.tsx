@@ -503,4 +503,82 @@ describe("ProjectsDashboardView", () => {
       expect(onSelectProject).toHaveBeenCalledWith(createdFree);
     });
   });
+
+  it("does not duplicate PDF badge on clinical PDF project cards and supports choosing project kind in Importar JRXML", async () => {
+    const user = userEvent.setup();
+    const pdfProject = makeProject({
+      id: "proj-pdf-once",
+      name: "Ficha PDF Única",
+      entry_mode: "pdf",
+      has_pdf: true,
+      project_kind: "clinical_form",
+    });
+
+    const createSpy = vi.spyOn(api, "createProject").mockResolvedValue(
+      makeProject({
+        id: "proj-jrxml-clin",
+        name: "Ficha JRXML Clínica",
+        entry_mode: "jrxml",
+        project_kind: "clinical_form",
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <ProjectsDashboardView
+          projects={[pdfProject]}
+          loading={false}
+          onRefreshProjects={vi.fn().mockResolvedValue(undefined)}
+          onSelectProject={vi.fn()}
+          onDeleteProject={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>,
+    );
+
+    // Exatamente 1 badge "PDF" (sem duplicação entre entry_mode=pdf e has_pdf=true)
+    expect(screen.getAllByText(/^PDF$/)).toHaveLength(1);
+
+    // Importar JRXML permite escolher entre Relatório Livre (padrão) e Ficha Clínica
+    await user.click(screen.getByRole("button", { name: /Novo projeto/i }));
+    const dialog = screen.getByRole("dialog", { name: "Novo projeto" });
+    await user.click(
+      within(dialog).getByRole("tab", { name: /Importar JRXML/i }),
+    );
+
+    const kindGroup = within(dialog).getByRole("radiogroup", {
+      name: /Tipo de projeto/i,
+    });
+    const freeRadio = within(kindGroup).getByRole("radio", {
+      name: /Relatório Livre/i,
+    });
+    const clinicalRadio = within(kindGroup).getByRole("radio", {
+      name: /Ficha Clínica/i,
+    });
+    expect(freeRadio).toHaveAttribute("aria-checked", "true");
+    expect(clinicalRadio).toHaveAttribute("aria-checked", "false");
+
+    await user.click(clinicalRadio);
+    expect(clinicalRadio).toHaveAttribute("aria-checked", "true");
+
+    await user.type(
+      within(dialog).getByLabelText(/Nome do projeto/i),
+      "Ficha JRXML Clínica",
+    );
+    const jrxmlArea = within(dialog).getByLabelText(/Conteúdo JRXML inicial/i);
+    await user.click(jrxmlArea);
+    await user.paste("<jasperReport name='clin'/>");
+    await user.click(
+      within(dialog).getByRole("button", { name: /^Criar projeto$/i }),
+    );
+
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "Ficha JRXML Clínica",
+          entry_mode: "jrxml",
+          project_kind: "clinical_form",
+        }),
+      );
+    });
+  });
 });

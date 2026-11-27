@@ -722,4 +722,96 @@ describe("AgentChatPanel & AgentChatDrawer", () => {
     );
     expect(onNavigateSection).toHaveBeenCalledWith("jasper_studio");
   });
+
+  it("adapta título, fase travada em jrxml e prompts de manutenção para projetos free_report", async () => {
+    const freeReportProject: ProjectRead = {
+      ...BASE_PROJECT,
+      id: "proj-free-chat",
+      name: "Relatório Faturamento",
+      project_kind: "free_report",
+      entry_mode: "blank_report",
+      current_stage: "jrxml_design",
+      has_pdf: false,
+    };
+
+    const listChatSpy = vi.spyOn(api, "listChat").mockResolvedValue([]);
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({
+        ...DEFAULT_AGENT_STATUS,
+        project_id: freeReportProject.id,
+      }),
+    );
+
+    render(
+      <ToastProvider>
+        <AgentChatPanel
+          project={freeReportProject}
+          initialPhase="extraction"
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Assistente de Relatório IA" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Agente Clínico IA")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: /Extração \(PDF → JSON\)/i }),
+    ).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(listChatSpy).toHaveBeenCalledWith(freeReportProject.id, "jrxml");
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: "Inspecionar tabelas do banco e revisar query SQL",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Analisar PDF da ficha e mapear perguntas",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("não exibe flash vermelho 'AGY (não instalado)' enquanto harnesses carregam na montagem", async () => {
+    let resolveStatus!: (res: Response) => void;
+    const statusPromise = new Promise<Response>((resolve) => {
+      resolveStatus = resolve;
+    });
+
+    vi.spyOn(api, "listChat").mockResolvedValue([]);
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      if (String(input).endsWith("/agent/status")) {
+        return statusPromise;
+      }
+      return jsonResponse({}, 404);
+    });
+
+    render(
+      <ToastProvider>
+        <AgentChatPanel
+          project={BASE_PROJECT}
+          initialPhase="jrxml"
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    // Enquanto carrega, indicador é neutro e opções não mostram "(não instalado)"
+    const indicator = screen.getByTestId("harness-install-indicator");
+    expect(indicator).toHaveAttribute("aria-label", "Verificando harnesses");
+    expect(indicator.className).not.toContain("bg-danger");
+    expect(screen.queryByText(/AGY \(não instalado\)/i)).not.toBeInTheDocument();
+
+    // Após carregar status, exibe estado real (AGY instalado)
+    resolveStatus(jsonResponse(DEFAULT_AGENT_STATUS));
+    await waitFor(() => {
+      expect(indicator).toHaveAttribute("aria-label", "Harness instalado");
+    });
+  });
 });

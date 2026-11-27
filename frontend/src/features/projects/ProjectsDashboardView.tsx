@@ -410,21 +410,34 @@ export function ProjectsDashboardView({
                               <Badge tone={stage.tone} dot>
                                 {stage.label}
                               </Badge>
-                              <Badge tone={entry.tone}>
+                              <Badge
+                                tone={entry.tone}
+                                title={
+                                  project.entry_mode === "pdf" && project.has_pdf
+                                    ? "source.pdf anexado ao workspace"
+                                    : undefined
+                                }
+                              >
+                                {project.entry_mode === "pdf" &&
+                                  project.has_pdf && (
+                                    <FileText className="h-3 w-3" />
+                                  )}
                                 {entry.shortLabel}
                               </Badge>
                             </>
                           )}
 
-                          {!freeReport && project.has_pdf && (
-                            <Badge
-                              tone="neutral"
-                              title="source.pdf anexado ao workspace"
-                            >
-                              <FileText className="h-3 w-3" />
-                              PDF
-                            </Badge>
-                          )}
+                          {!freeReport &&
+                            project.has_pdf &&
+                            project.entry_mode !== "pdf" && (
+                              <Badge
+                                tone="neutral"
+                                title="source.pdf anexado ao workspace"
+                              >
+                                <FileText className="h-3 w-3" />
+                                PDF
+                              </Badge>
+                            )}
 
                           {!freeReport &&
                             project.template_db_id !== null &&

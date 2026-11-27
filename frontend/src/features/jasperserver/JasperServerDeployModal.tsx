@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -13,9 +13,11 @@ import {
   Dialog,
   FieldLabel,
   Input,
+  SearchableSelect,
   Select,
   Tabs,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type {
@@ -179,6 +181,17 @@ export function JasperServerDeployModal({
   }, [open, project, externalProfiles]);
 
   const activeProfile = profiles.find((p) => p.id === profileId) || null;
+  const profileOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      profiles.map((p) => ({
+        value: p.id,
+        label: p.name,
+        sublabel: p.base_url,
+        badge: p.read_only ? `${p.environment} · RO` : p.environment,
+        keywords: `${p.name} ${p.base_url} ${p.environment} ${p.read_only ? "somente leitura" : ""}`,
+      })),
+    [profiles],
+  );
   const isReadOnly = Boolean(activeProfile?.read_only);
 
   const loadDatasources = async (pid: string) => {
@@ -424,25 +437,20 @@ export function JasperServerDeployModal({
             <FieldLabel htmlFor="js-deploy-profile">
               Perfil JasperReports Server *
             </FieldLabel>
-            <Select
+            <SearchableSelect
               id="js-deploy-profile"
+              ariaLabel="Perfil JasperReports Server"
               value={profileId}
-              disabled={loadingProfiles}
-              onChange={(e) => {
-                setProfileId(e.target.value);
+              disabled={loadingProfiles || profiles.length === 0}
+              onChange={(nextId) => {
+                setProfileId(nextId);
                 setErrorMsg(null);
               }}
-            >
-              {profiles.length === 0 && (
-                <option value="">Nenhum perfil cadastrado</option>
-              )}
-              {profiles.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name} ({p.environment}
-                  {p.read_only ? " · Somente Leitura" : ""}) — {p.base_url}
-                </option>
-              ))}
-            </Select>
+              options={profileOptions}
+              placeholder="Nenhum perfil cadastrado"
+              searchPlaceholder="Buscar perfil por nome, URL ou ambiente..."
+              emptyLabel="Nenhum perfil JasperServer encontrado."
+            />
           </div>
 
           {isReadOnly && (

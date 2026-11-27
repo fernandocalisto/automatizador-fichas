@@ -361,25 +361,30 @@ export function ProjectOverviewView({
   const firstPage = geometry?.pages?.[0];
 
   const leftPane = (
-    <div className="flex h-full flex-col overflow-y-auto bg-canvas p-4 space-y-4">
+    <div
+      data-testid="project-overview-left-pane"
+      className="flex h-full min-w-0 flex-col overflow-y-auto overflow-x-hidden bg-canvas p-4 space-y-4"
+    >
       {/* 1. Project Summary Card */}
-      <Card>
-        <CardHeader className="flex-wrap">
-          <div className="min-w-0 space-y-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-base font-semibold tracking-tight text-ink">
+      <Card className="min-w-0">
+        <CardHeader className="flex-wrap gap-2">
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <h1 className="min-w-0 break-words text-base font-semibold tracking-tight text-ink">
                 {project.name}
               </h1>
-              <span className="rounded bg-surface-subtle px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
+              <span className="max-w-full truncate rounded bg-surface-subtle px-1.5 py-0.5 font-mono text-[11px] text-ink-muted">
                 {project.slug}
               </span>
             </div>
             {project.description && (
-              <p className="text-xs text-ink-secondary">{project.description}</p>
+              <p className="break-words text-xs text-ink-secondary">
+                {project.description}
+              </p>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
             <Badge tone={stageInfo.tone} dot>
               {stageInfo.label}
             </Badge>
@@ -394,21 +399,23 @@ export function ProjectOverviewView({
         </CardHeader>
 
         <CardBody className="grid grid-cols-1 gap-2.5 text-xs sm:grid-cols-3">
-          <div>
+          <div className="min-w-0">
             <span className="block text-[11px] text-ink-muted">
               Harness preferido
             </span>
-            <span className="font-medium text-ink">{harnessLabel}</span>
+            <span className="block truncate font-medium text-ink">
+              {harnessLabel}
+            </span>
           </div>
-          <div>
+          <div className="min-w-0">
             <span className="block text-[11px] text-ink-muted">
               Última atualização
             </span>
-            <span className="font-medium text-ink tabular-nums">
+            <span className="block truncate font-medium text-ink tabular-nums">
               {formatDateTimeBr(project.updated_at)}
             </span>
           </div>
-          <div>
+          <div className="min-w-0">
             <span className="block text-[11px] text-ink-muted">Workspace</span>
             <span
               className="block truncate font-mono text-[11px] text-ink-secondary"
@@ -421,8 +428,8 @@ export function ProjectOverviewView({
       </Card>
 
       {/* 2. Workflow Stepper + Direct Section Navigation */}
-      <Card>
-        <CardHeader className="flex-wrap">
+      <Card className="min-w-0">
+        <CardHeader className="flex-wrap gap-2">
           <CardTitle>Etapas do Pipeline Clínico</CardTitle>
           <div className="flex flex-wrap items-center gap-1.5">
             <Button
@@ -455,7 +462,7 @@ export function ProjectOverviewView({
         <CardBody>
           <ol
             aria-label="Progresso das etapas do projeto"
-            className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6"
+            className="grid grid-cols-2 gap-2 sm:grid-cols-3"
           >
             {PROJECT_STAGES.map((stage, idx) => {
               const isCompleted = idx < currentStageIndex;
@@ -464,7 +471,7 @@ export function ProjectOverviewView({
                 <li
                   key={stage.id}
                   className={cn(
-                    "rounded-md border px-2.5 py-2 text-xs transition-colors",
+                    "min-w-0 rounded-md border px-2.5 py-2 text-xs transition-colors",
                     isCurrent && "border-accent bg-accent-soft/60",
                     isCompleted && "border-success/30 bg-success-soft/40",
                     !isCurrent &&
@@ -472,7 +479,7 @@ export function ProjectOverviewView({
                       "border-border bg-surface-subtle/40",
                   )}
                 >
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
                     <span
                       className={cn(
                         "flex h-4.5 w-4.5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums",
@@ -548,7 +555,7 @@ export function ProjectOverviewView({
                   )}
                 </div>
 
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center min-w-0">
                   <Input
                     aria-label={`Observações para ${descriptor.shortLabel}`}
                     placeholder="Observações da decisão (opcional)..."
@@ -559,10 +566,10 @@ export function ProjectOverviewView({
                         [descriptor.name]: e.target.value,
                       }))
                     }
-                    className="h-7 text-xs flex-1"
+                    className="h-7 min-w-0 text-xs flex-1"
                   />
 
-                  <div className="flex shrink-0 items-center gap-1.5">
+                  <div className="flex flex-wrap shrink-0 items-center gap-1.5">
                     <Button
                       variant={status === "approved" ? "primary" : "outline"}
                       size="xs"
@@ -639,9 +646,9 @@ export function ProjectOverviewView({
                 void handleUploadPdf(e.target.files?.[0] ?? null)
               }
             />
-            <div className="flex items-center gap-2.5 text-xs">
+            <div className="flex min-w-0 flex-1 items-center gap-2.5 text-xs">
               <FileText className="h-4.5 w-4.5 shrink-0 text-blueprint" />
-              <div>
+              <div className="min-w-0">
                 <p className="font-medium text-ink">
                   {project.has_pdf
                     ? "Substituir o source.pdf atual"
@@ -655,6 +662,7 @@ export function ProjectOverviewView({
             <Button
               variant="outline"
               size="xs"
+              className="shrink-0"
               loading={uploadingPdf}
               onClick={() => pdfFileInputRef.current?.click()}
               icon={<Upload className="h-3.5 w-3.5" />}
@@ -769,7 +777,10 @@ export function ProjectOverviewView({
   );
 
   const rightPane = (
-    <div className="flex h-full flex-col overflow-hidden bg-surface">
+    <div
+      data-testid="project-overview-right-pane"
+      className="relative isolate flex h-full min-w-0 flex-col overflow-hidden bg-surface"
+    >
       {/* PDF Viewer toolbar */}
       <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface px-4 py-2.5">
         <div className="flex items-center gap-2">
@@ -923,12 +934,12 @@ export function ProjectOverviewView({
       )}
 
       {/* PDF Canvas / Empty fallback */}
-      <div className="min-h-0 flex-1 bg-surface-subtle/30">
+      <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-surface-subtle/30">
         {project.has_pdf ? (
           <iframe
             title={`PDF original de ${project.name}`}
             src={pdfSrc}
-            className="h-full w-full border-0 bg-white"
+            className="block h-full w-full max-w-full border-0 bg-white"
           />
         ) : (
           <div className="flex h-full items-center justify-center p-6">
@@ -961,6 +972,8 @@ export function ProjectOverviewView({
       initialRatio={0.52}
       minRatio={0.3}
       maxRatio={0.72}
+      leftClassName="min-w-0 overflow-hidden"
+      rightClassName="min-w-0 overflow-hidden isolate"
       storageKey="salutem-project-overview-split"
     />
   );

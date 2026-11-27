@@ -437,4 +437,42 @@ describe("FormBuilderView", () => {
     );
     expect(onNavigateSection).toHaveBeenCalledWith("sql_db");
   });
+
+  it("shows clear schema warning banner and toast when pasted JSON misses Salutem { texto, respostas } structure", async () => {
+    const sample = makeSampleForm();
+    vi.spyOn(api, "getArtifact").mockResolvedValue(makeArtifactRevision(sample));
+    vi.spyOn(api, "getJsonWarnings").mockResolvedValue({
+      project_id: "proj-1",
+      version_num: 1,
+      warnings_count: 0,
+      warnings: [],
+    });
+
+    renderFormBuilder();
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("SINAIS VITAIS")).toBeInTheDocument();
+    });
+
+    // Orientação select keeps single-line whitespace-nowrap styling
+    const orientacaoSelect = screen.getByLabelText("Orientação");
+    expect(orientacaoSelect.className).toContain("whitespace-nowrap");
+
+    // Cola JSON sem { nome/texto, respostas }
+    const editor = screen.getByLabelText(
+      "Editor JSON da ficha clínica",
+    ) as HTMLTextAreaElement;
+    fireEvent.change(editor, {
+      target: {
+        value: JSON.stringify({
+          template: { nome: "FICHA TESTE" },
+          perguntas: [{ pergunta_errada: "Sem esquema Salutem" }],
+        }),
+      },
+    });
+
+    const banner = await screen.findByTestId("json-schema-warning-banner");
+    expect(banner).toHaveTextContent(/Aviso de estrutura JSON Salutem/i);
+    expect(banner).toHaveTextContent(/respostas/i);
+  });
 });

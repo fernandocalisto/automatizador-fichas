@@ -1,10 +1,10 @@
-# Estado Atual do Projeto — Salutem Ficha Studio (`v1.1.0`)
+# Estado Atual do Projeto — Salutem Ficha Studio (`v1.1.1`)
 
 > **Última atualização:** 2026-11-27  
-> **Branch principal:** `main` (`v1.1.0`)  
+> **Branch principal:** `main` (`v1.1.1`)  
 > **Release anterior publicada:** [`v1.0.0`](https://github.com/fernandocalisto/automatizador-fichas/releases/tag/v1.0.0)  
-> **Plano detalhado executado:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md)  
-> **Status geral:** **`v1.1.0` implementada e validada ponta a ponta (Bloco 0 + 4 Frentes Swarm + Integração Final: Relatório Livre, SQL Workbench/MCP Read-Only, SFTP, JasperReports Server REST v2, Aba Clientes Multi-Sistema & Credenciais Padrão/Personalizadas em Cofre AES-256-GCM)**
+> **Plano detalhado executado:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md) + Redesign UX / `repo:` / SSH `.key` (`v1.1.1`)  
+> **Status geral:** **`v1.1.1` implementada e validada ponta a ponta (Motor Nativo `repo:/...` na JVM, SSH `.key` padrão/por perfil, Tela `Início`, Busca Global `Ctrl+K`, Clientes Master-Detail com 1-click JasperServer/SFTP, Jasper Studio Visual-First e Configurações com sidebar/busca/paginação)**
 
 ---
 
@@ -89,9 +89,9 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
 
 | Camada | Comando / Pipeline | Resultado Atual |
 | :--- | :--- | :--- |
-| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **123 passed** |
+| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **177 passed** |
 | **Frontend Typecheck** | `npm --prefix frontend run typecheck` | **0 erros** |
-| **Frontend Unit/Component** | `npm --prefix frontend test` | **11 arquivos, 49 passed** |
+| **Frontend Unit/Component** | `npm --prefix frontend test` | **15 arquivos, 68 passed** |
 | **Frontend Production Build** | `npm --prefix frontend run build` | **OK** (`frontend/dist/`) |
 | **CLI Real `agy.exe`** | `AgyHarness` + `--input-format stream-json --output-format stream-json --dangerously-skip-permissions` | **OK** (streaming + MCP `salutem_studio`) |
 | **E2E Navegador** | FastAPI + JVM real (`v1.0.0`, 8 MCP tools, F5 hash, crop PNG + thumbnail, Claro/Escuro) | **OK** (0 erros de console) |

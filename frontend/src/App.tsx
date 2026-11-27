@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { CloudUpload, UploadCloud } from "lucide-react";
+import { CommandPalette } from "@/components/layout/CommandPalette";
 import { StudioShell } from "@/components/layout/StudioShell";
 import { Button, ToastProvider, useToast } from "@/components/ui";
 import { AgentChatDrawer } from "@/features/agent-chat";
 import { ClientsView } from "@/features/clients";
 import { FormBuilderView } from "@/features/form-builder";
+import { HomeView } from "@/features/home";
 import { JasperStudioView } from "@/features/jasper-studio";
 import { JasperServerDeployModal } from "@/features/jasperserver";
 import {
@@ -27,6 +29,7 @@ import type {
 } from "@/types/studio";
 
 const VALID_SECTIONS = new Set<StudioSection>([
+  "home",
   "projects",
   "clients",
   "workspace",
@@ -62,7 +65,7 @@ function writeHashNavigation(
   if (typeof window === "undefined") return;
   const params = new URLSearchParams();
   if (projectId) params.set("project", projectId);
-  if (section && section !== "projects") params.set("section", section);
+  if (section && section !== "home") params.set("section", section);
   const encoded = params.toString();
   const nextHash = encoded ? `#${encoded}` : "";
   if (window.location.hash !== nextHash) {
@@ -112,11 +115,13 @@ function StudioAppInner() {
     initialNav.projectId,
   );
   const [activeSection, setActiveSection] = useState<StudioSection>(
-    initialNav.section ?? "projects",
+    initialNav.section ?? "home",
   );
   const [settingsInitialTab, setSettingsInitialTab] = useState<
     SettingsTabId | undefined
   >(undefined);
+  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [quickCreate, setQuickCreate] = useState<QuickCreateState>({
     open: false,
   });
@@ -136,6 +141,17 @@ function StudioAppInner() {
   useEffect(() => {
     writeHashNavigation(activeProjectId, activeSection);
   }, [activeProjectId, activeSection]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const refreshProjects = useCallback(async () => {
     setLoadingProjects(true);
@@ -187,6 +203,7 @@ function StudioAppInner() {
       if (target) {
         setActiveProjectId(target.id);
         if (
+          activeSection === "home" ||
           activeSection === "projects" ||
           activeSection === "clients" ||
           activeSection === "settings"
@@ -197,6 +214,18 @@ function StudioAppInner() {
     },
     [projects, activeSection],
   );
+
+  const handleExitProject = useCallback(() => {
+    setActiveProjectId(null);
+    setChatOpen(false);
+    setChatPhaseOverride(null);
+    setActiveSection("home");
+  }, []);
+
+  const handleOpenClientById = useCallback((clientId: string) => {
+    setSelectedClientId(clientId);
+    setActiveSection("clients");
+  }, []);
 
   const handleProjectUpdated = useCallback((updated: ProjectRead) => {
     setProjects((prev) =>
@@ -218,13 +247,38 @@ function StudioAppInner() {
   );
 
   const renderBody = () => {
+    if (activeSection === "home") {
+      return (
+        <HomeView
+          projects={projects}
+          onSelectProject={handleSelectProject}
+          onNavigateSection={(section) => {
+            if (section !== "settings") {
+              setSettingsInitialTab(undefined);
+            }
+            setActiveSection(section);
+          }}
+          onOpenCreateDialog={(mode) => {
+            setQuickCreate({
+              open: true,
+              initialEntryMode: mode,
+            });
+          }}
+          onOpenClientById={handleOpenClientById}
+          onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+        />
+      );
+    }
+
     if (activeSection === "settings") {
       return (
         <SettingsView
           initialTab={settingsInitialTab}
           onClose={() => {
             setSettingsInitialTab(undefined);
-            setActiveSection(activeProject ? "workspace" : "projects");
+            setActiveSection(
+              activeProject ? stageToDefaultSection(activeProject) : "home",
+            );
           }}
         />
       );
@@ -233,6 +287,8 @@ function StudioAppInner() {
     if (activeSection === "clients") {
       return (
         <ClientsView
+          initialSelectedClientId={selectedClientId}
+          onProjectImported={(imported) => handleSelectProject(imported)}
           onCreateFreeReport={({ clientSystemId, dbProfileId, defaultName }) => {
             setQuickCreate({
               open: true,
@@ -306,7 +362,79 @@ function StudioAppInner() {
             artifactSyncTick={artifactSyncTick}
           />
         );
-      case "jasper_studio":
+      case "jasper_studio": {
+        const originProvider =
+          typeof activeProject.source_origin?.provider === "string"
+            ? activeProject.source_origin.provider
+            : null;
+        const isJasperOrigin =
+          originProvider === "jasperserver" ||
+          activeProject.entry_mode === "jasperserver_import";
+        const isSftpOrigin =
+          originProvider === "sftp" ||
+          activeProject.entry_mode === "sftp_import";
+
+        const publishActions = isJasperOrigin ? (
+          <>
+            <Button
+              variant="primary"
+              size="xs"
+              icon={<CloudUpload className="h-3.5 w-3.5" />}
+              onClick={() => setJasperDeployOpen(true)}
+            >
+              Publicar no JasperServer
+            </Button>
+            <Button
+              variant="ghost"
+              size="xs"
+              icon={<UploadCloud className="h-3.5 w-3.5" />}
+              onClick={() => setSftpDeployOpen(true)}
+              title="Publicar via SFTP"
+            >
+              SFTP
+            </Button>
+          </>
+        ) : isSftpOrigin ? (
+          <>
+            <Button
+              variant="primary"
+              size="xs"
+              icon={<UploadCloud className="h-3.5 w-3.5" />}
+              onClick={() => setSftpDeployOpen(true)}
+            >
+              Publicar no SFTP
+            </Button>
+            <Button
+              variant="ghost"
+              size="xs"
+              icon={<CloudUpload className="h-3.5 w-3.5" />}
+              onClick={() => setJasperDeployOpen(true)}
+              title="Publicar no JasperReports Server"
+            >
+              JasperServer
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button
+              variant="outline"
+              size="xs"
+              icon={<UploadCloud className="h-3.5 w-3.5" />}
+              onClick={() => setSftpDeployOpen(true)}
+            >
+              Publicar SFTP
+            </Button>
+            <Button
+              variant="outline"
+              size="xs"
+              icon={<CloudUpload className="h-3.5 w-3.5" />}
+              onClick={() => setJasperDeployOpen(true)}
+            >
+              Publicar JasperServer
+            </Button>
+          </>
+        );
+
         return (
           <>
             <JasperStudioView
@@ -318,26 +446,7 @@ function StudioAppInner() {
                 setChatPhaseOverride(phase ?? "jrxml");
                 setChatOpen(true);
               }}
-              headerExtraActions={
-                <>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    icon={<UploadCloud className="h-3.5 w-3.5" />}
-                    onClick={() => setSftpDeployOpen(true)}
-                  >
-                    Publicar SFTP
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    icon={<CloudUpload className="h-3.5 w-3.5" />}
-                    onClick={() => setJasperDeployOpen(true)}
-                  >
-                    Publicar JasperServer
-                  </Button>
-                </>
-              }
+              headerExtraActions={publishActions}
             />
             <SftpDeployModal
               open={sftpDeployOpen}
@@ -351,6 +460,7 @@ function StudioAppInner() {
             />
           </>
         );
+      }
       default:
         return null;
     }
@@ -379,8 +489,28 @@ function StudioAppInner() {
       jasperUp={jasperUp}
       chatOpen={chatOpen}
       onToggleChat={() => setChatOpen((prev) => !prev)}
+      onOpenCommandPalette={() => setCommandPaletteOpen(true)}
+      onExitProject={handleExitProject}
     >
       {renderBody()}
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        projects={projects}
+        onSelectProject={(project) => {
+          setCommandPaletteOpen(false);
+          handleSelectProject(project);
+        }}
+        onSelectClient={(clientId) => {
+          setCommandPaletteOpen(false);
+          handleOpenClientById(clientId);
+        }}
+        onOpenSettingsTab={(tab) => {
+          setCommandPaletteOpen(false);
+          setSettingsInitialTab(tab);
+          setActiveSection("settings");
+        }}
+      />
       <CreateProjectDialog
         open={quickCreate.open}
         onClose={() => setQuickCreate({ open: false })}

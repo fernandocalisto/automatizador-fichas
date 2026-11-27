@@ -2,6 +2,24 @@
 
 Todas as mudanças notáveis neste projeto serão documentadas neste arquivo.
 
+## [1.1.1] - 2026-11-27
+
+### Motor Nativo `repo:/...` (JVM Daemon + JasperServer + Preview)
+- **`RepoSchemeRepositoryService` na JVM (`java-engine/` + `resources/bin/jasper-daemon.jar`)**: implementação nativa de `StreamRepositoryService`/`RepositoryService` registrada no `JasperProcessor`, resolvendo URIs `repo:/...` (com ou sem extensão `.jasper`/`.jrxml`/`.png`/`.jpg`/`.jrtx`) contra a árvore espelhada `report_unit_resources/repo/`, compilando `.jrxml` sob demanda com cache e bloqueando path traversal — eliminando `Resource not found at: repo:/...` sem alterar o `.jrxml` original.
+- **Descoberta Recursiva, Cache Compartilhado & Auto-Fetch Sob Demanda (`jasperserver_service.py`, `jasper_preview.py`)**: detecção recursiva de subreports, imagens e estilos `repo:/...` (incluindo `reportUnit` usado como subreport), espelhamento em `report_unit_resources/repo/` + cache compartilhado por perfil (`jasperserver_repo_cache/<profile_id>`), inclusão automática em todos os modos de preview (`offline`, `db_hybrid`, `db_live`), auto-fetch sob demanda antes da exportação PDF e endpoints `GET/POST /api/projects/{id}/jasper/repo-resources` e `sync-repo-resources`.
+
+### Suporte a Arquivo `.key` SSH (Padrão & Por Perfil)
+- **Upload seguro no Cofre & Caminho Local (`default_credentials_service.py`, `sftp_service.py`)**: suporte a seleção de arquivo `.key`/`.pem` (salvo no `SecretVaultService` AES-256-GCM com nome exibido `private_key_filename`) e caminho local opcional em disco (`private_key_path`), tanto em **Credenciais Padrão SFTP** quanto em perfis SFTP individuais, suportando chaves OpenSSH, RSA, Ed25519 e ECDSA.
+
+### Redesign Geral da Interface para Usuários Leigos & Ferramentas de Busca
+- **Tela `Início` Guiada (`HomeView`) & Navegação Dual-Mode (`StudioShell`)**: tela inicial com 3 cartões de tarefa, seção **★ Clientes Favoritos**, **Trabalhos Recentes** e guia rápido de primeiro uso; cabeçalho sem abas desabilitadas (modo global vs modo projeto ativo com abas contextuais para `free_report` ou stepper `1..4` para `clinical_form`).
+- **Busca Global `Ctrl+K` (`CommandPalette`) & `SearchableSelect`**: paleta instantânea para pesquisar Clientes, Projetos, Bancos PostgreSQL, Servidores SFTP e JasperReports Servers; seletores buscáveis em todos os formulários de conexão.
+- **Clientes em Master-Detail com Exploradores Inline (`ClientsView`, `JasperServerBrowser`, `SftpBrowser`)**: lista compacta buscável/filtrável com ★ Favoritos à esquerda e workspace completo à direita com exploradores JasperServer/SFTP em tela cheia, última pasta lembrada, pastas favoritas e abertura em **1 clique ou duplo clique** direto no Studio.
+- **Jasper Studio Visual por Padrão (`JasperStudioView`)**: alternador de 3 modos (**`Visual (Preview + IA)`** padrão para `free_report`, `Dividido` e `Só Código`), barra unificada com menu `Exportar ▾`, chip de status/sincronização `repo:/...`, botão contextual de publicação conforme a origem do relatório e preview inicial inteligente para relatórios com parâmetros `$P{}` obrigatórios.
+- **Configurações com Sidebar Categorizada & Busca/Paginação (`SettingsView`)**: navegação lateral agrupada (`Acesso & Cofre`, `Conexões`, `Studio & IA`) e busca + filtro de ambiente (`PRD`/`HML`/`DEV`) + paginação (25/página) nos perfis de Banco, SFTP e JasperServer.
+
+---
+
 ## [1.1.0] - 2026-11-27
 
 ### Bloco 0 — Fundação Compartilhada (Cofre v2, Credenciais Padrão & Migração SQLite)

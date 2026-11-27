@@ -17,12 +17,18 @@ describe("Studio App shell", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
+      if (url.includes("/api/clients")) {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
       if (url.includes("/api/health")) {
         return new Response(
           JSON.stringify({
             status: "ok",
             app_name: "Salutem Ficha Studio",
-            version: "1.0.0",
+            version: "1.1.0",
             database: {},
             paths: {},
             builtin_subreports_count: 4,
@@ -43,8 +49,9 @@ describe("Studio App shell", () => {
     render(<App />);
 
     expect(screen.getByText("Salutem Ficha Studio")).toBeInTheDocument();
+    expect(screen.getByText(/O que você quer fazer agora/i)).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByText("v1.0.0")).toBeInTheDocument();
+      expect(screen.getByText("v1.1.0")).toBeInTheDocument();
     });
 
     const themeBtn = screen.getByRole("button", { name: /Ativar tema escuro/i });

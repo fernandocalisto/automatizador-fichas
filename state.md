@@ -14,8 +14,8 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
 
 1. **Frontend Web (`frontend/`)**: React 19 + TypeScript + Vite 6 + Tailwind CSS v4 + Monaco Editor + `@dnd-kit` + `pdfjs-dist` v5 + Vitest.
    - Compilado em `frontend/dist/` e servido diretamente pelo FastAPI em produção/uso local (ou via Vite em `:5173` com proxy `/api` em desenvolvimento).
-2. **Backend FastAPI (`backend/app/`)**: Python 3.13 + SQLite (WAL) + workspaces em disco + `psycopg` (PostgreSQL) + OS Keyring / Cofre criptografado + `pymupdf` + Orquestrador de Agentes (`AgentHarness` + SSE/WebSocket + Servidor MCP stdio JSON-RPC 2.0).
-3. **Jasper Daemon JVM (`java-engine/` + `resources/bin/jasper-daemon.jar`)**: Motor Java baseado em JasperReports `6.21.3` com modo HTTP residente (`--action serve` em `127.0.0.1`), compilação/exportação em ~80–200ms e os 4 subreports `.jasper` built-in em `resources/subreports/`.
+2. **Backend FastAPI (`backend/app/`)**: Python 3.13+ + SQLite (WAL) + workspaces em disco + `psycopg` (PostgreSQL) + `paramiko` (SSH/SFTP) + `httpx` (JasperReports Server REST v2) + OS Keyring / `SecretVaultService` AES-256-GCM + `pymupdf` + Orquestrador de Agentes (`AgentHarness` + SSE/WebSocket + Servidor MCP stdio JSON-RPC 2.0 com **11 ferramentas**).
+3. **Jasper Daemon JVM (`java-engine/` + `resources/bin/jasper-daemon.jar`)**: Motor Java baseado em JasperReports `6.21.3` com modo HTTP residente (`--action serve` em `127.0.0.1`), resolução nativa de URIs `repo:/...` (`RepoSchemeRepositoryService`), compilação/exportação em ~80–200ms e os 4 subreports `.jasper` built-in em `resources/subreports/`.
 
 ---
 
@@ -83,6 +83,32 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
   - `frontend/vite.config.ts` atualizado com `ws: true` no proxy `/api` e `manualChunks` (`vendor-react`, `vendor-monaco`, `vendor-pdfjs`, `vendor-dndkit`, `vendor-icons`).
   - Limpeza de worktrees e branches locais já mergeadas (`feat/e3-*`, `feat/e4-*`, `swarm-*`, `feat/v1-*`).
 
+### `v1.1.0` — Report Workbench Completo, Conectores & Hub de Clientes
+- **Bloco 0 — Fundação Compartilhada (`secret_vault.py`, `default_credentials_service.py`, `sqlite_store.py`)**:
+  - Cofre unificado com **PBKDF2-HMAC-SHA256 (600k) + AES-256-GCM** (formato v2 retrocompatível com v1) e `keyring` do OS.
+  - Credenciais padrão locais (nunca built-in no repositório) por tipo (`postgres`, `sftp`, `jasperserver`) com herança `credential_mode = 'default' | 'custom'` e descoberta de databases (`GET /api/db/profiles/{id}/databases`).
+  - Migração idempotente SQLite v1.0 → v1.1 adicionando `project_kind`, `source_origin_json`, `default_db_profile_id`, `client_system_id`, `entry_mode` ampliado e tabela `agent_sessions`.
+- **Bloco 1 — Modo Relatório Livre, SQL Workbench/MCP Read-Only, `$P{}` Live & Sessão Contínua**:
+  - Projetos `free_report` sem etapas exclusivas de ficha clínica, SQL Workbench + Schema Explorer read-only (`pg_schema_inspector.py`), 3 novas ferramentas MCP (`list_db_tables`, `describe_db_table`, `preview_db_select`, totalizando **11 ferramentas**), parâmetros dinâmicos `$P{}` com preview `db_live`, skill `manutencao_relatorio` e retomada/reset de sessão nos 4 harnesses.
+- **Bloco 2 — Conector SSH/SFTP (`sftp_service.py`, `api/sftp.py`)**:
+  - Perfis SFTP com `read_only` padrão em `PRD`, navegador remoto, importação `.jrxml` / decompilação `.jasper` via JVM e deploy em 2 etapas (padrão `jrxml_only`, compilação JVM, diff, token de uso único e backup `.bak.<timestamp>`).
+- **Bloco 3 — Conector JasperReports Server REST v2 (`jasperserver_service.py`, `api/jasperserver.py`)**:
+  - Autenticação `/rest_v2/login` + `JSESSIONID`/Basic, navegador de pastas/`Report Units`, importação com subreports e publicação controlada em 2 etapas (update de `main_jrxml` ou criação de nova `Report Unit`).
+- **Bloco 4 — Hub de Clientes Multi-Sistema & Sincronização do Portal Logado (`client_catalog_service.py`, `ClientsView`)**:
+  - Modelo 1:N (`client_units` → `client_systems`: Ambulatorial, Hospitalar, Painel, Compras, DEV/HML/PRD), links web clicáveis, parser compatível com o payload real camelCase (`/api/management/data`) via snippet/upload na sessão autenticada do colaborador, mantendo **zero** URLs internas, clientes ou credenciais no Git.
+
+### `v1.1.1` — Motor Nativo `repo:/...`, Suporte SSH `.key` & Redesign UX para Usuários Leigos
+- **Motor Nativo `repo:/...` na JVM & Auto-Fetch (`RepoSchemeRepositoryService.java`, `JasperProcessor.java`, `jasperserver_service.py`, `jasper_preview.py`)**:
+  - Resolução nativa de `repo:/...` no `jasper-daemon.jar` (sem alterar o `.jrxml` original), descoberta recursiva de subreports/imagens/estilos/`.jrtx` e `reportUnit` usados como subreport, espelhamento em `report_unit_resources/repo/` + cache compartilhado por servidor, inclusão em todos os modos de preview (`offline`, `db_hybrid`, `db_live`), auto-fetch sob demanda e endpoints `GET/POST /jasper/repo-resources` e `sync-repo-resources`.
+- **Suporte a Arquivo `.key` SSH (Padrão & por Perfil)**:
+  - Upload de `.key`/`.pem` no cofre AES-256-GCM (`private_key_filename`) + caminho local opcional em disco (`private_key_path`), com suporte a OpenSSH, RSA, Ed25519 e ECDSA em `DefaultCredentialsTab` e `SftpProfilesTab`.
+- **Redesign Geral da Interface para Usuários Leigos & Ferramentas de Busca**:
+  - Tela **`Início`** guiada (`HomeView`) com 3 cartões de tarefa, ★ Clientes Favoritos, Trabalhos Recentes e guia rápido de primeiro uso.
+  - Cabeçalho **Dual-Mode** (`StudioShell`) sem abas desabilitadas, **Busca Global `Ctrl+K`** (`CommandPalette`) e seletores buscáveis (`SearchableSelect`).
+  - **Clientes Master-Detail** (`ClientsView`) com exploradores inline full-height (`JasperServerBrowser` e `SftpBrowser`), última pasta lembrada, pastas favoritas e abertura em **1 clique / duplo clique** direto no Studio.
+  - **Jasper Studio Visual-First** (`Visual (Preview + IA)` como padrão para `free_report`, `Dividido`, `Só Código`), menu `Exportar ▾`, chip `repo:/...`, botão contextual de publicação e preview inicial inteligente para `$P{}` obrigatórios.
+  - **Configurações** (`SettingsView`) com sidebar categorizada e busca + filtro de ambiente + paginação (25/página) para grandes catálogos de conexões.
+
 ---
 
 ## 3. Baseline de Qualidade & Verificação (`main`)
@@ -134,30 +160,15 @@ agy mcp add salutem_studio .\.venv\Scripts\python.exe -- -m backend.app.mcp_tool
 
 ---
 
-## 5. Decisões Arquiteturais & Escopo Futuro (`v1.1` — Ver `implementation_plan_v1.1.md`)
+## 5. Decisões Arquiteturais & Backlog Futuro (`v1.2+` / Sob Demanda)
 
-Decisões estratégicas atualizadas em **2026-11-27** (detalhamento completo em [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md)):
+Decisões estratégicas consolidadas na entrega `v1.1.1`:
 
-- **Posicionamento — AI-First Report & Form Workbench**: não tentar clonar os painéis visuais legados do Jaspersoft Studio; maximizar **leveza, velocidade (~150ms), zero fricção e IA integrada com visão + acesso read-only ao schema do banco**.
-- **Foco 100% em utilidade diária (Ambulatorial + Hospitalar)**: eliminar 4 ferramentas pesadas/manuais (~~Jaspersoft Studio~~, ~~DataGrip~~, ~~cadastro manual de templates~~ e ~~Tabby/FileZilla~~), cobrindo fichas ambulatoriais via **SFTP** e relatórios Hospitalares/gerais via **JasperReports Server (`Report Unit`)**.
-- **Contas multiusuário / Login (`STUDIO_AUTH_ENABLED`)**: **adiado por tempo indeterminado** para concentrar todo esforço em produtividade real antes de adicionar gestão de usuários.
-- **Portal interno de gestão de unidades**: preparar interface plugável (`UnitCatalogProvider`) para sincronização futura automática de PostgreSQL, SFTP e JasperServer de todas as unidades assim que o formato de exposição dos dados for levantado.
+- **Posicionamento — AI-First Report & Form Workbench acessível para usuários leigos**: foco em leveza, velocidade (~150ms), navegação guiada sem jargão desnecessário (`Início`, `Ctrl+K`, 1 clique em Clientes → Studio, modo `Visual (Preview + IA)` padrão) e IA integrada com visão + acesso read-only ao schema do banco.
+- **Segurança & Privacidade (Zero Dados Corporativos no Git)**: nenhuma URL interna, cliente, IP, senha ou chave `.key` é versionada no código — credenciais padrão/personalizadas e catálogos sincronizados ficam estritamente locais (OS Keyring / `SecretVaultService` AES-256-GCM / `workspaces/` gitignored).
+- **Foco 100% em utilidade diária (Ambulatorial + Hospitalar)**: cobre fichas ambulatoriais via **SFTP** (incluindo chaves `.key`) e relatórios Hospitalares/gerais via **JasperReports Server (`Report Unit` + `repo:/...` nativo na JVM)**.
 
----
-
-### Milestone `v1.1` — Report Workbench Completo (4 Blocos Incrementais)
-1. **Bloco 1 — Modo Relatório Livre + SQL Workbench & MCP de Schema + Parâmetros Dinâmicos + Sessão Contínua**:
-   - Novo `project_kind="free_report"` pulando Form Builder/`INSERT` ambulatorial; SQL Workbench Read-Only (schemas, tabelas, colunas, PK/FK e `SELECT` seguro com `LIMIT 50`); 3 novas MCP tools (`list_db_tables`, `describe_db_table`, `preview_db_select`); Preview Live (`db_live`) com parâmetros `$P{...}` dinâmicos; continuidade de sessão nos 4 harnesses (`agent_sessions`) e skill `manutencao_relatorio`.
-2. **Bloco 2 — Conector SSH/SFTP (`paramiko`)**:
-   - Substitui Tabby/FileZilla para fichas ambulatoriais: perfis no cofre (`read_only` padrão em PRD), navegador SFTP, importação de `.jrxml` ou decompilação automática de `.jasper` via JVM Daemon, e deploy em 2 etapas (compilação JVM obrigatória + diff + backup remoto `.bak.<timestamp>`).
-3. **Bloco 3 — Conector JasperReports Server (`Report Unit` — REST v2)**:
-   - Portado dos contratos validados em `fernandocalisto/jasper-reports-tools`: perfis no cofre, navegador de pastas/`Report Units`, importação completa (`main_jrxml` + subreports/recursos em `_files/` + input controls) e deploy controlado com diff + backup.
-4. **Bloco 4 — Hardening do Cofre (`cryptography`) & Gancho do Catálogo de Unidades**:
-   - Extração para `secret_vault.py` com **AES-256-GCM** (retrocompatível com `.vault.json` v1) e interface `UnitCatalogProvider` pronta para sincronizar unidades do site interno de gestão.
-
----
-
-### Backlog Futuro / Adiado (`v1.x` / Sob Demanda)
+### Backlog Futuro / Adiado (`v1.2+` / Sob Demanda)
 - **Contas multiusuário, Login (`STUDIO_AUTH_ENABLED`) & Trava Otimista (`409`)**: adiado por tempo indeterminado até haver demanda formal de servidor compartilhado.
 - **BYOK simplificado (API Key Claude/OpenAI/Gemini)** na UI de Configurações (sem exigir contas multiusuário).
 - **Engenharia Reversa de `template_ficha_clinica` (PostgreSQL Ambulatorial → `ficha.json`)**.

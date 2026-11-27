@@ -5,6 +5,7 @@ export * from "./CodeEditor";
 export * from "./Dialog";
 export * from "./EmptyState";
 export * from "./Input";
+export * from "./SearchableSelect";
 export * from "./SplitPane";
 export * from "./Switch";
 export * from "./Tabs";

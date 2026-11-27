@@ -481,6 +481,8 @@ export interface DefaultCredentialRead {
   default_dbname_ambulatorial: string;
   default_dbname_hospitalar: string;
   default_remote_base_dir: string;
+  private_key_filename?: string;
+  private_key_path?: string;
   has_password: boolean;
   has_private_key: boolean;
   has_passphrase: boolean;
@@ -496,6 +498,8 @@ export interface DefaultCredentialUpdatePayload {
   default_dbname_ambulatorial?: string | null;
   default_dbname_hospitalar?: string | null;
   default_remote_base_dir?: string | null;
+  private_key_filename?: string | null;
+  private_key_path?: string | null;
   password?: string | null;
   private_key?: string | null;
   passphrase?: string | null;
@@ -572,6 +576,8 @@ export interface SftpProfileRead {
   auth_type: SftpAuthType;
   credential_mode: CredentialMode;
   remote_base_dir: string;
+  private_key_filename?: string;
+  private_key_path?: string;
   environment: EnvironmentKind;
   read_only: boolean;
   linked_db_profile_id: string | null;
@@ -589,6 +595,8 @@ export interface SftpProfileCreatePayload {
   credential_mode?: CredentialMode;
   password?: string | null;
   private_key?: string | null;
+  private_key_filename?: string | null;
+  private_key_path?: string | null;
   passphrase?: string | null;
   remote_base_dir?: string;
   environment?: EnvironmentKind;
@@ -605,6 +613,8 @@ export interface SftpProfileUpdatePayload {
   credential_mode?: CredentialMode;
   password?: string | null;
   private_key?: string | null;
+  private_key_filename?: string | null;
+  private_key_path?: string | null;
   passphrase?: string | null;
   remote_base_dir?: string;
   environment?: EnvironmentKind;
@@ -828,7 +838,26 @@ export interface ClientSyncApplyResponse {
   warnings: string[];
 }
 
+export interface RepoResourceItem {
+  uri: string;
+  local_path: string | null;
+  resolved: boolean;
+  compiled: boolean;
+  kind: "subreport" | "image" | "style" | "other";
+}
+
+export interface RepoResourcesStatus {
+  project_id: string;
+  total: number;
+  resolved_count: number;
+  missing_count: number;
+  can_sync_remote: boolean;
+  items: RepoResourceItem[];
+  warnings: string[];
+}
+
 export type StudioSection =
+  | "home"
   | "projects"
   | "clients"
   | "workspace"

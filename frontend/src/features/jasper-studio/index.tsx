@@ -1,5 +1,20 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { SplitPane, useToast } from "@/components/ui";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import {
+  Code2,
+  Crosshair,
+  FileText,
+  Play,
+  Sliders,
+  Sparkles,
+} from "lucide-react";
+import { Button, EmptyState, SplitPane, useToast } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import type { JasperStudioViewProps } from "@/types/feature-props";
 import type {
@@ -10,15 +25,23 @@ import type {
   JrxmlLintReport,
   JrxmlParameterInfo,
   PreviewMode,
+  ProjectKind,
+  RepoResourcesStatus,
   ScenarioType,
 } from "@/types/studio";
 import { JrxmlEditorPane } from "./JrxmlEditorPane";
 import { PdfPreviewCanvas } from "./PdfPreviewCanvas";
-import { PreviewControlBar } from "./PreviewControlBar";
+import {
+  LayoutModeSwitcher,
+  PreviewControlBar,
+  RepoResourcesChip,
+} from "./PreviewControlBar";
 import type { RegionAnnotationSubmitPayload } from "./RegionAnnotationOverlay";
 import { ReportParamsBar } from "./ReportParamsBar";
 import {
+  JASPER_LAYOUT_STORAGE_KEY,
   chatMessageToAnnotation,
+  type JasperLayoutMode,
   type VisualRegionAnnotation,
 } from "./types";
 import {
@@ -50,7 +73,9 @@ function inferInputKind(javaClass: string): JrxmlParameterInfo["input_kind"] {
   }
   if (short === "Boolean") return "boolean";
   if (javaClass === "java.sql.Date" || short === "LocalDate") return "date";
-  if (["Timestamp", "Date", "LocalDateTime", "OffsetDateTime"].includes(short)) {
+  if (
+    ["Timestamp", "Date", "LocalDateTime", "OffsetDateTime"].includes(short)
+  ) {
     return "datetime";
   }
   return "string";
@@ -93,6 +118,44 @@ function parseJrxmlParametersLocally(xml: string): JrxmlParameterInfo[] {
     });
   }
   return results;
+}
+
+function getMissingRequiredParams(
+  params: JrxmlParameterInfo[],
+  values: Record<string, string>,
+): JrxmlParameterInfo[] {
+  return params.filter(
+    (p) =>
+      !p.is_system &&
+      !p.default_expression &&
+      !(values[p.name] ?? "").trim(),
+  );
+}
+
+function loadStoredLayoutMode(): JasperLayoutMode | null {
+  try {
+    const raw = window.localStorage.getItem(JASPER_LAYOUT_STORAGE_KEY);
+    if (raw === "visual" || raw === "split" || raw === "code") {
+      return raw;
+    }
+  } catch {
+    // Ignore storage read errors
+  }
+  return null;
+}
+
+function resolveInitialLayoutMode(projectKind?: ProjectKind): JasperLayoutMode {
+  const stored = loadStoredLayoutMode();
+  if (stored) return stored;
+  return projectKind === "free_report" ? "visual" : "split";
+}
+
+function saveStoredLayoutMode(mode: JasperLayoutMode): void {
+  try {
+    window.localStorage.setItem(JASPER_LAYOUT_STORAGE_KEY, mode);
+  } catch {
+    // Ignore storage write errors
+  }
 }
 
 function loadStoredReportParams(projectId: string): Record<string, string> {
@@ -145,6 +208,13 @@ export function JasperStudioView({
   const loadedVersionRef = useRef<number | null>(null);
   const initialLoadedRef = useRef(false);
 
+  const isFreeReport = project.project_kind === "free_report";
+
+  // Modo de visualização (Visual / Dividido / Só Código)
+  const [layoutMode, setLayoutMode] = useState<JasperLayoutMode>(() =>
+    resolveInitialLayoutMode(project.project_kind),
+  );
+
   // Estado do artefato JRXML
   const [loadingArtifact, setLoadingArtifact] = useState(true);
   const [hasJrxml, setHasJrxml] = useState(false);
@@ -169,15 +239,25 @@ export function JasperStudioView({
 
   // Preview e cenários fictícios
   const [scenario, setScenario] = useState<ScenarioType>("full");
-  const [mode, setMode] = useState<PreviewMode>("auto");
+  const [mode, setMode] = useState<PreviewMode>(() =>
+    isFreeReport && project.default_db_profile_id ? "db_live" : "auto",
+  );
   const [dbProfiles, setDbProfiles] = useState<DbProfileRead[]>([]);
-  const [selectedDbProfileId, setSelectedDbProfileId] = useState("");
+  const [selectedDbProfileId, setSelectedDbProfileId] = useState(
+    project.default_db_profile_id ?? "",
+  );
   const [atendimentoIdInput, setAtendimentoIdInput] = useState("");
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewResult, setPreviewResult] =
     useState<JasperPreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewDeferredForParams, setPreviewDeferredForParams] =
+    useState(false);
   const [cacheBuster, setCacheBuster] = useState<number>(() => Date.now());
+
+  // Recursos repo: (JasperReports Server)
+  const [repoStatus, setRepoStatus] = useState<RepoResourcesStatus | null>(null);
+  const [syncingRepo, setSyncingRepo] = useState(false);
 
   // Parâmetros $P{} do relatório (persistidos por projeto em localStorage)
   const [reportParameters, setReportParameters] = useState<
@@ -200,6 +280,80 @@ export function JasperStudioView({
 
   const dirty = hasJrxml && jrxmlContent !== savedContent;
   const orientation = detectJrxmlOrientation(jrxmlContent);
+
+  const missingRequiredParams = useMemo(
+    () => getMissingRequiredParams(reportParameters, reportParamValues),
+    [reportParameters, reportParamValues],
+  );
+
+  const handleChangeLayoutMode = useCallback((nextMode: JasperLayoutMode) => {
+    setLayoutMode(nextMode);
+    saveStoredLayoutMode(nextMode);
+  }, []);
+
+  const fetchRepoResources = useCallback(async (projectId: string) => {
+    if (typeof fetch !== "function") return;
+    try {
+      const resp = await fetch(
+        `/api/projects/${encodeURIComponent(projectId)}/jasper/repo-resources`,
+      );
+      if (!resp.ok) return;
+      const data = (await resp.json()) as RepoResourcesStatus;
+      if (data && typeof data.total === "number") {
+        setRepoStatus(data);
+      }
+    } catch {
+      // Silencioso quando backend não suporta ou em testes sem mock de fetch
+    }
+  }, []);
+
+  const handleSyncRepoResources = useCallback(async () => {
+    if (typeof fetch !== "function") return;
+    setSyncingRepo(true);
+    try {
+      const resp = await fetch(
+        `/api/projects/${encodeURIComponent(project.id)}/jasper/sync-repo-resources`,
+        { method: "POST" },
+      );
+      if (!resp.ok) {
+        let message = `HTTP ${resp.status}`;
+        try {
+          const errPayload = (await resp.json()) as { detail?: string };
+          if (typeof errPayload?.detail === "string") {
+            message = errPayload.detail;
+          }
+        } catch {
+          // Ignore parse error
+        }
+        throw new Error(message);
+      }
+      const data = (await resp.json()) as Partial<RepoResourcesStatus>;
+      if (typeof data?.total === "number") {
+        setRepoStatus(data as RepoResourcesStatus);
+        pushToast({
+          tone: (data.missing_count ?? 0) === 0 ? "success" : "warning",
+          title:
+            (data.missing_count ?? 0) === 0
+              ? `Recursos repo: sincronizados (${data.resolved_count}/${data.total})`
+              : `Sincronização parcial (${data.missing_count} pendente(s))`,
+        });
+      } else {
+        await fetchRepoResources(project.id);
+        pushToast({
+          tone: "success",
+          title: "Recursos repo: sincronizados",
+        });
+      }
+    } catch (err) {
+      pushToast({
+        tone: "error",
+        title: "Falha ao sincronizar recursos repo:",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSyncingRepo(false);
+    }
+  }, [fetchRepoResources, project.id, pushToast]);
 
   const parseAtendimentoId = useCallback((raw: string): number | null => {
     const trimmed = raw.trim();
@@ -262,6 +416,7 @@ export function JasperStudioView({
       }
 
       const reqSeq = ++previewReqSeqRef.current;
+      setPreviewDeferredForParams(false);
       setPreviewLoading(true);
       setPreviewError(null);
 
@@ -324,19 +479,23 @@ export function JasperStudioView({
     ],
   );
 
-  // Carregamento inicial: JRXML + perfis PG + histórico de anotações visuais
+  // Carregamento inicial: JRXML + perfis PG + histórico de anotações visuais + repo:
   useEffect(() => {
     let cancelled = false;
     userEditedRef.current = false;
+    setLayoutMode(resolveInitialLayoutMode(project.project_kind));
     setLoadingArtifact(true);
     setLintReport(null);
     setCompileResult(null);
     setCompileError(null);
     setPreviewResult(null);
     setPreviewError(null);
+    setPreviewDeferredForParams(false);
+    setRepoStatus(null);
     setSelectedLine(null);
     setReportParameters([]);
-    setReportParamValues(loadStoredReportParams(project.id));
+    const storedParams = loadStoredReportParams(project.id);
+    setReportParamValues(storedParams);
 
     const loadInitial = async () => {
       const [artifactRes, profilesRes, chatRes] = await Promise.allSettled([
@@ -355,12 +514,19 @@ export function JasperStudioView({
           ? list.find((p) => p.id === project.default_db_profile_id)
           : undefined;
         const def = byProject ?? list.find((p) => p.is_default) ?? list[0];
-        resolvedProfileId = def?.id ?? "";
+        resolvedProfileId = def?.id ?? project.default_db_profile_id ?? "";
         setSelectedDbProfileId(resolvedProfileId);
       } else {
         setDbProfiles([]);
-        setSelectedDbProfileId("");
+        resolvedProfileId = project.default_db_profile_id ?? "";
+        setSelectedDbProfileId(resolvedProfileId);
       }
+
+      const initialMode: PreviewMode =
+        project.project_kind === "free_report" && project.default_db_profile_id
+          ? "db_live"
+          : "auto";
+      setMode(initialMode);
 
       if (chatRes.status === "fulfilled") {
         const parsed = chatRes.value
@@ -373,12 +539,13 @@ export function JasperStudioView({
 
       if (artifactRes.status === "fulfilled") {
         const rev = artifactRes.value;
+        const localParams = parseJrxmlParametersLocally(rev.content);
         loadedVersionRef.current = rev.version_num;
         setHasJrxml(true);
         setJrxmlContent(rev.content);
         setSavedContent(rev.content);
         setVersionNum(rev.version_num);
-        setReportParameters(parseJrxmlParametersLocally(rev.content));
+        setReportParameters(localParams);
         initialLoadedRef.current = true;
         setLoadingArtifact(false);
 
@@ -401,13 +568,32 @@ export function JasperStudioView({
             });
         }
 
-        void runPreview({
-          scenario: "full",
-          mode: "auto",
-          dbProfileId: resolvedProfileId,
-          inlineJrxml: rev.content,
-          silent: true,
-        });
+        // Busca status de recursos repo:
+        void fetchRepoResources(project.id);
+
+        // Option A Smart Initial Preview:
+        // Para free_report com parâmetros obrigatórios ($P{} sem default e não preenchidos),
+        // não dispara preview fadado a erro; exibe estado calmo pedindo preenchimento!
+        const missingOnMount = getMissingRequiredParams(
+          localParams,
+          storedParams,
+        );
+        if (
+          project.project_kind === "free_report" &&
+          missingOnMount.length > 0
+        ) {
+          setPreviewDeferredForParams(true);
+        } else {
+          setPreviewDeferredForParams(false);
+          void runPreview({
+            scenario: "full",
+            mode: initialMode,
+            dbProfileId: resolvedProfileId,
+            inlineJrxml: rev.content,
+            reportParamsOverride: storedParams,
+            silent: true,
+          });
+        }
       } else {
         const reason = artifactRes.reason;
         const isNotFound = reason instanceof ApiError && reason.status === 404;
@@ -461,6 +647,7 @@ export function JasperStudioView({
       .then((rev) => {
         if (cancelled) return;
         if (rev.version_num === loadedVersionRef.current) return;
+        const updatedParams = parseJrxmlParametersLocally(rev.content);
         loadedVersionRef.current = rev.version_num;
         userEditedRef.current = false;
         jrxmlRef.current = rev.content;
@@ -468,11 +655,22 @@ export function JasperStudioView({
         setJrxmlContent(rev.content);
         setSavedContent(rev.content);
         setVersionNum(rev.version_num);
+        setReportParameters(updatedParams);
         setCompileResult(null);
         setCompileError(null);
         setLintReport(null);
 
-        void runPreview({ inlineJrxml: rev.content, silent: true });
+        void fetchRepoResources(project.id);
+
+        const missingNow = getMissingRequiredParams(
+          updatedParams,
+          reportParamValues,
+        );
+        if (isFreeReport && missingNow.length > 0 && !previewResult) {
+          setPreviewDeferredForParams(true);
+        } else {
+          void runPreview({ inlineJrxml: rev.content, silent: true });
+        }
       })
       .catch(() => {
         // Ignora erro transitório em refresh silencioso
@@ -481,7 +679,16 @@ export function JasperStudioView({
     return () => {
       cancelled = true;
     };
-  }, [project.id, latestJrxmlVersion, artifactSyncTick, runPreview]);
+  }, [
+    project.id,
+    latestJrxmlVersion,
+    artifactSyncTick,
+    fetchRepoResources,
+    isFreeReport,
+    previewResult,
+    reportParamValues,
+    runPreview,
+  ]);
 
   // Live-reload debounced (~900ms) após edições no editor
   useEffect(() => {
@@ -677,6 +884,8 @@ export function JasperStudioView({
         title: `Revisão v${res.artifact.version_num} salva`,
       });
 
+      void fetchRepoResources(project.id);
+
       if (liveReload) {
         if (liveReloadTimerRef.current !== null) {
           window.clearTimeout(liveReloadTimerRef.current);
@@ -694,6 +903,7 @@ export function JasperStudioView({
       setSaving(false);
     }
   }, [
+    fetchRepoResources,
     jrxmlContent,
     liveReload,
     onProjectUpdated,
@@ -727,10 +937,24 @@ export function JasperStudioView({
           );
           return;
         }
+        if (
+          isFreeReport &&
+          previewDeferredForParams &&
+          missingRequiredParams.length > 0
+        ) {
+          return;
+        }
         void runPreview({ mode: nextMode });
       }
     },
-    [hasJrxml, runPreview, selectedDbProfileId],
+    [
+      hasJrxml,
+      isFreeReport,
+      missingRequiredParams.length,
+      previewDeferredForParams,
+      runPreview,
+      selectedDbProfileId,
+    ],
   );
 
   const handleChangeDbProfileId = useCallback(
@@ -741,10 +965,24 @@ export function JasperStudioView({
         (mode === "db_hybrid" || mode === "db_live") &&
         nextProfileId
       ) {
+        if (
+          isFreeReport &&
+          previewDeferredForParams &&
+          missingRequiredParams.length > 0
+        ) {
+          return;
+        }
         void runPreview({ mode, dbProfileId: nextProfileId });
       }
     },
-    [hasJrxml, mode, runPreview],
+    [
+      hasJrxml,
+      isFreeReport,
+      missingRequiredParams.length,
+      mode,
+      previewDeferredForParams,
+      runPreview,
+    ],
   );
 
   const handleSubmitAnnotation = useCallback(
@@ -824,94 +1062,270 @@ export function JasperStudioView({
     triggerTextDownload(`${project.slug}.jrxml`, jrxmlContent);
   }, [jrxmlContent, project.slug]);
 
-  return (
+  const openJrxmlChat = useMemo(
+    () => (onOpenAgentChat ? () => onOpenAgentChat("jrxml") : undefined),
+    [onOpenAgentChat],
+  );
+
+  const showRequiredParamsEmptyState =
+    isFreeReport &&
+    hasJrxml &&
+    previewDeferredForParams &&
+    !previewResult &&
+    !previewLoading;
+
+  const editorPane = (
+    <JrxmlEditorPane
+      loading={loadingArtifact}
+      hasJrxml={hasJrxml}
+      jrxmlContent={jrxmlContent}
+      versionNum={versionNum}
+      dirty={dirty}
+      scaffolding={scaffolding}
+      linting={linting}
+      compiling={compiling}
+      saving={saving}
+      liveReload={liveReload}
+      onToggleLiveReload={setLiveReload}
+      onChangeJrxml={handleChangeJrxml}
+      onScaffold={handleScaffold}
+      onLint={handleLint}
+      onCompile={handleCompile}
+      onSave={handleSave}
+      lintReport={lintReport}
+      compileResult={compileResult}
+      compileError={compileError}
+      diagnosticsOpen={diagnosticsOpen}
+      onToggleDiagnostics={() => setDiagnosticsOpen((prev) => !prev)}
+      selectedLine={selectedLine}
+      onSelectLine={(line) => setSelectedLine(line)}
+    />
+  );
+
+  const previewPane = (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
+      <PreviewControlBar
+        projectId={project.id}
+        projectSlug={project.slug}
+        projectKind={project.project_kind}
+        sourceOrigin={project.source_origin}
+        hasJrxml={hasJrxml}
+        scenario={scenario}
+        onChangeScenario={handleChangeScenario}
+        mode={mode}
+        onChangeMode={handleChangeMode}
+        dbProfiles={dbProfiles}
+        selectedDbProfileId={selectedDbProfileId}
+        onChangeDbProfileId={handleChangeDbProfileId}
+        atendimentoIdInput={atendimentoIdInput}
+        onChangeAtendimentoIdInput={setAtendimentoIdInput}
+        previewLoading={previewLoading}
+        previewResult={previewResult}
+        previewError={previewError}
+        cacheBuster={cacheBuster}
+        onRefreshPreview={() => void runPreview()}
+        onDownloadJrxml={handleDownloadJrxml}
+        layoutMode={layoutMode}
+        onChangeLayoutMode={handleChangeLayoutMode}
+        repoStatus={repoStatus}
+        syncingRepo={syncingRepo}
+        onSyncRepoResources={() => void handleSyncRepoResources()}
+        onOpenAgentChat={openJrxmlChat}
+        headerExtraActions={headerExtraActions}
+      />
+
+      {layoutMode === "visual" && hasJrxml && (
+        <div
+          data-testid="visual-mode-tip-bar"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-blueprint-soft/35 px-3 py-1.5 text-xs text-ink-secondary"
+        >
+          <div className="flex items-center gap-1.5">
+            <Crosshair className="h-3.5 w-3.5 shrink-0 text-blueprint" />
+            <span>
+              Dica: clique em{" "}
+              <strong className="text-ink">Selecionar área para ajuste</strong>{" "}
+              no PDF para marcar exatamente onde quer alterar, ou peça direto à
+              IA.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleChangeLayoutMode("split")}
+            className="inline-flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-accent cursor-pointer"
+          >
+            <Code2 className="h-3 w-3" />
+            Ver XML
+          </button>
+        </div>
+      )}
+
+      <ReportParamsBar
+        parameters={reportParameters}
+        values={reportParamValues}
+        onChangeValue={handleChangeReportParamValue}
+        onClearAll={handleClearReportParams}
+        onApplyPreview={() => void runPreview()}
+        previewLoading={previewLoading}
+        defaultOpen={
+          mode === "db_live" ||
+          isFreeReport ||
+          missingRequiredParams.length > 0
+        }
+        hasPreview={Boolean(previewResult)}
+      />
+
+      {showRequiredParamsEmptyState ? (
+        <div
+          data-testid="required-params-empty-state"
+          className="flex min-h-0 flex-1 items-center justify-center bg-surface-subtle/60 p-6"
+        >
+          <EmptyState
+            className="max-w-lg"
+            icon={<Sliders className="h-5 w-5 text-blueprint" />}
+            title={
+              missingRequiredParams.length > 0
+                ? "Preencha os parâmetros para gerar o preview"
+                : "Parâmetros prontos para gerar o preview"
+            }
+            description={
+              missingRequiredParams.length > 0
+                ? `Este relatório precisa de parâmetros para gerar o preview (${missingRequiredParams.map((p) => p.name).join(", ")}). Preencha acima e clique em Gerar Preview.`
+                : "Todos os parâmetros obrigatórios foram preenchidos. Clique em Gerar Preview para visualizar o PDF."
+            }
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  icon={<Play className="h-3.5 w-3.5" />}
+                  onClick={() => void runPreview()}
+                >
+                  Gerar Preview
+                </Button>
+                {openJrxmlChat && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<Sparkles className="h-3.5 w-3.5" />}
+                    onClick={openJrxmlChat}
+                  >
+                    Pedir ajuste à IA
+                  </Button>
+                )}
+              </div>
+            }
+          />
+        </div>
+      ) : layoutMode === "visual" && !loadingArtifact && !hasJrxml ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center bg-surface-subtle/60 p-6">
+          <EmptyState
+            className="max-w-lg"
+            icon={<FileText className="h-5 w-5 text-accent" />}
+            title="Nenhum arquivo .jrxml neste projeto ainda"
+            description="Peça à IA para criar o relatório ou abra o modo Código para gerar um template inicial."
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {openJrxmlChat && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<Sparkles className="h-3.5 w-3.5" />}
+                    onClick={openJrxmlChat}
+                  >
+                    Pedir ajuste à IA
+                  </Button>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  icon={<Code2 className="h-3.5 w-3.5" />}
+                  onClick={() => handleChangeLayoutMode("split")}
+                >
+                  Abrir editor XML
+                </Button>
+              </div>
+            }
+          />
+        </div>
+      ) : (
+        <PdfPreviewCanvas
+          projectId={project.id}
+          hasJrxml={hasJrxml}
+          scenario={scenario}
+          orientation={orientation}
+          previewResult={previewResult}
+          previewLoading={previewLoading}
+          cacheBuster={cacheBuster}
+          annotations={annotations}
+          submittingAnnotation={submittingAnnotation}
+          onSubmitAnnotation={handleSubmitAnnotation}
+          onGeneratePreview={() => void runPreview()}
+          onOpenAgentChat={openJrxmlChat}
+        />
+      )}
+    </div>
+  );
+
+  if (layoutMode === "visual") {
+    return (
+      <div
+        data-testid="jasper-studio-visual-mode"
+        className="flex h-full min-h-0 flex-col bg-canvas"
+      >
+        {previewPane}
+      </div>
+    );
+  }
+
+  if (layoutMode === "code") {
+    return (
+      <div
+        data-testid="jasper-studio-code-mode"
+        className="flex h-full min-h-0 flex-col bg-canvas"
+      >
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface px-3 py-1.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <LayoutModeSwitcher
+              layoutMode={layoutMode}
+              onChangeLayoutMode={handleChangeLayoutMode}
+            />
+            <RepoResourcesChip
+              repoStatus={repoStatus}
+              syncingRepo={syncingRepo}
+              onSyncRepoResources={() => void handleSyncRepoResources()}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {openJrxmlChat && (
+              <Button
+                variant="blueprint"
+                size="xs"
+                icon={<Sparkles className="h-3.5 w-3.5" />}
+                onClick={openJrxmlChat}
+              >
+                Pedir ajuste à IA
+              </Button>
+            )}
+            {headerExtraActions}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1">{editorPane}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      data-testid="jasper-studio-split-mode"
+      className="flex h-full min-h-0 flex-col bg-canvas"
+    >
       <SplitPane
         storageKey="salutem:split:jasper-studio"
         initialRatio={0.48}
         minRatio={0.28}
         maxRatio={0.72}
-        left={
-          <JrxmlEditorPane
-            loading={loadingArtifact}
-            hasJrxml={hasJrxml}
-            jrxmlContent={jrxmlContent}
-            versionNum={versionNum}
-            dirty={dirty}
-            scaffolding={scaffolding}
-            linting={linting}
-            compiling={compiling}
-            saving={saving}
-            liveReload={liveReload}
-            onToggleLiveReload={setLiveReload}
-            onChangeJrxml={handleChangeJrxml}
-            onScaffold={handleScaffold}
-            onLint={handleLint}
-            onCompile={handleCompile}
-            onSave={handleSave}
-            lintReport={lintReport}
-            compileResult={compileResult}
-            compileError={compileError}
-            diagnosticsOpen={diagnosticsOpen}
-            onToggleDiagnostics={() => setDiagnosticsOpen((prev) => !prev)}
-            selectedLine={selectedLine}
-            onSelectLine={(line) => setSelectedLine(line)}
-          />
-        }
-        right={
-          <div className="flex h-full min-h-0 flex-col bg-canvas">
-            <PreviewControlBar
-              projectId={project.id}
-              projectSlug={project.slug}
-              hasJrxml={hasJrxml}
-              scenario={scenario}
-              onChangeScenario={handleChangeScenario}
-              mode={mode}
-              onChangeMode={handleChangeMode}
-              dbProfiles={dbProfiles}
-              selectedDbProfileId={selectedDbProfileId}
-              onChangeDbProfileId={handleChangeDbProfileId}
-              atendimentoIdInput={atendimentoIdInput}
-              onChangeAtendimentoIdInput={setAtendimentoIdInput}
-              previewLoading={previewLoading}
-              previewResult={previewResult}
-              previewError={previewError}
-              cacheBuster={cacheBuster}
-              onRefreshPreview={() => void runPreview()}
-              onDownloadJrxml={handleDownloadJrxml}
-              headerExtraActions={headerExtraActions}
-            />
-
-            <ReportParamsBar
-              parameters={reportParameters}
-              values={reportParamValues}
-              onChangeValue={handleChangeReportParamValue}
-              onClearAll={handleClearReportParams}
-              onApplyPreview={() => void runPreview()}
-              previewLoading={previewLoading}
-              defaultOpen={
-                mode === "db_live" || project.project_kind === "free_report"
-              }
-            />
-
-            <PdfPreviewCanvas
-              projectId={project.id}
-              hasJrxml={hasJrxml}
-              scenario={scenario}
-              orientation={orientation}
-              previewResult={previewResult}
-              previewLoading={previewLoading}
-              cacheBuster={cacheBuster}
-              annotations={annotations}
-              submittingAnnotation={submittingAnnotation}
-              onSubmitAnnotation={handleSubmitAnnotation}
-              onGeneratePreview={() => void runPreview()}
-              onOpenAgentChat={
-                onOpenAgentChat ? () => onOpenAgentChat("jrxml") : undefined
-              }
-            />
-          </div>
-        }
+        left={editorPane}
+        right={previewPane}
       />
     </div>
   );

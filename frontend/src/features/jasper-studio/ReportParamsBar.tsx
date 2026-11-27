@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { ChevronDown, ChevronRight, RotateCcw, Sliders } from "lucide-react";
+import { useEffect, useState, type KeyboardEvent } from "react";
+import { ChevronDown, ChevronRight, Play, RotateCcw, Sliders } from "lucide-react";
 import { Badge, Button, Input, Select } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import type { JrxmlParameterInfo } from "@/types/studio";
 
 export interface ReportParamsBarProps {
@@ -11,6 +12,7 @@ export interface ReportParamsBarProps {
   onApplyPreview?: () => void;
   previewLoading?: boolean;
   defaultOpen?: boolean;
+  hasPreview?: boolean;
 }
 
 function shortJavaClass(javaClass: string): string {
@@ -26,17 +28,34 @@ export function ReportParamsBar({
   onApplyPreview,
   previewLoading = false,
   defaultOpen = false,
+  hasPreview = true,
 }: ReportParamsBarProps) {
   const [open, setOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (defaultOpen) {
+      setOpen(true);
+    }
+  }, [defaultOpen]);
 
   const userParams = parameters.filter((p) => !p.is_system);
   const filledCount = userParams.filter(
     (p) => (values[p.name] ?? "").trim().length > 0,
   ).length;
+  const missingRequiredCount = userParams.filter(
+    (p) => !p.default_expression && !(values[p.name] ?? "").trim(),
+  ).length;
 
   if (userParams.length === 0) {
     return null;
   }
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && onApplyPreview) {
+      e.preventDefault();
+      onApplyPreview();
+    }
+  };
 
   return (
     <div
@@ -65,6 +84,11 @@ export function ReportParamsBar({
               {filledCount} preenchido{filledCount > 1 ? "s" : ""}
             </Badge>
           )}
+          {missingRequiredCount > 0 && (
+            <Badge tone="warning" className="text-[10px] tabular-nums">
+              {missingRequiredCount} pendente{missingRequiredCount > 1 ? "s" : ""}
+            </Badge>
+          )}
         </button>
 
         {open && (
@@ -81,12 +105,13 @@ export function ReportParamsBar({
             )}
             {onApplyPreview && (
               <Button
-                variant="blueprint"
+                variant={hasPreview ? "blueprint" : "primary"}
                 size="xs"
                 loading={previewLoading}
+                icon={!hasPreview ? <Play className="h-3 w-3" /> : undefined}
                 onClick={onApplyPreview}
               >
-                Aplicar no preview
+                {hasPreview ? "Aplicar no preview" : "Gerar Preview"}
               </Button>
             )}
           </div>
@@ -97,6 +122,7 @@ export function ReportParamsBar({
         <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {userParams.map((param) => {
             const val = values[param.name] ?? "";
+            const isRequiredEmpty = !param.default_expression && !val.trim();
             const inputId = `jrxml-param-${param.name}`;
 
             return (
@@ -105,10 +131,20 @@ export function ReportParamsBar({
                   htmlFor={inputId}
                   className="flex items-center justify-between gap-1 text-[11px] font-medium text-ink-secondary"
                 >
-                  <span className="truncate font-mono text-ink">
-                    $P{"{"}
-                    {param.name}
-                    {"}"}
+                  <span className="inline-flex items-center gap-1 truncate font-mono text-ink">
+                    <span>
+                      $P{"{"}
+                      {param.name}
+                      {"}"}
+                    </span>
+                    {!param.default_expression && (
+                      <span
+                        title="Parâmetro sem valor padrão"
+                        className="text-warning font-sans font-semibold"
+                      >
+                        *
+                      </span>
+                    )}
                   </span>
                   <span className="shrink-0 font-mono text-[10px] text-ink-muted">
                     {shortJavaClass(param.java_class)}
@@ -121,7 +157,10 @@ export function ReportParamsBar({
                     aria-label={`Parâmetro ${param.name}`}
                     value={val}
                     onChange={(e) => onChangeValue(param.name, e.target.value)}
-                    className="h-7 text-xs"
+                    className={cn(
+                      "h-7 text-xs",
+                      isRequiredEmpty && "border-warning/60",
+                    )}
                   >
                     <option value="">Padrão (não enviado)</option>
                     <option value="true">true (Sim)</option>
@@ -144,12 +183,16 @@ export function ReportParamsBar({
                     step={param.input_kind === "number" ? "any" : undefined}
                     value={val}
                     onChange={(e) => onChangeValue(param.name, e.target.value)}
+                    onKeyDown={handleKeyDown}
                     placeholder={
                       param.default_expression
                         ? `Padrão: ${param.default_expression}`
                         : `Valor para ${param.name}...`
                     }
-                    className="h-7 font-mono text-xs"
+                    className={cn(
+                      "h-7 font-mono text-xs",
+                      isRequiredEmpty && "border-warning/60",
+                    )}
                   />
                 )}
               </div>

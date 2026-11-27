@@ -40,6 +40,36 @@ export interface VisualRegionAnnotation {
 
 export type ZoomPreset = 0.75 | 1 | 1.25 | 1.5 | "fit-width";
 export type PreviewRendererMode = "pdfjs" | "png";
+export type JasperLayoutMode = "visual" | "split" | "code";
+
+export const JASPER_LAYOUT_STORAGE_KEY = "salutem:jasper-layout-mode";
+
+export const JASPER_LAYOUT_MODE_OPTIONS: {
+  id: JasperLayoutMode;
+  label: string;
+  shortLabel: string;
+  description: string;
+}[] = [
+  {
+    id: "visual",
+    label: "Visual (Preview + IA)",
+    shortLabel: "Visual",
+    description:
+      "Foco total no preview PDF, parâmetros $P{} e ajustes com IA, sem código XML na tela.",
+  },
+  {
+    id: "split",
+    label: "Dividido (Código + Preview)",
+    shortLabel: "Dividido",
+    description: "Editor XML JRXML lado a lado com o preview PDF.",
+  },
+  {
+    id: "code",
+    label: "Só Código",
+    shortLabel: "Só Código",
+    description: "Editor XML em tela cheia com auditoria e compilação.",
+  },
+];
 
 export const SCENARIO_OPTIONS: {
   id: ScenarioType;

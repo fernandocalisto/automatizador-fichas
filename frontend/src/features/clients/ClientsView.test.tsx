@@ -436,6 +436,141 @@ describe("ClientsView Master-Detail & ClientSyncDialog", () => {
       );
     });
   });
+
+  it("shows 'Novo Relatório Livre' when a system has no PG profile and uses SearchableSelect dropdowns in ClientSystemFormDialog", async () => {
+    const user = userEvent.setup();
+    const clientWithoutPg: ClientUnitRead = {
+      ...SAMPLE_CLIENTS[1],
+      systems: [
+        {
+          ...SAMPLE_CLIENTS[1].systems[0],
+          id: "sys-no-pg",
+          label: "Painel Sem Banco",
+          db_profile_id: null,
+          sftp_profile_id: null,
+          jasperserver_profile_id: null,
+        },
+      ],
+    };
+
+    vi.spyOn(clientsApi, "listClients").mockResolvedValue([clientWithoutPg]);
+    vi.spyOn(api, "listDbProfiles").mockResolvedValue([
+      {
+        id: "pg-99",
+        name: "Banco Beta PRD",
+        host: "10.9.9.1",
+        port: 5432,
+        dbname: "salutem_beta",
+        user: "postgres",
+        sslmode: "prefer",
+        environment: "PRD",
+        credential_mode: "default",
+        read_only: true,
+        is_default: false,
+        has_password: true,
+        created_at: "2026-11-27T10:00:00Z",
+        updated_at: "2026-11-27T10:00:00Z",
+      },
+    ]);
+    vi.spyOn(sftpApi, "listProfiles").mockResolvedValue([
+      {
+        id: "sftp-99",
+        name: "SFTP Beta PRD",
+        host: "10.9.9.2",
+        port: 22,
+        username: "salutem",
+        auth_type: "private_key",
+        credential_mode: "default",
+        remote_base_dir: "/opt/salutem",
+        environment: "PRD",
+        read_only: true,
+        linked_db_profile_id: null,
+        has_secret: true,
+        created_at: "2026-11-27T10:00:00Z",
+        updated_at: "2026-11-27T10:00:00Z",
+      },
+    ]);
+    vi.spyOn(jasperServerApi, "listProfiles").mockResolvedValue([
+      {
+        id: "js-99",
+        name: "Jasper Beta PRD",
+        base_url: "https://jasper.beta.local/jasperserver",
+        organization: "",
+        username: "jasperadmin",
+        credential_mode: "default",
+        default_folder_uri: "/",
+        environment: "PRD",
+        read_only: true,
+        linked_db_profile_id: null,
+        has_password: true,
+        created_at: "2026-11-27T10:00:00Z",
+        updated_at: "2026-11-27T10:00:00Z",
+      },
+    ]);
+    const createSystemSpy = vi
+      .spyOn(clientsApi, "createClientSystem")
+      .mockResolvedValue(clientWithoutPg.systems[0]);
+
+    render(
+      <ToastProvider>
+        <ClientsView onCreateFreeReport={vi.fn()} />
+      </ToastProvider>,
+    );
+
+    // Since client has no Jasper/SFTP, it defaults to Conexões & Sistemas tab
+    await waitFor(() => {
+      expect(screen.getByText("Painel Sem Banco")).toBeInTheDocument();
+      expect(screen.getByText("Sem PG")).toBeInTheDocument();
+    });
+
+    // Button must say "Novo Relatório Livre" and NOT "... neste Banco"
+    expect(
+      screen.getByRole("button", { name: /^Novo Relatório Livre$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: /Novo Relatório Livre neste Banco/i,
+      }),
+    ).not.toBeInTheDocument();
+
+    // Open "Adicionar sistema" modal and pick profiles via SearchableSelect dropdowns
+    await user.click(
+      screen.getByRole("button", { name: /Adicionar sistema/i }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: /Adicionar sistema — Unidade Beta Exemplo/i,
+    });
+
+    await user.type(
+      within(dialog).getByLabelText(/Rótulo do sistema/i),
+      "Hospitalar Beta",
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Perfil PostgreSQL" }));
+    await user.click(await within(dialog).findByRole("option", { name: /Banco Beta PRD/i }));
+
+    await user.click(within(dialog).getByRole("button", { name: "Perfil SFTP" }));
+    await user.click(await within(dialog).findByRole("option", { name: /SFTP Beta PRD/i }));
+
+    await user.click(within(dialog).getByRole("button", { name: "Perfil JasperServer" }));
+    await user.click(await within(dialog).findByRole("option", { name: /Jasper Beta PRD/i }));
+
+    await user.click(
+      within(dialog).getByRole("button", { name: /^Adicionar sistema$/i }),
+    );
+
+    await waitFor(() => {
+      expect(createSystemSpy).toHaveBeenCalledWith(
+        "unit-2",
+        expect.objectContaining({
+          label: "Hospitalar Beta",
+          db_profile_id: "pg-99",
+          sftp_profile_id: "sftp-99",
+          jasperserver_profile_id: "js-99",
+        }),
+      );
+    });
+  });
 });
 
 describe("HomeView, CommandPalette & StudioShell Dual-Mode", () => {
@@ -493,10 +628,53 @@ describe("HomeView, CommandPalette & StudioShell Dual-Mode", () => {
     expect(onSelectProject).toHaveBeenCalledWith(SAMPLE_IMPORTED_PROJECT);
   });
 
-  it("navigates CommandPalette across clients, projects, and settings profiles with keyboard", async () => {
+  it("navigates directly to default_credentials when clicking Quick Start '1. Credenciais Padrão'", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(clientsApi, "listClients").mockResolvedValue([]);
+    const onNavigateSection = vi.fn();
+
+    render(
+      <HomeView
+        projects={[]}
+        onSelectProject={vi.fn()}
+        onNavigateSection={onNavigateSection}
+        onOpenCreateDialog={vi.fn()}
+        onOpenClientById={vi.fn()}
+        onOpenCommandPalette={vi.fn()}
+      />,
+    );
+
+    const btn = await screen.findByRole("button", {
+      name: /1\. Credenciais Padrão/i,
+    });
+    await user.click(btn);
+    expect(onNavigateSection).toHaveBeenCalledWith(
+      "settings",
+      "default_credentials",
+    );
+  });
+
+  it("navigates CommandPalette across clients, projects, and settings profiles with keyboard and deep-link search", async () => {
     const user = userEvent.setup();
     vi.spyOn(clientsApi, "listClients").mockResolvedValue(SAMPLE_CLIENTS);
-    vi.spyOn(api, "listDbProfiles").mockResolvedValue([]);
+    vi.spyOn(api, "listDbProfiles").mockResolvedValue([
+      {
+        id: "pg-alpha-1",
+        name: "Postgres Alpha PRD",
+        host: "10.0.1.5",
+        port: 5432,
+        dbname: "salutem_alpha",
+        user: "postgres",
+        sslmode: "prefer",
+        environment: "PRD",
+        credential_mode: "default",
+        read_only: true,
+        is_default: false,
+        has_password: true,
+        created_at: "2026-11-27T10:00:00Z",
+        updated_at: "2026-11-27T10:00:00Z",
+      },
+    ]);
     vi.spyOn(sftpApi, "listProfiles").mockResolvedValue([]);
     vi.spyOn(jasperServerApi, "listProfiles").mockResolvedValue([]);
 
@@ -519,9 +697,20 @@ describe("HomeView, CommandPalette & StudioShell Dual-Mode", () => {
     await waitFor(() => {
       expect(screen.getByText("Unidade Alpha Exemplo")).toBeInTheDocument();
       expect(screen.getByText("Resumo de Alta")).toBeInTheDocument();
+      expect(screen.getByText("Postgres Alpha PRD")).toBeInTheDocument();
     });
 
     const input = screen.getByLabelText(/Buscar clientes, projetos/i);
+    await user.type(input, "Postgres Alpha");
+    await user.keyboard("{Enter}");
+
+    expect(onOpenSettingsTab).toHaveBeenCalledWith(
+      "db_profiles",
+      "Postgres Alpha PRD",
+    );
+    expect(onClose).toHaveBeenCalled();
+
+    await user.clear(input);
     await user.type(input, "Beta");
     await user.keyboard("{Enter}");
 

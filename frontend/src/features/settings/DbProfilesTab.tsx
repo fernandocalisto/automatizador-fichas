@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Database,
   Edit3,
+  KeyRound,
   Lock,
   Play,
   Plus,
@@ -31,6 +32,7 @@ import {
 } from "@/components/ui";
 import { api } from "@/lib/api";
 import type {
+  CredentialMode,
   DbConnectionTestResult,
   DbProfileCreatePayload,
   DbProfileRead,
@@ -43,6 +45,7 @@ export interface DbProfilesTabProps {
   profiles: DbProfileRead[];
   loading: boolean;
   onRefresh: () => Promise<void>;
+  initialSearch?: string;
 }
 
 const SSL_MODES: SslMode[] = [
@@ -65,6 +68,8 @@ interface ProfileFormState {
   user: string;
   password: string;
   sslmode: SslMode;
+  environment: EnvironmentKind;
+  credential_mode: CredentialMode;
   read_only: boolean;
   is_default: boolean;
 }
@@ -77,6 +82,8 @@ const INITIAL_FORM: ProfileFormState = {
   user: "postgres",
   password: "",
   sslmode: "prefer",
+  environment: "HML",
+  credential_mode: "custom",
   read_only: true,
   is_default: false,
 };
@@ -85,12 +92,20 @@ export function DbProfilesTab({
   profiles,
   loading,
   onRefresh,
+  initialSearch,
 }: DbProfilesTabProps) {
   const { pushToast } = useToast();
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(initialSearch ?? "");
   const [envFilter, setEnvFilter] = useState<EnvFilter>("ALL");
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    if (initialSearch !== undefined) {
+      setSearchQuery(initialSearch);
+      setEnvFilter("ALL");
+    }
+  }, [initialSearch]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] = useState<DbProfileRead | null>(
@@ -107,6 +122,19 @@ export function DbProfilesTab({
   const [testResults, setTestResults] = useState<
     Record<string, DbConnectionTestResult>
   >({});
+
+  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
+  const [discoveredByProfile, setDiscoveredByProfile] = useState<
+    Record<string, { databases: string[]; error?: string }>
+  >({});
+  const [applyingDbProfileId, setApplyingDbProfileId] = useState<string | null>(
+    null,
+  );
+  const [modalDiscovering, setModalDiscovering] = useState(false);
+  const [modalDatabases, setModalDatabases] = useState<string[] | null>(null);
+  const [modalDiscoverError, setModalDiscoverError] = useState<string | null>(
+    null,
+  );
 
   const envCounts = useMemo(() => {
     const counts = { ALL: profiles.length, PRD: 0, HML: 0, DEV: 0 };
@@ -146,6 +174,8 @@ export function DbProfilesTab({
       is_default: profiles.length === 0,
     });
     setFormError(null);
+    setModalDatabases(null);
+    setModalDiscoverError(null);
     setModalOpen(true);
   };
 
@@ -159,18 +189,120 @@ export function DbProfilesTab({
       user: profile.user,
       password: "",
       sslmode: profile.sslmode,
+      environment: profile.environment ?? "HML",
+      credential_mode: profile.credential_mode ?? "custom",
       read_only: profile.read_only,
       is_default: profile.is_default,
     });
     setFormError(null);
+    setModalDatabases(null);
+    setModalDiscoverError(null);
     setModalOpen(true);
+  };
+
+  const handleEnvironmentChange = (nextEnv: EnvironmentKind) => {
+    setForm((prev) => ({
+      ...prev,
+      environment: nextEnv,
+      read_only: nextEnv === "PRD" ? true : prev.read_only,
+    }));
+  };
+
+  const handleDiscoverInModal = async () => {
+    if (!editingProfile) return;
+    setModalDiscovering(true);
+    setModalDiscoverError(null);
+    try {
+      const result = await api.listDbProfileDatabases(editingProfile.id);
+      const list = Array.isArray(result.databases) ? result.databases : [];
+      setModalDatabases(list);
+      if (list.length === 0) {
+        setModalDiscoverError("Nenhum banco encontrado neste host.");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setModalDiscoverError(msg);
+      pushToast({
+        tone: "error",
+        title: "Falha ao descobrir bancos",
+        description: msg,
+      });
+    } finally {
+      setModalDiscovering(false);
+    }
+  };
+
+  const handleDiscoverOnCard = async (profile: DbProfileRead) => {
+    setDiscoveringId(profile.id);
+    try {
+      const result = await api.listDbProfileDatabases(profile.id);
+      const list = Array.isArray(result.databases) ? result.databases : [];
+      setDiscoveredByProfile((prev) => ({
+        ...prev,
+        [profile.id]: { databases: list },
+      }));
+      pushToast({
+        tone: "success",
+        title: `${list.length} ${list.length === 1 ? "banco descoberto" : "bancos descobertos"}`,
+        description:
+          list.length > 0
+            ? "Clique em um banco para aplicá-lo ao perfil."
+            : "Nenhum banco não-template retornado pelo servidor.",
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setDiscoveredByProfile((prev) => ({
+        ...prev,
+        [profile.id]: { databases: [], error: msg },
+      }));
+      pushToast({
+        tone: "error",
+        title: "Falha ao descobrir bancos",
+        description: msg,
+      });
+    } finally {
+      setDiscoveringId(null);
+    }
+  };
+
+  const handleApplyDiscoveredDb = async (
+    profile: DbProfileRead,
+    dbname: string,
+  ) => {
+    setApplyingDbProfileId(profile.id);
+    try {
+      await api.updateDbProfile(profile.id, { dbname });
+      pushToast({
+        tone: "success",
+        title: "Banco aplicado ao perfil",
+        description: `${profile.name} → ${dbname}`,
+      });
+      await onRefresh();
+    } catch (err) {
+      pushToast({
+        tone: "error",
+        title: "Falha ao aplicar banco",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setApplyingDbProfileId(null);
+    }
   };
 
   const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     const portNum = Number(form.port);
-    if (!form.name.trim() || !form.host.trim() || !form.dbname.trim() || !form.user.trim()) {
-      setFormError("Preencha nome, host, banco de dados e usuário.");
+    if (!form.name.trim() || !form.host.trim()) {
+      setFormError("Preencha o nome e o host do servidor PostgreSQL.");
+      return;
+    }
+    if (
+      form.credential_mode === "custom" &&
+      (!form.dbname.trim() || !form.user.trim())
+    ) {
+      setFormError(
+        "Preencha banco de dados e usuário quando estiver usando Credencial Personalizada.",
+      );
       return;
     }
     if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
@@ -189,10 +321,15 @@ export function DbProfilesTab({
           dbname: form.dbname.trim(),
           user: form.user.trim(),
           sslmode: form.sslmode,
+          environment: form.environment,
+          credential_mode: form.credential_mode,
           read_only: form.read_only,
           is_default: form.is_default,
         };
-        if (form.password.trim() !== "") {
+        if (
+          form.credential_mode === "custom" &&
+          form.password.trim() !== ""
+        ) {
           payload.password = form.password;
         }
         await api.updateDbProfile(editingProfile.id, payload);
@@ -208,8 +345,13 @@ export function DbProfilesTab({
           port: portNum,
           dbname: form.dbname.trim(),
           user: form.user.trim(),
-          password: form.password !== "" ? form.password : undefined,
+          password:
+            form.credential_mode === "custom" && form.password !== ""
+              ? form.password
+              : undefined,
           sslmode: form.sslmode,
+          environment: form.environment,
+          credential_mode: form.credential_mode,
           read_only: form.read_only,
           is_default: form.is_default,
         };
@@ -418,6 +560,8 @@ export function DbProfilesTab({
           {paginatedProfiles.map((profile) => {
             const testResult = testResults[profile.id];
             const isTesting = testingId === profile.id;
+            const isDiscovering = discoveringId === profile.id;
+            const discovered = discoveredByProfile[profile.id];
 
             return (
               <Card key={profile.id}>
@@ -458,6 +602,13 @@ export function DbProfilesTab({
                           <Badge tone="blueprint">Escrita via Dry-Run</Badge>
                         )}
 
+                        {profile.credential_mode === "default" && (
+                          <Badge tone="blueprint">
+                            <KeyRound className="h-3 w-3" />
+                            Credencial Padrão
+                          </Badge>
+                        )}
+
                         {profile.has_password && (
                           <Badge tone="success">
                             <Lock className="h-3 w-3" />
@@ -468,8 +619,8 @@ export function DbProfilesTab({
 
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-xs text-ink-secondary">
                         <span>
-                          {profile.user}@{profile.host}:{profile.port}/
-                          {profile.dbname}
+                          {profile.user || "(padrão)"}@{profile.host}:
+                          {profile.port}/{profile.dbname || "(padrão)"}
                         </span>
                         <span className="text-ink-muted">
                           sslmode={profile.sslmode}
@@ -478,6 +629,16 @@ export function DbProfilesTab({
                     </div>
 
                     <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        loading={isDiscovering}
+                        onClick={() => void handleDiscoverOnCard(profile)}
+                        icon={<Database className="h-3 w-3" />}
+                      >
+                        Descobrir bancos
+                      </Button>
+
                       <Button
                         variant="outline"
                         size="xs"
@@ -509,6 +670,64 @@ export function DbProfilesTab({
                       </Button>
                     </div>
                   </div>
+
+                  {discovered && (
+                    <div className="space-y-2 rounded-md border border-border bg-surface-subtle/60 px-3 py-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-ink">
+                          Bancos descobertos em {profile.host}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDiscoveredByProfile((prev) => {
+                              const next = { ...prev };
+                              delete next[profile.id];
+                              return next;
+                            })
+                          }
+                          aria-label="Fechar bancos descobertos"
+                          className="rounded p-0.5 text-ink-muted hover:text-ink cursor-pointer"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      {discovered.error ? (
+                        <p className="text-[11px] text-danger">
+                          {discovered.error}
+                        </p>
+                      ) : discovered.databases.length === 0 ? (
+                        <p className="text-[11px] text-ink-muted">
+                          Nenhum banco não-template encontrado.
+                        </p>
+                      ) : (
+                        <div className="flex flex-wrap gap-1.5">
+                          {discovered.databases.map((dbName) => {
+                            const isCurrent = profile.dbname === dbName;
+                            return (
+                              <button
+                                key={dbName}
+                                type="button"
+                                disabled={applyingDbProfileId === profile.id}
+                                onClick={() =>
+                                  void handleApplyDiscoveredDb(profile, dbName)
+                                }
+                                className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[11px] transition-colors cursor-pointer disabled:opacity-50 ${
+                                  isCurrent
+                                    ? "border-accent bg-accent-soft text-accent font-semibold"
+                                    : "border-border bg-surface text-ink-secondary hover:border-accent/50 hover:text-ink"
+                                }`}
+                                title={`Aplicar banco '${dbName}' neste perfil`}
+                              >
+                                <Database className="h-3 w-3 shrink-0" />
+                                <span>{dbName}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {profile.read_only && (
                     <div className="flex items-center gap-2 rounded-md border border-warning/30 bg-warning-soft/70 px-3 py-1.5 text-[11px] text-warning">
@@ -633,15 +852,34 @@ export function DbProfilesTab({
         }
       >
         <form id="db-profile-form" onSubmit={handleSave} className="space-y-3.5">
-          <div>
-            <FieldLabel htmlFor="pg-profile-name">Nome do perfil *</FieldLabel>
-            <Input
-              id="pg-profile-name"
-              placeholder="Ex.: Homologação Salutem"
-              value={form.name}
-              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-              required
-            />
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+            <div className="sm:col-span-2">
+              <FieldLabel htmlFor="pg-profile-name">Nome do perfil *</FieldLabel>
+              <Input
+                id="pg-profile-name"
+                placeholder="Ex.: Homologação Salutem"
+                value={form.name}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, name: e.target.value }))
+                }
+                required
+              />
+            </div>
+
+            <div>
+              <FieldLabel htmlFor="pg-profile-env">Ambiente</FieldLabel>
+              <Select
+                id="pg-profile-env"
+                value={form.environment}
+                onChange={(e) =>
+                  handleEnvironmentChange(e.target.value as EnvironmentKind)
+                }
+              >
+                <option value="DEV">DEV</option>
+                <option value="HML">HML</option>
+                <option value="PRD">PRD</option>
+              </Select>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -673,63 +911,181 @@ export function DbProfilesTab({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <FieldLabel htmlFor="pg-profile-dbname">
-                Banco de dados (dbname) *
-              </FieldLabel>
-              <Input
-                id="pg-profile-dbname"
-                placeholder="salutem"
-                value={form.dbname}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, dbname: e.target.value }))
-                }
-                required
-              />
-            </div>
-            <div>
-              <FieldLabel htmlFor="pg-profile-user">Usuário *</FieldLabel>
-              <Input
-                id="pg-profile-user"
-                placeholder="postgres"
-                value={form.user}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, user: e.target.value }))
-                }
-                required
-              />
-            </div>
+          <div>
+            <FieldLabel htmlFor="pg-profile-cred-mode">
+              Modo de Credenciais
+            </FieldLabel>
+            <Select
+              id="pg-profile-cred-mode"
+              value={form.credential_mode}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  credential_mode: e.target.value as CredentialMode,
+                }))
+              }
+            >
+              <option value="default">
+                Credenciais Padrão PostgreSQL (herda do cofre local)
+              </option>
+              <option value="custom">
+                Personalizada (exclusiva deste perfil)
+              </option>
+            </Select>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <div>
               <div className="mb-1 flex items-center justify-between gap-2">
-                <FieldLabel htmlFor="pg-profile-password" className="mb-0">
-                  Senha
+                <FieldLabel htmlFor="pg-profile-dbname" className="mb-0">
+                  Banco de dados (dbname){" "}
+                  {form.credential_mode === "custom" ? "*" : "(opcional)"}
                 </FieldLabel>
-                {editingProfile?.has_password && (
-                  <Badge tone="success" className="text-[10px] py-0">
-                    <Lock className="h-2.5 w-2.5" />
-                    Senha protegida
-                  </Badge>
+                {editingProfile && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    loading={modalDiscovering}
+                    onClick={() => void handleDiscoverInModal()}
+                    icon={<Database className="h-3 w-3" />}
+                  >
+                    Descobrir bancos
+                  </Button>
                 )}
               </div>
               <Input
-                id="pg-profile-password"
-                type="password"
-                autoComplete="new-password"
+                id="pg-profile-dbname"
                 placeholder={
-                  editingProfile?.has_password
-                    ? "Deixe em branco para manter a senha atual"
-                    : "Informe a senha do banco"
+                  form.credential_mode === "default"
+                    ? "Herdar das Credenciais Padrão"
+                    : "salutem"
                 }
-                value={form.password}
+                value={form.dbname}
                 onChange={(e) =>
-                  setForm((f) => ({ ...f, password: e.target.value }))
+                  setForm((f) => ({ ...f, dbname: e.target.value }))
                 }
+                required={form.credential_mode === "custom"}
               />
+              {form.credential_mode === "default" && (
+                <p className="mt-1 text-[11px] text-ink-muted">
+                  Em branco herda o banco configurado em Credenciais Padrão
+                  PostgreSQL.
+                </p>
+              )}
             </div>
+            <div>
+              <FieldLabel htmlFor="pg-profile-user">
+                Usuário{" "}
+                {form.credential_mode === "custom" ? "*" : "(opcional)"}
+              </FieldLabel>
+              <Input
+                id="pg-profile-user"
+                placeholder={
+                  form.credential_mode === "default"
+                    ? "Herdar das Credenciais Padrão"
+                    : "postgres"
+                }
+                value={form.user}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, user: e.target.value }))
+                }
+                required={form.credential_mode === "custom"}
+              />
+              {form.credential_mode === "default" && (
+                <p className="mt-1 text-[11px] text-ink-muted">
+                  Em branco herda o usuário configurado em Credenciais Padrão.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {editingProfile && (modalDatabases !== null || modalDiscoverError) && (
+            <div className="space-y-1.5 rounded-md border border-border bg-surface-subtle/60 p-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-ink">
+                  Bancos disponíveis neste servidor
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setModalDatabases(null);
+                    setModalDiscoverError(null);
+                  }}
+                  aria-label="Fechar lista de bancos descobertos"
+                  className="rounded p-0.5 text-ink-muted hover:text-ink cursor-pointer"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              {modalDiscoverError && (
+                <p className="text-[11px] text-danger">{modalDiscoverError}</p>
+              )}
+              {modalDatabases && modalDatabases.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {modalDatabases.map((dbName) => {
+                    const selected = form.dbname.trim() === dbName;
+                    return (
+                      <button
+                        key={dbName}
+                        type="button"
+                        onClick={() =>
+                          setForm((f) => ({ ...f, dbname: dbName }))
+                        }
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 font-mono text-[11px] transition-colors cursor-pointer ${
+                          selected
+                            ? "border-accent bg-accent-soft text-accent font-semibold"
+                            : "border-border bg-surface text-ink-secondary hover:border-accent/50 hover:text-ink"
+                        }`}
+                      >
+                        <Database className="h-3 w-3 shrink-0" />
+                        <span>{dbName}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {form.credential_mode === "custom" ? (
+              <div>
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <FieldLabel htmlFor="pg-profile-password" className="mb-0">
+                    Senha
+                  </FieldLabel>
+                  {editingProfile?.has_password && (
+                    <Badge tone="success" className="text-[10px] py-0">
+                      <Lock className="h-2.5 w-2.5" />
+                      Senha protegida
+                    </Badge>
+                  )}
+                </div>
+                <Input
+                  id="pg-profile-password"
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={
+                    editingProfile?.has_password
+                      ? "Deixe em branco para manter a senha atual"
+                      : "Informe a senha do banco"
+                  }
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, password: e.target.value }))
+                  }
+                />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2 rounded-md border border-blueprint/30 bg-blueprint-soft/60 px-3 py-2 text-[11px] text-blueprint">
+                <KeyRound className="h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Senha herdada automaticamente das{" "}
+                  <strong>Credenciais Padrão PostgreSQL</strong>.
+                </span>
+              </div>
+            )}
 
             <div>
               <FieldLabel htmlFor="pg-profile-sslmode">SSL Mode</FieldLabel>

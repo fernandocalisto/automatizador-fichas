@@ -39,7 +39,7 @@ export interface CommandPaletteProps {
   projects: ProjectRead[];
   onSelectProject: (project: ProjectRead) => void;
   onSelectClient: (clientId: string) => void;
-  onOpenSettingsTab: (tab: SettingsTabId) => void;
+  onOpenSettingsTab: (tab: SettingsTabId, initialSearch?: string) => void;
 }
 
 type CategoryId =
@@ -230,7 +230,7 @@ export function CommandPalette({
         badgeTone: envBadgeTone(jp.environment),
         icon: <Layers className="h-4 w-4 text-accent" />,
         onSelect: () => {
-          onOpenSettingsTab("jasperserver_profiles");
+          onOpenSettingsTab("jasperserver_profiles", jp.name);
           onClose();
         },
       }));
@@ -252,7 +252,7 @@ export function CommandPalette({
         badgeTone: envBadgeTone(sp.environment),
         icon: <Server className="h-4 w-4 text-ink-secondary" />,
         onSelect: () => {
-          onOpenSettingsTab("sftp_profiles");
+          onOpenSettingsTab("sftp_profiles", sp.name);
           onClose();
         },
       }));
@@ -274,7 +274,7 @@ export function CommandPalette({
         badgeTone: envBadgeTone(db.environment),
         icon: <Database className="h-4 w-4 text-success" />,
         onSelect: () => {
-          onOpenSettingsTab("db_profiles");
+          onOpenSettingsTab("db_profiles", db.name);
           onClose();
         },
       }));

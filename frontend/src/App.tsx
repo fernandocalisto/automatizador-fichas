@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { CloudUpload, UploadCloud } from "lucide-react";
+import { CloudUpload, Loader2, UploadCloud } from "lucide-react";
 import { CommandPalette } from "@/components/layout/CommandPalette";
 import { StudioShell } from "@/components/layout/StudioShell";
 import { Button, ToastProvider, useToast } from "@/components/ui";
@@ -39,33 +39,57 @@ const VALID_SECTIONS = new Set<StudioSection>([
   "settings",
 ]);
 
+const GLOBAL_SECTIONS = new Set<StudioSection>([
+  "home",
+  "projects",
+  "clients",
+  "settings",
+]);
+
+const VALID_SETTINGS_TABS = new Set<SettingsTabId>([
+  "db_profiles",
+  "default_credentials",
+  "sftp_profiles",
+  "jasperserver_profiles",
+  "subreports",
+  "harnesses",
+  "preferences",
+]);
+
 function readHashNavigation(): {
   projectId: string | null;
   section: StudioSection | null;
+  settingsTab: SettingsTabId | null;
 } {
   if (typeof window === "undefined") {
-    return { projectId: null, section: null };
+    return { projectId: null, section: null, settingsTab: null };
   }
   const raw = window.location.hash.replace(/^#\/?/, "");
   if (!raw) {
-    return { projectId: null, section: null };
+    return { projectId: null, section: null, settingsTab: null };
   }
   const params = new URLSearchParams(raw);
   const projectId = params.get("project") || null;
   const rawSection = params.get("section") as StudioSection | null;
   const section =
     rawSection && VALID_SECTIONS.has(rawSection) ? rawSection : null;
-  return { projectId, section };
+  const rawTab = params.get("tab") as SettingsTabId | null;
+  const settingsTab =
+    rawTab && VALID_SETTINGS_TABS.has(rawTab) ? rawTab : null;
+  return { projectId, section, settingsTab };
 }
 
 function writeHashNavigation(
   projectId: string | null,
   section: StudioSection,
+  settingsTab: SettingsTabId | null,
 ): void {
   if (typeof window === "undefined") return;
   const params = new URLSearchParams();
-  if (projectId) params.set("project", projectId);
+  const isGlobal = GLOBAL_SECTIONS.has(section);
+  if (!isGlobal && projectId) params.set("project", projectId);
   if (section && section !== "home") params.set("section", section);
+  if (section === "settings" && settingsTab) params.set("tab", settingsTab);
   const encoded = params.toString();
   const nextHash = encoded ? `#${encoded}` : "";
   if (window.location.hash !== nextHash) {
@@ -117,8 +141,11 @@ function StudioAppInner() {
   const [activeSection, setActiveSection] = useState<StudioSection>(
     initialNav.section ?? "home",
   );
-  const [settingsInitialTab, setSettingsInitialTab] = useState<
-    SettingsTabId | undefined
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>(
+    initialNav.settingsTab ?? "db_profiles",
+  );
+  const [settingsInitialSearch, setSettingsInitialSearch] = useState<
+    string | undefined
   >(undefined);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
@@ -139,8 +166,12 @@ function StudioAppInner() {
     projects.find((p) => p.id === activeProjectId) ?? null;
 
   useEffect(() => {
-    writeHashNavigation(activeProjectId, activeSection);
-  }, [activeProjectId, activeSection]);
+    writeHashNavigation(
+      activeProjectId,
+      activeSection,
+      activeSection === "settings" ? settingsTab : null,
+    );
+  }, [activeProjectId, activeSection, settingsTab]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -252,9 +283,12 @@ function StudioAppInner() {
         <HomeView
           projects={projects}
           onSelectProject={handleSelectProject}
-          onNavigateSection={(section) => {
-            if (section !== "settings") {
-              setSettingsInitialTab(undefined);
+          onNavigateSection={(section, nextSettingsTab) => {
+            setSettingsInitialSearch(undefined);
+            if (section === "settings") {
+              setSettingsTab(nextSettingsTab ?? "db_profiles");
+            } else {
+              setSettingsTab("db_profiles");
             }
             setActiveSection(section);
           }}
@@ -273,9 +307,12 @@ function StudioAppInner() {
     if (activeSection === "settings") {
       return (
         <SettingsView
-          initialTab={settingsInitialTab}
+          initialTab={settingsTab}
+          initialSearch={settingsInitialSearch}
+          onTabChange={(tab) => setSettingsTab(tab)}
           onClose={() => {
-            setSettingsInitialTab(undefined);
+            setSettingsTab("db_profiles");
+            setSettingsInitialSearch(undefined);
             setActiveSection(
               activeProject ? stageToDefaultSection(activeProject) : "home",
             );
@@ -315,10 +352,31 @@ function StudioAppInner() {
             });
           }}
           onOpenSettings={() => {
-            setSettingsInitialTab("default_credentials");
+            setSettingsTab("default_credentials");
+            setSettingsInitialSearch(undefined);
             setActiveSection("settings");
           }}
         />
+      );
+    }
+
+    if (
+      !GLOBAL_SECTIONS.has(activeSection) &&
+      activeProjectId &&
+      !activeProject &&
+      loadingProjects
+    ) {
+      return (
+        <div
+          role="status"
+          aria-label="Restaurando projeto"
+          className="flex h-full items-center justify-center bg-canvas p-6"
+        >
+          <div className="flex items-center gap-2.5 rounded-lg border border-border bg-surface px-4 py-3 text-xs font-medium text-ink-secondary shadow-xs">
+            <Loader2 className="h-4 w-4 animate-spin text-accent" />
+            <span>Restaurando projeto...</span>
+          </div>
+        </div>
       );
     }
 
@@ -467,16 +525,23 @@ function StudioAppInner() {
   };
 
   const chatPhase: ChatPhase =
-    chatPhaseOverride ??
-    (activeSection === "jasper_studio" ? "jrxml" : "extraction");
+    activeProject?.project_kind === "free_report"
+      ? "jrxml"
+      : (chatPhaseOverride ??
+        (activeSection === "jasper_studio" ? "jrxml" : "extraction"));
 
   return (
     <StudioShell
       activeSection={activeSection}
       onNavigate={(section) => {
         setChatPhaseOverride(null);
-        if (section !== "settings") {
-          setSettingsInitialTab(undefined);
+        setSettingsInitialSearch(undefined);
+        if (section === "settings") {
+          if (activeSection !== "settings") {
+            setSettingsTab("db_profiles");
+          }
+        } else {
+          setSettingsTab("db_profiles");
         }
         setActiveSection(section);
       }}
@@ -505,9 +570,10 @@ function StudioAppInner() {
           setCommandPaletteOpen(false);
           handleOpenClientById(clientId);
         }}
-        onOpenSettingsTab={(tab) => {
+        onOpenSettingsTab={(tab, initialSearch) => {
           setCommandPaletteOpen(false);
-          setSettingsInitialTab(tab);
+          setSettingsTab(tab);
+          setSettingsInitialSearch(initialSearch);
           setActiveSection("settings");
         }}
       />

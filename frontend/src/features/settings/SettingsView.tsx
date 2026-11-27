@@ -14,12 +14,16 @@ import {
   X,
 } from "lucide-react";
 import { Button, useToast } from "@/components/ui";
+import { jasperServerApi } from "@/features/jasperserver/jasperServerApi";
+import { sftpApi } from "@/features/sftp/sftpApi";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import type { SettingsTabId, SettingsViewProps } from "@/types/feature-props";
 import type {
   DbProfileRead,
   HarnessStatus,
+  JasperServerProfileRead,
+  SftpProfileRead,
   SkillInfo,
   SubreportInfo,
 } from "@/types/studio";
@@ -45,16 +49,26 @@ interface NavGroup {
   items: NavItem[];
 }
 
-export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
+export function SettingsView({
+  onClose,
+  initialTab,
+  initialSearch,
+  onTabChange,
+}: SettingsViewProps) {
   const { pushToast } = useToast();
 
   const [activeTab, setActiveTab] = useState<SettingsTabId>(
     initialTab ?? "db_profiles",
   );
+  const [tabSearch, setTabSearch] = useState<string | undefined>(initialSearch);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const [profiles, setProfiles] = useState<DbProfileRead[]>([]);
+  const [sftpProfiles, setSftpProfiles] = useState<SftpProfileRead[]>([]);
+  const [jasperProfiles, setJasperProfiles] = useState<
+    JasperServerProfileRead[]
+  >([]);
   const [subreports, setSubreports] = useState<SubreportInfo[]>([]);
   const [harnesses, setHarnesses] = useState<HarnessStatus[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
@@ -68,9 +82,23 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
     }
   }, [initialTab]);
 
+  useEffect(() => {
+    setTabSearch(initialSearch);
+  }, [initialSearch, initialTab]);
+
   const refreshProfiles = useCallback(async () => {
     const data = await api.listDbProfiles();
     setProfiles(Array.isArray(data) ? data : []);
+  }, []);
+
+  const refreshSftpProfiles = useCallback(async () => {
+    const data = await sftpApi.listProfiles();
+    setSftpProfiles(Array.isArray(data) ? data : []);
+  }, []);
+
+  const refreshJasperProfiles = useCallback(async () => {
+    const data = await jasperServerApi.listProfiles();
+    setJasperProfiles(Array.isArray(data) ? data : []);
   }, []);
 
   const refreshSubreports = useCallback(async () => {
@@ -81,17 +109,32 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
   const refreshAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [dbRes, subRes, harnessRes, skillRes, settingsRes] =
-        await Promise.allSettled([
-          api.listDbProfiles(),
-          api.listSubreports(),
-          api.listHarnesses(),
-          api.listSkills(),
-          api.getSettings(),
-        ]);
+      const [
+        dbRes,
+        sftpRes,
+        jasperRes,
+        subRes,
+        harnessRes,
+        skillRes,
+        settingsRes,
+      ] = await Promise.allSettled([
+        api.listDbProfiles(),
+        sftpApi.listProfiles(),
+        jasperServerApi.listProfiles(),
+        api.listSubreports(),
+        api.listHarnesses(),
+        api.listSkills(),
+        api.getSettings(),
+      ]);
 
       if (dbRes.status === "fulfilled") {
         setProfiles(Array.isArray(dbRes.value) ? dbRes.value : []);
+      }
+      if (sftpRes.status === "fulfilled") {
+        setSftpProfiles(Array.isArray(sftpRes.value) ? sftpRes.value : []);
+      }
+      if (jasperRes.status === "fulfilled") {
+        setJasperProfiles(Array.isArray(jasperRes.value) ? jasperRes.value : []);
       }
       if (subRes.status === "fulfilled") {
         setSubreports(Array.isArray(subRes.value) ? subRes.value : []);
@@ -154,11 +197,13 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
           id: "sftp_profiles",
           label: "Servidores SFTP",
           icon: <Server className="h-4 w-4" />,
+          badge: sftpProfiles.length,
         },
         {
           id: "jasperserver_profiles",
           label: "JasperReports Server",
           icon: <Cloud className="h-4 w-4" />,
+          badge: jasperProfiles.length,
         },
       ],
     },
@@ -174,7 +219,7 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
         },
         {
           id: "harnesses",
-          label: "Assistentes IA (Harnesses)",
+          label: "Harnesses & Skills IA",
           icon: <Cpu className="h-4 w-4" />,
           badge:
             harnesses.length > 0
@@ -194,8 +239,12 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
   const activeItem = allItems.find((item) => item.id === activeTab) ?? allItems[0];
 
   const handleSelectTab = (tabId: SettingsTabId) => {
+    if (tabId !== activeTab) {
+      setTabSearch(undefined);
+    }
     setActiveTab(tabId);
     setMobileNavOpen(false);
+    onTabChange?.(tabId);
   };
 
   return (
@@ -314,7 +363,7 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
                             {item.icon}
                           </span>
                           <div className="min-w-0">
-                            <div className="truncate text-xs leading-tight">
+                            <div className="text-xs leading-tight break-words">
                               {item.label}
                             </div>
                             {item.subtitle && (
@@ -364,17 +413,30 @@ export function SettingsView({ onClose, initialTab }: SettingsViewProps) {
                 profiles={profiles}
                 loading={loading}
                 onRefresh={refreshProfiles}
+                initialSearch={tabSearch}
               />
             )}
 
             {activeTab === "default_credentials" && <DefaultCredentialsTab />}
 
             {activeTab === "sftp_profiles" && (
-              <SftpProfilesTab dbProfiles={profiles} />
+              <SftpProfilesTab
+                profiles={sftpProfiles}
+                dbProfiles={profiles}
+                loading={loading}
+                onRefresh={refreshSftpProfiles}
+                initialSearch={tabSearch}
+              />
             )}
 
             {activeTab === "jasperserver_profiles" && (
-              <JasperServerProfilesTab dbProfiles={profiles} />
+              <JasperServerProfilesTab
+                profiles={jasperProfiles}
+                dbProfiles={profiles}
+                loading={loading}
+                onRefresh={refreshJasperProfiles}
+                initialSearch={tabSearch}
+              />
             )}
 
             {activeTab === "subreports" && (

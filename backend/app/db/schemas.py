@@ -15,7 +15,17 @@ ProjectStage = Literal[
     "jrxml_design",
     "completed",
 ]
-EntryMode = Literal["pdf", "json", "jrxml"]
+ProjectKind = Literal["clinical_form", "free_report"]
+EntryMode = Literal[
+    "pdf",
+    "json",
+    "jrxml",
+    "blank_report",
+    "sftp_import",
+    "jasperserver_import",
+]
+EnvironmentKind = Literal["DEV", "HML", "PRD"]
+CredentialMode = Literal["default", "custom"]
 ArtifactType = Literal["json", "sql_insert", "sql_select", "jrxml"]
 CreatedBy = Literal["user", "agent", "system"]
 ChatPhase = Literal["extraction", "jrxml"]
@@ -52,16 +62,20 @@ class GateApprovalRead(BaseModel):
 
 
 class ProjectCreate(BaseModel):
-    """Payload for creating a new clinical form studio project."""
+    """Payload for creating a new studio project (clinical form or free Jasper report)."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(..., min_length=1, max_length=200)
     slug: str | None = Field(default=None, max_length=120)
     description: str = ""
+    project_kind: ProjectKind | None = None
     entry_mode: EntryMode = "pdf"
     preferred_harness: str = "agy"
     template_db_id: int | None = None
+    default_db_profile_id: str | None = None
+    client_system_id: str | None = None
+    source_origin: dict[str, Any] = Field(default_factory=dict)
     current_stage: ProjectStage | None = None
     initial_json: str | dict[str, Any] | None = None
     initial_jrxml: str | None = None
@@ -74,9 +88,13 @@ class ProjectUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
+    project_kind: ProjectKind | None = None
     current_stage: ProjectStage | None = None
     preferred_harness: str | None = None
     template_db_id: int | None = None
+    default_db_profile_id: str | None = None
+    client_system_id: str | None = None
+    source_origin: dict[str, Any] | None = None
 
 
 class ProjectRead(BaseModel):
@@ -88,15 +106,31 @@ class ProjectRead(BaseModel):
     slug: str
     name: str
     description: str = ""
+    project_kind: ProjectKind = "clinical_form"
     current_stage: ProjectStage
     entry_mode: EntryMode
     preferred_harness: str = "agy"
     template_db_id: int | None = None
+    default_db_profile_id: str | None = None
+    client_system_id: str | None = None
+    source_origin: dict[str, Any] = Field(default_factory=dict)
     workspace_dir: str
     has_pdf: bool = False
     gates: list[GateApprovalRead] = Field(default_factory=list)
     latest_artifacts: dict[str, int] = Field(default_factory=dict)
     created_at: str
+    updated_at: str
+
+
+class AgentSessionRead(BaseModel):
+    """Persisted external session ID for continuing an AI harness conversation across turns."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    project_id: str
+    phase: ChatPhase
+    harness_id: str
+    external_session_id: str
     updated_at: str
 
 

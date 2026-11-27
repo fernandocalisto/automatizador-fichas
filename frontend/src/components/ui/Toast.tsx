@@ -2,7 +2,9 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -27,8 +29,22 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const timersRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach((timerId) => window.clearTimeout(timerId));
+      timers.clear();
+    };
+  }, []);
 
   const dismissToast = useCallback((id: string) => {
+    const existing = timersRef.current.get(id);
+    if (existing !== undefined) {
+      window.clearTimeout(existing);
+      timersRef.current.delete(id);
+    }
     setToasts((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
@@ -36,9 +52,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (input: Omit<ToastMessage, "id">) => {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       setToasts((prev) => [...prev.slice(-4), { ...input, id }]);
-      window.setTimeout(() => {
+      const timerId = window.setTimeout(() => {
+        timersRef.current.delete(id);
         setToasts((prev) => prev.filter((item) => item.id !== id));
       }, 4500);
+      timersRef.current.set(id, timerId);
     },
     [],
   );

@@ -27,11 +27,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.config import APP_NAME, get_data_dir
 from backend.app.core.sql_insert import validate_postgres_syntax
+from backend.app.db.schemas import CredentialMode, EnvironmentKind
 from backend.app.db.sqlite_store import SQLiteStore, utc_now_iso
+from backend.app.services.default_credentials_service import DefaultCredentialsService
+from backend.app.services.secret_vault import (
+    KEYRING_SERVICE_NAME,
+    VAULT_FILENAME,
+    SecretVaultError,
+    SecretVaultService,
+)
 from backend.app.services.workspace_service import WorkspaceService
 
-KEYRING_SERVICE_NAME = "SalutemFichaStudio"
-VAULT_FILENAME = ".vault.json"
 VALID_SSL_MODES = frozenset(
     {"disable", "allow", "prefer", "require", "verify-ca", "verify-full"}
 )
@@ -75,9 +81,11 @@ CREATE TABLE IF NOT EXISTS db_profiles (
     name TEXT NOT NULL,
     host TEXT NOT NULL,
     port INTEGER NOT NULL DEFAULT 5432,
-    dbname TEXT NOT NULL,
-    user TEXT NOT NULL,
+    dbname TEXT NOT NULL DEFAULT '',
+    user TEXT NOT NULL DEFAULT '',
     sslmode TEXT NOT NULL DEFAULT 'prefer',
+    credential_mode TEXT NOT NULL DEFAULT 'custom',
+    environment TEXT NOT NULL DEFAULT 'HML',
     read_only INTEGER NOT NULL DEFAULT 0,
     is_default INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
@@ -144,20 +152,27 @@ class DbProfileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     host: str = Field(..., min_length=1, max_length=255)
     port: int = Field(default=5432, ge=1, le=65535)
-    dbname: str = Field(..., min_length=1, max_length=128)
-    user: str = Field(..., min_length=1, max_length=128)
+    dbname: str = Field(default="", max_length=128)
+    user: str = Field(default="", max_length=128)
     password: str | None = Field(default=None, repr=False)
     sslmode: SslMode = "prefer"
+    credential_mode: CredentialMode = "custom"
+    environment: EnvironmentKind = "HML"
     read_only: bool = False
     is_default: bool = False
 
-    @field_validator("name", "host", "dbname", "user")
+    @field_validator("name", "host")
     @classmethod
     def _strip_non_empty(cls, value: str) -> str:
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("Field cannot be blank.")
         return cleaned
+
+    @field_validator("dbname", "user")
+    @classmethod
+    def _strip_optional_credential_fields(cls, value: str) -> str:
+        return value.strip()
 
 
 class DbProfileUpdate(BaseModel):
@@ -168,14 +183,16 @@ class DbProfileUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     host: str | None = Field(default=None, min_length=1, max_length=255)
     port: int | None = Field(default=None, ge=1, le=65535)
-    dbname: str | None = Field(default=None, min_length=1, max_length=128)
-    user: str | None = Field(default=None, min_length=1, max_length=128)
+    dbname: str | None = Field(default=None, max_length=128)
+    user: str | None = Field(default=None, max_length=128)
     password: str | None = Field(default=None, repr=False)
     sslmode: SslMode | None = None
+    credential_mode: CredentialMode | None = None
+    environment: EnvironmentKind | None = None
     read_only: bool | None = None
     is_default: bool | None = None
 
-    @field_validator("name", "host", "dbname", "user")
+    @field_validator("name", "host")
     @classmethod
     def _strip_optional_non_empty(cls, value: str | None) -> str | None:
         if value is None:
@@ -184,6 +201,13 @@ class DbProfileUpdate(BaseModel):
         if not cleaned:
             raise ValueError("Field cannot be blank.")
         return cleaned
+
+    @field_validator("dbname", "user")
+    @classmethod
+    def _strip_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip()
 
 
 class DbProfileRead(BaseModel):
@@ -195,9 +219,11 @@ class DbProfileRead(BaseModel):
     name: str
     host: str
     port: int = 5432
-    dbname: str
-    user: str
+    dbname: str = ""
+    user: str = ""
     sslmode: SslMode = "prefer"
+    credential_mode: CredentialMode = "custom"
+    environment: EnvironmentKind = "HML"
     read_only: bool = False
     is_default: bool = False
     has_password: bool = False
@@ -274,158 +300,30 @@ class InspectSelectResult(BaseModel):
     message: str = ""
 
 
-# =============================================================================
-# Encrypted Fallback Vault (.vault.json — PBKDF2 + SHA-256 CTR XOR + HMAC-SHA256)
-# =============================================================================
-
-
 class _EncryptedVault:
-    """
-    Server/CI/Docker fallback credential vault stored at `get_data_dir() / '.vault.json'`.
-    Uses PBKDF2-HMAC-SHA256 key derivation, SHA-256 counter-mode XOR stream encryption,
-    and Encrypt-then-MAC (HMAC-SHA256) integrity verification.
-    """
-
-    _PBKDF2_ITERATIONS = 100_000
-    _INSECURE_PLACEHOLDER_KEYS = frozenset(
-        {
-            "change-me",
-            "change-me-in-production",
-            "changeme",
-            "default",
-            "secret",
-            "password",
-        }
-    )
+    """Backward-compatible wrapper delegating fallback `.vault.json` ops to `SecretVaultService`."""
 
     def __init__(self, vault_path_resolver: Callable[[], Path]) -> None:
-        self._resolve_path = vault_path_resolver
+        self._svc = SecretVaultService(vault_path=vault_path_resolver)
 
     @property
     def path(self) -> Path:
-        return self._resolve_path()
-
-    def _master_secret_bytes(self) -> bytes:
-        env_key = os.environ.get("FICHA_STUDIO_VAULT_KEY", "").strip()
-        if env_key:
-            if env_key.lower() in self._INSECURE_PLACEHOLDER_KEYS:
-                raise PostgresServiceError(
-                    "FICHA_STUDIO_VAULT_KEY usa um valor placeholder inseguro. "
-                    "Defina uma chave secreta forte no ambiente ou deixe-a vazia em desenvolvimento."
-                )
-            return env_key.encode("utf-8")
-        try:
-            os_user = getpass.getuser()
-        except Exception:
-            os_user = "studio"
-        seed = f"{APP_NAME}::{platform.node()}::{os_user}::{self.path.parent.resolve()}"
-        return seed.encode("utf-8")
-
-    def _derive_keys(self, salt: bytes) -> tuple[bytes, bytes]:
-        derived = hashlib.pbkdf2_hmac(
-            "sha256",
-            self._master_secret_bytes(),
-            salt,
-            self._PBKDF2_ITERATIONS,
-            dklen=64,
-        )
-        return derived[:32], derived[32:]
-
-    @staticmethod
-    def _xor_keystream(data: bytes, enc_key: bytes, nonce: bytes) -> bytes:
-        if not data:
-            return b""
-        stream = bytearray()
-        counter = 0
-        while len(stream) < len(data):
-            block = hashlib.sha256(
-                enc_key + nonce + counter.to_bytes(4, byteorder="big")
-            ).digest()
-            stream.extend(block)
-            counter += 1
-        return bytes(b ^ k for b, k in zip(data, stream[: len(data)]))
-
-    def _load_doc(self) -> dict[str, Any]:
-        target = self.path
-        if not target.is_file():
-            return {"version": 1, "entries": {}}
-        try:
-            raw = json.loads(target.read_text(encoding="utf-8"))
-            if isinstance(raw, dict) and isinstance(raw.get("entries"), dict):
-                return raw
-        except (OSError, ValueError):
-            pass
-        return {"version": 1, "entries": {}}
-
-    def _save_doc(self, doc: dict[str, Any]) -> None:
-        target = self.path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp_target = target.with_suffix(".json.tmp")
-        tmp_target.write_text(
-            json.dumps(doc, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        try:
-            os.chmod(tmp_target, 0o600)
-        except OSError:
-            pass
-        tmp_target.replace(target)
+        return self._svc.vault_path
 
     def set_secret(self, account: str, secret: str) -> None:
-        salt = secrets.token_bytes(16)
-        nonce = secrets.token_bytes(16)
-        enc_key, mac_key = self._derive_keys(salt)
-        plaintext = secret.encode("utf-8")
-        ciphertext = self._xor_keystream(plaintext, enc_key, nonce)
-        mac = hmac.new(
-            mac_key,
-            salt + nonce + account.encode("utf-8") + ciphertext,
-            hashlib.sha256,
-        ).hexdigest()
-
-        doc = self._load_doc()
-        doc.setdefault("entries", {})[account] = {
-            "salt": base64.b64encode(salt).decode("ascii"),
-            "nonce": base64.b64encode(nonce).decode("ascii"),
-            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
-            "hmac": mac,
-        }
-        self._save_doc(doc)
+        try:
+            self._svc.set_fallback_secret(account, secret)
+        except SecretVaultError as exc:
+            raise PostgresServiceError(str(exc)) from exc
 
     def get_secret(self, account: str) -> str | None:
-        doc = self._load_doc()
-        entry = doc.get("entries", {}).get(account)
-        if not isinstance(entry, dict):
-            return None
         try:
-            salt = base64.b64decode(entry["salt"])
-            nonce = base64.b64decode(entry["nonce"])
-            ciphertext = base64.b64decode(entry["ciphertext"])
-            stored_mac = str(entry["hmac"])
-        except (KeyError, ValueError, TypeError):
-            raise PostgresServiceError("Corrupted credential entry in fallback vault.")
-
-        enc_key, mac_key = self._derive_keys(salt)
-        expected_mac = hmac.new(
-            mac_key,
-            salt + nonce + account.encode("utf-8") + ciphertext,
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(expected_mac, stored_mac):
-            raise PostgresServiceError(
-                "Vault HMAC integrity check failed: encrypted secret may have been tampered with."
-            )
-        plaintext = self._xor_keystream(ciphertext, enc_key, nonce)
-        return plaintext.decode("utf-8")
+            return self._svc.get_fallback_secret(account)
+        except SecretVaultError as exc:
+            raise PostgresServiceError(str(exc)) from exc
 
     def delete_secret(self, account: str) -> None:
-        if not self.path.is_file():
-            return
-        doc = self._load_doc()
-        entries = doc.get("entries", {})
-        if account in entries:
-            del entries[account]
-            self._save_doc(doc)
+        self._svc.delete_fallback_secret(account)
 
 
 # =============================================================================
@@ -435,7 +333,7 @@ class _EncryptedVault:
 
 class PostgresService:
     """
-    Manages PostgreSQL connection profiles, OS keyring / `.vault.json` credentials,
+    Manages PostgreSQL connection profiles, unified SecretVault / DefaultCredentials,
     and safe clinical SQL operations.
     """
 
@@ -445,11 +343,17 @@ class PostgresService:
         connection_factory: Callable[..., Any] | None = None,
         *,
         vault_path: Path | None = None,
+        vault: SecretVaultService | None = None,
+        default_credentials_service: DefaultCredentialsService | None = None,
     ) -> None:
         self.store = store or SQLiteStore()
         self._connection_factory = connection_factory
         self._explicit_vault_path = vault_path.resolve() if vault_path is not None else None
-        self._vault = _EncryptedVault(self._resolve_vault_path)
+        self._vault = vault or SecretVaultService(vault_path=self._resolve_vault_path)
+        self.default_credentials = default_credentials_service or DefaultCredentialsService(
+            store=self.store,
+            vault=self._vault,
+        )
         self._initialized_dbs: set[Path] = set()
 
     def _resolve_vault_path(self) -> Path:
@@ -460,7 +364,7 @@ class PostgresService:
     @property
     def vault_path(self) -> Path:
         """Return active path for the encrypted `.vault.json` fallback file."""
-        return self._resolve_vault_path()
+        return self._vault.vault_path
 
     def _ensure_tables(self) -> None:
         db_target = self.store.db_path
@@ -468,6 +372,18 @@ class PostgresService:
             return
         with self.store.connection() as conn:
             conn.executescript(DB_PROFILES_SCHEMA_SQL)
+            cols = {
+                str(r["name"])
+                for r in conn.execute("PRAGMA table_info(db_profiles)").fetchall()
+            }
+            if "credential_mode" not in cols:
+                conn.execute(
+                    "ALTER TABLE db_profiles ADD COLUMN credential_mode TEXT NOT NULL DEFAULT 'custom'"
+                )
+            if "environment" not in cols:
+                conn.execute(
+                    "ALTER TABLE db_profiles ADD COLUMN environment TEXT NOT NULL DEFAULT 'HML'"
+                )
         self._initialized_dbs.add(db_target)
 
     @staticmethod
@@ -475,39 +391,46 @@ class PostgresService:
         return f"db_profile:{profile_id}"
 
     # -------------------------------------------------------------------------
-    # Secret Management (OS Keyring -> .vault.json fallback)
+    # Secret Management (Unified SecretVaultService -> OS Keyring / AES-256-GCM)
     # -------------------------------------------------------------------------
 
     def _store_password(self, profile_id: str, password: str) -> None:
-        account = self._keyring_account(profile_id)
         try:
-            keyring.set_password(KEYRING_SERVICE_NAME, account, password)
-            # Remove stale fallback copy if OS keyring succeeded
-            self._vault.delete_secret(account)
-        except KeyringError:
-            self._vault.set_secret(account, password)
+            self._vault.set_secret(self._keyring_account(profile_id), password)
+        except SecretVaultError as exc:
+            raise PostgresServiceError(str(exc)) from exc
 
     def _load_password(self, profile_id: str) -> str | None:
-        account = self._keyring_account(profile_id)
         try:
-            secret = keyring.get_password(KEYRING_SERVICE_NAME, account)
-            if secret is not None:
-                return secret
-        except KeyringError:
-            pass
-        return self._vault.get_secret(account)
+            return self._vault.get_secret(self._keyring_account(profile_id))
+        except SecretVaultError as exc:
+            raise PostgresServiceError(str(exc)) from exc
 
     def _delete_password(self, profile_id: str) -> None:
-        account = self._keyring_account(profile_id)
-        try:
-            keyring.delete_password(KEYRING_SERVICE_NAME, account)
-        except (PasswordDeleteError, KeyringError):
-            pass
-        self._vault.delete_secret(account)
+        self._vault.delete_secret(self._keyring_account(profile_id))
 
-    def _has_password(self, profile_id: str) -> bool:
+    def _has_password(self, profile_id: str, credential_mode: str = "custom") -> bool:
+        if credential_mode == "default":
+            try:
+                return self.default_credentials.get_default("postgres").has_password
+            except SecretVaultError as exc:
+                raise PostgresServiceError(str(exc)) from exc
         secret = self._load_password(profile_id)
         return secret is not None and len(secret) > 0
+
+    def _resolve_effective_connection_params(self, row: dict[str, Any]) -> tuple[str, str | None, str]:
+        """Resolve `(user, password, dbname)` honoring `credential_mode` (`default` vs `custom`)."""
+        profile_id = str(row["id"])
+        mode = str(row.get("credential_mode") or "custom")
+        try:
+            return self.default_credentials.resolve_postgres_credentials(
+                credential_mode=mode,
+                profile_id=profile_id,
+                custom_user=str(row.get("user") or ""),
+                custom_dbname=str(row.get("dbname") or ""),
+            )
+        except SecretVaultError as exc:
+            raise PostgresServiceError(str(exc)) from exc
 
     # -------------------------------------------------------------------------
     # Profile Metadata Helpers & CRUD
@@ -515,17 +438,21 @@ class PostgresService:
 
     def _row_to_profile_read(self, row: dict[str, Any]) -> DbProfileRead:
         profile_id = str(row["id"])
+        mode = str(row.get("credential_mode") or "custom")
+        env = str(row.get("environment") or "HML")
         return DbProfileRead(
             id=profile_id,
             name=str(row["name"]),
             host=str(row["host"]),
             port=int(row["port"]),
-            dbname=str(row["dbname"]),
-            user=str(row["user"]),
+            dbname=str(row.get("dbname") or ""),
+            user=str(row.get("user") or ""),
             sslmode=row["sslmode"],
+            credential_mode="default" if mode == "default" else "custom",
+            environment=env if env in ("DEV", "HML", "PRD") else "HML",  # type: ignore[arg-type]
             read_only=bool(row["read_only"]),
             is_default=bool(row["is_default"]),
-            has_password=self._has_password(profile_id),
+            has_password=self._has_password(profile_id, mode),
             created_at=str(row["created_at"]),
             updated_at=str(row["updated_at"]),
         )
@@ -557,6 +484,8 @@ class PostgresService:
                 "dbname": str(r["dbname"]),
                 "user": str(r["user"]),
                 "sslmode": str(r["sslmode"]),
+                "credential_mode": str(r["credential_mode"]),
+                "environment": str(r["environment"]),
                 "read_only": bool(r["read_only"]),
                 "is_default": bool(r["is_default"]),
                 "created_at": str(r["created_at"]),
@@ -583,6 +512,10 @@ class PostgresService:
     def create_profile(self, payload: DbProfileCreate) -> DbProfileRead:
         """Persist a new PostgreSQL connection profile and store its password in keyring/vault."""
         self._ensure_tables()
+        if payload.credential_mode == "custom" and not payload.user:
+            raise DbProfileValidationError(
+                "User is required when credential_mode is 'custom'."
+            )
         profile_id = str(uuid.uuid4())
         now = utc_now_iso()
 
@@ -597,8 +530,9 @@ class PostgresService:
                     """
                     INSERT INTO db_profiles (
                         id, name, host, port, dbname, user, sslmode,
-                        read_only, is_default, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        credential_mode, environment, read_only, is_default,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         profile_id,
@@ -608,6 +542,8 @@ class PostgresService:
                         payload.dbname,
                         payload.user,
                         payload.sslmode,
+                        payload.credential_mode,
+                        payload.environment,
                         1 if payload.read_only else 0,
                         1 if payload.is_default else 0,
                         now,
@@ -639,7 +575,7 @@ class PostgresService:
                     self._store_password(profile_id, raw_pw)
 
         db_updates: dict[str, Any] = {}
-        for col in ("name", "host", "port", "dbname", "user", "sslmode"):
+        for col in ("name", "host", "port", "dbname", "user", "sslmode", "credential_mode", "environment"):
             if col in fields and fields[col] is not None:
                 db_updates[col] = fields[col]
         if "read_only" in fields and fields["read_only"] is not None:
@@ -688,16 +624,15 @@ class PostgresService:
         for internal JasperReports compilation/preview subprocesses.
         """
         row = self._require_profile_row(profile_id)
-        password = self._load_password(profile_id) or ""
+        user, password, dbname = self._resolve_effective_connection_params(row)
         host = str(row["host"])
         port = int(row["port"])
-        dbname = str(row["dbname"])
         sslmode = str(row["sslmode"] or "prefer")
         jdbc_url = f"jdbc:postgresql://{host}:{port}/{dbname}?sslmode={sslmode}"
         return {
             "db_url": jdbc_url,
-            "db_user": str(row["user"]),
-            "db_pass": password,
+            "db_user": user,
+            "db_pass": password or "",
             "read_only": bool(row["read_only"]),
         }
 
@@ -813,14 +748,19 @@ class PostgresService:
                 parsed_id = int(match.group(1))
         return parsed_id
 
-    def _open_pg_connection(self, profile_id: str) -> Any:
+    def _open_pg_connection(self, profile_id: str, *, dbname_override: str | None = None) -> Any:
         row = self._require_profile_row(profile_id)
-        password = self._load_password(profile_id)
+        user, password, resolved_dbname = self._resolve_effective_connection_params(row)
+        effective_dbname = (
+            dbname_override.strip()
+            if dbname_override is not None and dbname_override.strip()
+            else (resolved_dbname or "postgres")
+        )
         conn_kwargs: dict[str, Any] = {
             "host": str(row["host"]),
             "port": int(row["port"]),
-            "dbname": str(row["dbname"]),
-            "user": str(row["user"]),
+            "dbname": effective_dbname,
+            "user": user,
             "password": password if password else None,
             "sslmode": str(row["sslmode"] or "prefer"),
             "autocommit": False,
@@ -838,6 +778,39 @@ class PostgresService:
             if len(params) == 1:
                 return self._connection_factory(conn_kwargs)
             raise
+
+    def list_databases(self, profile_id: str) -> list[str]:
+        """Discover non-template databases on the PostgreSQL host in a READ ONLY transaction."""
+        conn: Any = None
+        try:
+            conn = self._open_pg_connection(profile_id, dbname_override="postgres")
+            with self._cursor_context(conn) as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                cur.execute("SET LOCAL statement_timeout = '10000'")
+                cur.execute(
+                    """
+                    SELECT datname
+                    FROM pg_database
+                    WHERE datistemplate = false
+                    ORDER BY datname ASC
+                    """
+                )
+                rows = cur.fetchall() if hasattr(cur, "fetchall") else []
+            return [str(r[0]) for r in rows if r and r[0]]
+        except PostgresServiceError:
+            raise
+        except Exception as exc:
+            raise PostgresExecutionError(f"Failed to list databases: {exc}") from exc
+        finally:
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     # -------------------------------------------------------------------------
     # Connectivity Test, Transactional Dry-Run & Commit

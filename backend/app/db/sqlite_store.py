@@ -21,6 +21,7 @@ from backend.app.db.schemas import (
     EntryMode,
     GateName,
     GateStatus,
+    ProjectKind,
     ProjectStage,
 )
 
@@ -30,18 +31,33 @@ CREATE TABLE IF NOT EXISTS projects (
     slug TEXT NOT NULL,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
+    project_kind TEXT NOT NULL DEFAULT 'clinical_form'
+        CHECK (project_kind IN ('clinical_form', 'free_report')),
     current_stage TEXT NOT NULL DEFAULT 'landing'
         CHECK (current_stage IN ('landing', 'extraction', 'form_builder', 'sql_db', 'jrxml_design', 'completed')),
     entry_mode TEXT NOT NULL DEFAULT 'pdf'
-        CHECK (entry_mode IN ('pdf', 'json', 'jrxml')),
+        CHECK (entry_mode IN ('pdf', 'json', 'jrxml', 'blank_report', 'sftp_import', 'jasperserver_import')),
     preferred_harness TEXT NOT NULL DEFAULT 'agy',
     template_db_id INTEGER NULL,
+    default_db_profile_id TEXT NULL,
+    client_system_id TEXT NULL,
+    source_origin_json TEXT NOT NULL DEFAULT '{}',
     workspace_dir TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS agent_sessions (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    phase TEXT NOT NULL
+        CHECK (phase IN ('extraction', 'jrxml')),
+    harness_id TEXT NOT NULL,
+    external_session_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, phase, harness_id)
+);
 
 CREATE TABLE IF NOT EXISTS artifact_revisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,13 +145,91 @@ class SQLiteStore:
         conn.execute("PRAGMA busy_timeout = 5000;")
         return conn
 
+    def _migrate_projects_v1_to_v1_1(self, conn: sqlite3.Connection) -> None:
+        """Idempotently migrate v1.0 `projects` table to v1.1 columns and expanded `entry_mode` CHECK."""
+        ddl_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'projects'"
+        ).fetchone()
+        if ddl_row is None:
+            return
+        ddl = str(ddl_row["sql"] or "")
+        cols = {
+            str(r["name"])
+            for r in conn.execute("PRAGMA table_info(projects)").fetchall()
+        }
+        required_cols = {
+            "project_kind",
+            "default_db_profile_id",
+            "client_system_id",
+            "source_origin_json",
+        }
+        needs_rebuild = (not required_cols.issubset(cols)) or ("blank_report" not in ddl)
+        if not needs_rebuild:
+            return
+
+        project_kind_expr = "project_kind" if "project_kind" in cols else "'clinical_form'"
+        default_db_expr = "default_db_profile_id" if "default_db_profile_id" in cols else "NULL"
+        client_sys_expr = "client_system_id" if "client_system_id" in cols else "NULL"
+        origin_expr = "source_origin_json" if "source_origin_json" in cols else "'{}'"
+
+        conn.execute("PRAGMA foreign_keys = OFF;")
+        try:
+            with conn:
+                conn.execute("DROP TABLE IF EXISTS projects_v11_migration;")
+                conn.execute(
+                    """
+                    CREATE TABLE projects_v11_migration (
+                        id TEXT PRIMARY KEY,
+                        slug TEXT NOT NULL,
+                        name TEXT NOT NULL,
+                        description TEXT NOT NULL DEFAULT '',
+                        project_kind TEXT NOT NULL DEFAULT 'clinical_form'
+                            CHECK (project_kind IN ('clinical_form', 'free_report')),
+                        current_stage TEXT NOT NULL DEFAULT 'landing'
+                            CHECK (current_stage IN ('landing', 'extraction', 'form_builder', 'sql_db', 'jrxml_design', 'completed')),
+                        entry_mode TEXT NOT NULL DEFAULT 'pdf'
+                            CHECK (entry_mode IN ('pdf', 'json', 'jrxml', 'blank_report', 'sftp_import', 'jasperserver_import')),
+                        preferred_harness TEXT NOT NULL DEFAULT 'agy',
+                        template_db_id INTEGER NULL,
+                        default_db_profile_id TEXT NULL,
+                        client_system_id TEXT NULL,
+                        source_origin_json TEXT NOT NULL DEFAULT '{}',
+                        workspace_dir TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    f"""
+                    INSERT INTO projects_v11_migration (
+                        id, slug, name, description, project_kind, current_stage, entry_mode,
+                        preferred_harness, template_db_id, default_db_profile_id,
+                        client_system_id, source_origin_json, workspace_dir, created_at, updated_at
+                    )
+                    SELECT
+                        id, slug, name, description, {project_kind_expr}, current_stage, entry_mode,
+                        preferred_harness, template_db_id, {default_db_expr},
+                        {client_sys_expr}, {origin_expr}, workspace_dir, created_at, updated_at
+                    FROM projects
+                    """
+                )
+                conn.execute("DROP TABLE projects;")
+                conn.execute("ALTER TABLE projects_v11_migration RENAME TO projects;")
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_projects_updated_at ON projects(updated_at DESC);"
+                )
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON;")
+
     def init_db(self) -> None:
-        """Initialize database tables and indexes idempotently."""
+        """Initialize database tables, migrations, and indexes idempotently."""
         target = self.db_path
         conn = self._open_raw_connection(target)
         try:
             with conn:
                 conn.executescript(SCHEMA_SQL)
+            self._migrate_projects_v1_to_v1_1(conn)
             self._initialized_paths.add(target)
         finally:
             conn.close()
@@ -183,30 +277,40 @@ class SQLiteStore:
         name: str,
         workspace_dir: str | Path,
         description: str = "",
+        project_kind: ProjectKind = "clinical_form",
         current_stage: ProjectStage = "landing",
         entry_mode: EntryMode = "pdf",
         preferred_harness: str = "agy",
         template_db_id: int | None = None,
+        default_db_profile_id: str | None = None,
+        client_system_id: str | None = None,
+        source_origin: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Insert a new project row and seed its 3 approval gates in 'pending' status."""
         now = utc_now_iso()
+        origin_json = json.dumps(source_origin or {}, ensure_ascii=False)
         with self.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO projects (
-                    id, slug, name, description, current_stage, entry_mode,
-                    preferred_harness, template_db_id, workspace_dir, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, slug, name, description, project_kind, current_stage, entry_mode,
+                    preferred_harness, template_db_id, default_db_profile_id,
+                    client_system_id, source_origin_json, workspace_dir, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     project_id,
                     slug,
                     name,
                     description,
+                    project_kind,
                     current_stage,
                     entry_mode,
                     preferred_harness,
                     template_db_id,
+                    default_db_profile_id,
+                    client_system_id,
+                    origin_json,
                     str(workspace_dir),
                     now,
                     now,
@@ -222,13 +326,27 @@ class SQLiteStore:
                     (project_id, gate_name, now),
                 )
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return dict(row)
+        return self._deserialize_project_row(row)
+
+    @staticmethod
+    def _deserialize_project_row(row: sqlite3.Row) -> dict[str, Any]:
+        data = dict(row)
+        data.setdefault("project_kind", "clinical_form")
+        data.setdefault("default_db_profile_id", None)
+        data.setdefault("client_system_id", None)
+        raw_origin = data.get("source_origin_json") or "{}"
+        try:
+            parsed = json.loads(raw_origin)
+            data["source_origin"] = parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            data["source_origin"] = {}
+        return data
 
     def get_project(self, project_id: str) -> dict[str, Any] | None:
         """Fetch a single project row by ID."""
         with self.connection() as conn:
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return dict(row) if row is not None else None
+        return self._deserialize_project_row(row) if row is not None else None
 
     def list_projects(self) -> list[dict[str, Any]]:
         """Return all projects ordered by most recently updated first."""
@@ -236,7 +354,7 @@ class SQLiteStore:
             rows = conn.execute(
                 "SELECT * FROM projects ORDER BY updated_at DESC, created_at DESC"
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [self._deserialize_project_row(r) for r in rows]
 
     def update_project(self, project_id: str, **fields: Any) -> dict[str, Any] | None:
         """Update allowed mutable columns on a project and refresh updated_at."""
@@ -244,13 +362,21 @@ class SQLiteStore:
             "slug",
             "name",
             "description",
+            "project_kind",
             "current_stage",
             "entry_mode",
             "preferred_harness",
             "template_db_id",
+            "default_db_profile_id",
+            "client_system_id",
+            "source_origin_json",
             "workspace_dir",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
+        if "source_origin" in fields and fields["source_origin"] is not None:
+            updates["source_origin_json"] = json.dumps(
+                fields["source_origin"], ensure_ascii=False
+            )
         with self.connection() as conn:
             existing = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
             if existing is None:
@@ -263,7 +389,7 @@ class SQLiteStore:
                 conn.execute(f"UPDATE projects SET {assignments} WHERE id = ?", params)
 
             row = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
-        return dict(row) if row is not None else None
+        return self._deserialize_project_row(row) if row is not None else None
 
     def delete_project(self, project_id: str) -> bool:
         """Delete project and cascade-remove its revisions, gates, and chat messages."""
@@ -587,3 +713,84 @@ class SQLiteStore:
         with self.connection() as conn:
             cursor = conn.execute("DELETE FROM app_settings WHERE key = ?", (key,))
             return cursor.rowcount > 0
+
+    # -------------------------------------------------------------------------
+    # Agent Sessions (Continuous Harness Conversations)
+    # -------------------------------------------------------------------------
+
+    def get_agent_session(
+        self,
+        project_id: str,
+        phase: ChatPhase,
+        harness_id: str,
+    ) -> dict[str, Any] | None:
+        """Fetch persisted external session ID for `(project_id, phase, harness_id)`."""
+        with self.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM agent_sessions
+                WHERE project_id = ? AND phase = ? AND harness_id = ?
+                """,
+                (project_id, phase, harness_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_agent_sessions(self, project_id: str) -> list[dict[str, Any]]:
+        """List all persisted harness sessions for a project."""
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_sessions WHERE project_id = ? ORDER BY updated_at DESC",
+                (project_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_agent_session(
+        self,
+        project_id: str,
+        phase: ChatPhase,
+        harness_id: str,
+        external_session_id: str,
+    ) -> dict[str, Any]:
+        """Store or refresh the external session ID for `(project_id, phase, harness_id)`."""
+        now = utc_now_iso()
+        with self.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_sessions (
+                    project_id, phase, harness_id, external_session_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, phase, harness_id) DO UPDATE SET
+                    external_session_id = excluded.external_session_id,
+                    updated_at = excluded.updated_at
+                """,
+                (project_id, phase, harness_id, external_session_id, now),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM agent_sessions
+                WHERE project_id = ? AND phase = ? AND harness_id = ?
+                """,
+                (project_id, phase, harness_id),
+            ).fetchone()
+        return dict(row)
+
+    def delete_agent_session(
+        self,
+        project_id: str,
+        *,
+        phase: ChatPhase | None = None,
+        harness_id: str | None = None,
+    ) -> int:
+        """Delete one or more persisted agent sessions for a project; returns rows removed."""
+        clauses = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        if phase is not None:
+            clauses.append("phase = ?")
+            params.append(phase)
+        if harness_id is not None:
+            clauses.append("harness_id = ?")
+            params.append(harness_id)
+        where_sql = " AND ".join(clauses)
+        with self.connection() as conn:
+            cursor = conn.execute(f"DELETE FROM agent_sessions WHERE {where_sql}", params)
+            return int(cursor.rowcount)

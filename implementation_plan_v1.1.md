@@ -1,8 +1,9 @@
 # Plano de Implementação & Estratégia — Salutem Ficha Studio `v1.1`
 
 > **Data do planejamento:** 2026-11-27  
-> **Branch / Baseline base:** `main` (`c22d778` — `v1.0.0` + quick wins de hardening, padronização de imports e Vite code-splitting)  
-> **Propósito deste documento:** Servir como fonte única de verdade (contexto de negócio, decisões arquiteturais, especificações técnicas por bloco, regras de negócio e critérios de aceite) para continuidade do desenvolvimento em novas sessões ou em outro computador.
+> **Branch / Baseline base:** `main` (`5ecc9a4` — `v1.0.0` + hardening, padronização de imports e Vite code-splitting)  
+> **Propósito deste documento:** Servir como fonte única de verdade (contexto de negócio, decisões arquiteturais, especificações técnicas por bloco, estratégia de execução paralela com Swarm, regras de segurança e critérios de aceite).  
+> **Regra de confidencialidade:** Este documento e o repositório **nunca** contêm URLs internas da empresa, nomes de clientes/unidades, endereços de servidores ou credenciais (padrão ou individuais). Todos os dados operacionais são configurados ou sincronizados localmente pelo usuário autenticado.
 
 ---
 
@@ -25,7 +26,8 @@ Quando a onda inicial de fichas novas dessa unidade acabar, a `v1.0.0` — presa
 - **Manutenção e ajustes rápidos** em relatórios e fichas existentes;
 - **Relatórios complexos com SQL personalizado** e regras de negócio específicas (não vinculados a `template_ficha_clinica`);
 - **Salutem Hospitalar** (mais complexo e muito usado na empresa): usa a mesma base tecnológica (**PostgreSQL + JasperReports + JasperReports Server**), porém com **schema de banco diferente** e publicação direta em **`Report Units`** no JasperReports Server;
-- **Publicação manual em servidores**: hoje, para baixar, editar e substituir arquivos de fichas clínicas nos servidores ambulatoriais, o time ainda depende de **Tabby (SSH/SFTP)** ou **FileZilla**.
+- **Publicação manual em servidores**: hoje, para baixar, editar e substituir arquivos de fichas clínicas nos servidores ambulatoriais, o time ainda depende de **Tabby (SSH/SFTP)** ou **FileZilla**;
+- **Gestão fragmentada de clientes e ambientes**: cada cliente/unidade pode possuir **múltiplos sistemas** (ex.: Ambulatorial e Hospitalar, ou HML e PRD), com links web, bancos PostgreSQL, JasperServer e SSH/SFTP distintos, hoje consultados manualmente no portal interno de gestão.
 
 ### 1.3 O gargalo organizacional (por que o produto tem alto valor na empresa)
 - **Aproximadamente metade de todo o setor de TI** precisa mexer em relatórios quando a operação aperta, mas **não domina o Jaspersoft Studio** (pois atua em outras frentes no dia a dia), travando e precisando interromper especialistas com frequência.
@@ -39,23 +41,25 @@ Quando a onda inicial de fichas novas dessa unidade acabar, a `v1.0.0` — presa
 | Decisão | Escolha Definida | Justificativa ("Por quê?") |
 | :--- | :--- | :--- |
 | **Posicionamento do produto** | **AI-First Report & Form Workbench** (NÃO clone visual drag-and-drop do Jaspersoft Studio) | Competir replicando 20 anos de painéis visuais do Eclipse/Jaspersoft é armadilha. O diferencial imbatível do Studio é **leveza, velocidade (~150ms), zero fricção e IA integrada com visão (PNGs) + acesso seguro ao schema do banco**. Para 5–10% de casos extremos, o `.jrxml` continua 100% padrão e interoperável. |
-| **Foco da `v1.1`** | **100% utilidade diária** (Ordem 1): Relatório Livre + SQL Workbench/MCP + SFTP + JasperReports Server `Report Unit` + Sessão Contínua | Cobre **Ambulatorial E Hospitalar** imediatamente e elimina 4 ferramentas pesadas/manuais: ~~Jaspersoft Studio~~, ~~DataGrip~~, ~~cadastro manual~~ e ~~FileZilla / Tabby~~. |
+| **Foco da `v1.1`** | **100% utilidade diária**: Relatório Livre + SQL Workbench/MCP + SFTP + JasperReports Server `Report Unit` + **Aba de Clientes (Multi-Sistema)** + **Credenciais Padrão/Personalizadas** + Sessão Contínua | Cobre **Ambulatorial E Hospitalar** imediatamente, organiza todos os clientes/sistemas num único lugar e elimina 4 ferramentas pesadas/manuais: ~~Jaspersoft Studio~~, ~~DataGrip~~, ~~cadastro manual~~ e ~~FileZilla / Tabby~~. |
 | **Contas multiusuário / Login (`STUDIO_AUTH_ENABLED`)** | **Adiado por tempo indeterminado** | Não investir esforço em burocracia de autenticação/usuários/papéis agora; todo foco vai para utilidade técnica real. Volta ao escopo apenas quando houver demanda formal de servidor compartilhado pela empresa. |
-| **Portal interno de gestão de unidades** | **Deixar interface plugável (`UnitCatalogProvider`), sem bloquear a `v1.1`** | Existe um site interno atualizado em tempo real com URLs de PostgreSQL (login padrão), JasperServer e SSH de todas as unidades. O formato de acesso (API vs HTML/auth) ainda será levantado com colegas; a arquitetura ficará pronta para plugar o sync sem refatorar o core. |
+| **Aba de Clientes & Sincronização do Portal de Gestão** | **Incluída na `v1.1` (zero dados built-in no código/GitHub)** | Cada colaborador sincroniza os clientes sob demanda usando sua **própria sessão autenticada no navegador** (via coletor Bookmarklet/Snippet ou importação de JSON/HTML da página logada). A URL do portal é configurada localmente pelo usuário em `app_settings`. Nenhum dado interno ou credencial vai para o GitHub. |
+| **Credenciais Padrão vs Personalizadas** | **Herança por tipo de conexão (`postgres`, `sftp`, `jasperserver`) no Cofre Local** | Como bancos e serviços corporativos frequentemente compartilham um usuário/senha padrão com exceções pontuais, o usuário cadastra uma única vez suas credenciais padrão no **Cofre Local (`SecretVault`)** e escolhe `credential_mode = 'default' | 'custom'` em cada perfil. Se a senha padrão mudar, atualiza em 1 lugar. **Nunca built-in no programa.** |
+| **Múltiplos Sistemas por Cliente + Link Web** | **Relação 1:N (`client_units` → `client_systems`)** | Uma mesma unidade/cliente pode ter mais de um sistema (ex.: Ambulatorial + Hospitalar, HML + PRD), cada qual com seu `system_url` (atalho web clicável) e vínculos opcionais para PostgreSQL, SFTP e JasperServer. |
 | **Integração JasperReports Server** | **Portar contratos validados do repo `fernandocalisto/jasper-reports-tools`** | O autor já validou em produção/homologação a API REST v2 do JasperServer da empresa em `src/services/jasperServerClient.ts` (login `POST /rest_v2/login`, `JSESSIONID` + Basic fallback, `username\|organization`, `serverInfo`, `resources`, resolução de `reportUnit` → `_files/main_jrxml`, `PUT` com `overwrite=true`). |
 | **Cobertura Ambulatorial vs Hospitalar** | **Unified Remote Report Flow**: SFTP (fichas ambulatoriais) + JasperServer (Hospitalar e relatórios gerais ambulatoriais) | Reflete exatamente como a empresa opera nos dois produtos. |
 
 ---
 
-## 3. Baseline Técnico Atual (Pós-`c22d778`)
+## 3. Baseline Técnico Atual (Pós-`5ecc9a4`)
 
 O repositório já possui uma base sólida e testada:
 
-- **Backend (`backend/app/`)**: Python 3.13 + FastAPI + SQLite WAL (`backend/app/db/sqlite_store.py`) + `psycopg` 3 + `pymupdf` + `keyring` + servidor MCP stdio próprio (`backend/app/mcp_tools/mcp_server.py`) com 8 ferramentas determinísticas + 4 harnesses (`agy`, `claude`, `codex`, `opencode`).
+- **Backend (`backend/app/`)**: Python 3.11+ + FastAPI + SQLite WAL (`backend/app/db/sqlite_store.py`) + `psycopg` 3 + `pymupdf` + `keyring` + servidor MCP stdio próprio (`backend/app/mcp_tools/mcp_server.py`) com 8 ferramentas determinísticas + 4 harnesses (`agy`, `claude`, `codex`, `opencode`).
 - **Frontend (`frontend/src/`)**: React 19 + TypeScript + Vite 6 (com `manualChunks` e proxy `/api` com `ws: true`) + Tailwind v4 + Monaco Editor + `@dnd-kit` + `pdfjs-dist` v5.
-- **Jasper Daemon JVM (`java-engine/` → `resources/bin/jasper-daemon.jar`)**: Java 17 + JasperReports `6.21.3` em modo HTTP residente `127.0.0.1` (`--action serve`) com suporte já existente a `compile`, `decompile`, `export`, `inspect-query` e `test-conn`.
+- **Jasper Daemon JVM (`java-engine/` → `resources/bin/jasper-daemon.jar`)**: Java 17+ + JasperReports `6.21.3` em modo HTTP residente `127.0.0.1` (`--action serve`) com suporte já existente a `compile`, `decompile`, `export`, `inspect-params`, `inspect-query` e `test-conn`.
 - **Hardening recente (`c22d778`)**: CORS configurável via `STUDIO_CORS_ORIGINS` (padrão restrito a `localhost`/`127.0.0.1`), rejeição de chaves placeholder no cofre, CI com menor privilégio (`contents: read` global; `contents: write` só em `release`), imports padronizados em `backend.app.*`.
-- **Baseline de testes verdes**: **123 passed** no `pytest` (incl. JVM real e MCP stdio) e **11 arquivos / 49 passed** no `vitest`, `typecheck` com 0 erros e bundle `index-*.js` em 267 KB.
+- **Nota de ambiente local**: em clones novos, criar `.venv` (`pip install -r backend/requirements.txt`) e instalar `frontend/node_modules` (`npm --prefix frontend ci`) antes de rodar a suíte baseline.
 
 ---
 
@@ -64,31 +68,34 @@ O repositório já possui uma base sólida e testada:
 ```mermaid
 flowchart TB
     subgraph UI["Frontend SPA (React 19 + Monaco + PDF.js)"]
+        Clients["Aba Clientes (Nova)\n(Busca · Multi-Sistema · Link Web · Sync do Portal Logado · Atalhos Diretos)"]
         Create["CreateProjectDialog\n(PDF | JSON | JRXML | SFTP | JasperServer | Relatório Livre)"]
         Workbench["SQL Workbench\n(Schema Explorer + SELECT Read-Only + INSERT/SELECT Ficha)"]
         JasperUI["Jasper Studio Light\n(Monaco XML + Parâmetros $P{} + Preview Live/Mock + Diff + Deploy SFTP/JS)"]
         Chat["AgentChatDrawer\n(Sessão Contínua + Skill Manutenção/Extração + Recortes PNG)"]
-        Settings["SettingsView\n(Perfis PG | Perfis SFTP | Perfis JasperServer | Subreports | Harnesses)"]
+        Settings["SettingsView\n(Credenciais Padrão | PG | SFTP | JasperServer | Subreports | Harnesses)"]
     end
 
     subgraph Backend["Backend FastAPI (backend/app/)"]
-        Vault["secret_vault.py\n(OS Keyring + Cryptography AES-256-GCM / Fernet)"]
-        PG["postgres_service.py\n(Perfis + Dry-Run/Commit + Schema Explorer + SELECT Preview RO)"]
+        Vault["secret_vault.py (Bloco 0)\n(OS Keyring + Cryptography AES-256-GCM v2\n+ Credenciais Padrão vs Personalizadas)"]
+        Catalog["client_catalog_service.py (Bloco 4)\n(client_units + client_systems + UnitCatalogProvider\n+ Importador de Sessão Logada)"]
+        PG["postgres_service.py + pg_schema_inspector.py\n(Perfis + Dry-Run/Commit + Schema Explorer + SELECT Preview RO)"]
         SFTP["sftp_service.py\n(Paramiko: Browse, Import + Decompile, Deploy + .bak)"]
         JS["jasperserver_service.py\n(REST v2: Login, Browse, Import Report Unit, Deploy + Backup)"]
-        MCP["mcp_server.py + studio_tools.py\n(8 tools atuais + 3 tools de Schema/SQL Read-Only)"]
+        MCP["mcp_server.py + studio_tools.py + db_tools.py\n(8 tools atuais + 3 tools de Schema/SQL Read-Only)"]
         Orch["agent_orchestrator.py\n(Continuidade de sessão + Skill manutencao_relatorio)"]
-        Catalog["unit_catalog.py\n(Interface plugável p/ futuro Sync do Site de Unidades)"]
     end
 
-    subgraph External["Infraestrutura da Empresa"]
+    subgraph External["Infraestrutura & Sessão do Colaborador"]
+        Portal["Portal Interno de Gestão\n(Sessão Logada no Navegador do Colaborador)"]
         PGDB[("PostgreSQL\nAmbulatorial & Hospitalar")]
         SFTPSrv["Servidores Linux SSH/SFTP\n(Fichas Ambulatoriais .jrxml/.jasper)"]
         JSSrv["JasperReports Server\n(REST v2 — Report Units Hospitalar & Gerais)"]
-        JVM["Jasper Daemon JVM\n(compile | decompile | export)"]
+        JVM["Jasper Daemon JVM\n(compile | decompile | export | inspect-params)"]
     end
 
     UI <--> Backend
+    Portal -. "Coletor / Exportação do Usuário\n(Zero credenciais salvas)" .-> Clients
     PG <--> PGDB
     SFTP <--> SFTPSrv
     JS <--> JSSrv
@@ -96,6 +103,9 @@ flowchart TB
     PG --> Vault
     SFTP --> Vault
     JS --> Vault
+    Catalog --> PG
+    Catalog --> SFTP
+    Catalog --> JS
     Orch <--> MCP
     MCP --> PG
     MCP --> JVM
@@ -103,25 +113,49 @@ flowchart TB
 
 ---
 
-## 5. Especificação Detalhada dos 4 Blocos da `v1.1`
+## 5. Especificação Detalhada dos Blocos da `v1.1` (Organizados para Execução Paralela com Swarm)
 
-> Os blocos foram desenhados para serem **incrementais e independentemente entregáveis**: ao final de cada bloco, o Studio já ganha novas capacidades usáveis em produção local e com testes 100% verdes.
+> **Por que existe um Bloco 0?**  
+> Para permitir que os **Blocos 1, 2, 3 e 4 sejam desenvolvidos em paralelo por workers independentes do Swarm sem conflitos de merge**, a fundação compartilhada (Cofre AES-256-GCM + Credenciais Padrão/Personalizadas + Migração SQLite v1.1 + contratos base) é consolidada primeiro no **Bloco 0**.
 
 ---
 
-### Bloco 1 — Modo Relatório Livre + SQL Workbench & MCP de Schema + Parâmetros Dinâmicos + Sessão Contínua
+### Bloco 0 — Fundação Compartilhada (Pré-requisito Curto para o Fan-Out do Swarm)
 
-**Objetivo de negócio:** Permitir criar e dar manutenção em **qualquer relatório JasperReports** (Ambulatorial ou Hospitalar) com queries SQL complexas, sem depender do fluxo de ficha clínica (`ficha.json`/`INSERT`), substituindo o DataGrip para exploração de banco e tornando a iteração com IA muito mais rápida e precisa.
+**Objetivo técnico:** Unificar o cofre criptografado com suporte a credenciais padrão vs personalizadas e realizar a migração de banco/schemas uma única vez antes de abrir as 4 frentes paralelas.
 
-#### 1.1 Modelo de Projeto e Persistência (`sqlite_store.py` + `schemas.py`)
-- **Estender `projects` sem quebrar projetos v1.0 existentes** (migração idempotente `ALTER TABLE` em `SQLiteStore.init_db()`):
-  - `project_kind TEXT NOT NULL DEFAULT 'clinical_form'` (`CHECK` ou validação Pydantic: `'clinical_form' | 'free_report'`).
-  - `source_origin_json TEXT NOT NULL DEFAULT '{}'` — guarda metadados da origem remota quando importado de SFTP ou JasperServer (ex.: `{"provider": "sftp", "profile_id": "...", "remote_path": "/.../ficha.jrxml"}` ou `{"provider": "jasperserver", "profile_id": "...", "resource_uri": "/reports/.../unit", "main_jrxml_uri": "..."}`), permitindo o botão **Deploy de volta para a origem** em 1 clique!
-  - `default_db_profile_id TEXT NULL` — associa o projeto a um perfil PostgreSQL preferencial (ex.: banco Hospitalar X ou Ambulatorial Y) para que o SQL Workbench, o Preview Live e as MCP tools saibam qual banco consultar sem o usuário reselecionar toda hora.
-- **Expandir `EntryMode`** em `backend/app/db/schemas.py` e `frontend/src/types/studio.ts`:
-  - De `Literal["pdf", "json", "jrxml"]` para `Literal["pdf", "json", "jrxml", "blank_report", "sftp_import", "jasperserver_import"]`.
-  - **Importante sobre SQLite `CHECK` constraints:** como `projects.entry_mode` atual possui `CHECK (entry_mode IN ('pdf', 'json', 'jrxml'))` em `sqlite_store.py`, a migração precisará recriar a tabela `projects` de forma segura (padrão SQLite `CREATE TABLE projects_new ... INSERT INTO ... DROP ... RENAME`) com `PRAGMA foreign_keys = OFF` dentro de transação, ou remover o `CHECK` rígido de `entry_mode` mantendo a validação na camada Pydantic. *Testar explicitamente a migração sobre um banco `studio.db` v1.0 existente!*
-- **Nova tabela `agent_sessions`** em `sqlite_store.py`:
+#### 0.1 Cofre Unificado com `cryptography` (`backend/app/services/secret_vault.py`)
+- Adicionar `cryptography>=43.0.0` (e `paramiko>=3.5.0` já previsto para o Bloco 2) em `backend/requirements.txt`.
+- Extrair `_EncryptedVault` e o acesso a `keyring` de `postgres_service.py` para `SecretVaultService` reutilizado por `PostgresService`, `SftpService` e `JasperServerService`:
+  - Novas gravações no `.vault.json` usam **`version: 2`** com **PBKDF2-HMAC-SHA256 (600.000 iterações) + AES-256-GCM** (autenticando `account` como AAD).
+  - Leitura continua suportando entradas legadas **`version: 1`** (da `v1.0.0`) de forma transparente, migrando automaticamente para `v2` ao regravar.
+  - Em Windows local, continua usando `keyring` (Windows Credential Manager) como primário e `.vault.json` como fallback (Docker/headless).
+  - Mantém rejeição de chaves placeholder inseguras.
+
+#### 0.2 Serviço de Credenciais Padrão vs Personalizadas (`backend/app/services/default_credentials_service.py` + API em `api/credentials.py`)
+- Permite ao usuário configurar localmente (**nunca built-in no código!**) um conjunto padrão de credenciais e defaults operacionais por tipo de conexão (`postgres`, `sftp`, `jasperserver`):
+  - **PostgreSQL padrão**: `username` + `default_dbname` opcional (ex.: por tipo `ambulatorial` / `hospitalar` quando o portal informa apenas `host:port`) em `app_settings` + `password` no `SecretVault` (`default:postgres:password`).
+  - **SFTP / SSH padrão**: `username` + `auth_type` (`password | private_key`) + `default_remote_base_dir` (pasta padrão das fichas nos servidores Linux, já que o portal exibe apenas `host:port`/usuário) + `password` / `private_key` / `passphrase` no `SecretVault` (`default:sftp:*`).
+  - **JasperReports Server padrão**: `username` + `organization` (opcional) + `password` no `SecretVault` (`default:jasperserver:password`).
+- Método único `resolve_credentials(kind, *, credential_mode, custom_username, profile_id, ...)`:
+  - `credential_mode == 'default'`: usa o usuário do perfil se preenchido ou herda o padrão; busca senha/chave do cofre padrão (`default:<kind>:*`).
+  - `credential_mode == 'custom'`: usa usuário/senha/chave exclusivos do perfil (`<kind>:<profile_id>:*`).
+- Endpoints REST:
+  - `GET /api/credentials/defaults` (retorna apenas metadados: `username`, `organization`, `auth_type`, `has_password`, `has_private_key`, `updated_at` — **nunca** segredos em texto plano);
+  - `PUT /api/credentials/defaults/{kind}` (`kind` em `postgres | sftp | jasperserver`);
+  - `DELETE /api/credentials/defaults/{kind}` (remove credencial padrão do cofre local).
+
+#### 0.3 Migração Idempotente do SQLite (`backend/app/db/sqlite_store.py` + `schemas.py` + `postgres_service.py`)
+- **`projects`** (migração segura sobre bancos `v1.0` existentes, recriando tabela em transação com `PRAGMA foreign_keys = OFF` para ampliar o `CHECK` de `entry_mode`):
+  - `project_kind TEXT NOT NULL DEFAULT 'clinical_form'` (`'clinical_form' | 'free_report'`);
+  - `entry_mode` ampliado para `'pdf' | 'json' | 'jrxml' | 'blank_report' | 'sftp_import' | 'jasperserver_import'`;
+  - `source_origin_json TEXT NOT NULL DEFAULT '{}'` (origem remota SFTP/JasperServer para 1-click deploy);
+  - `default_db_profile_id TEXT NULL`;
+  - `client_system_id TEXT NULL` (vínculo opcional ao sistema de um cliente da Aba Clientes).
+- **`db_profiles`** (migração `ALTER TABLE` idempotente):
+  - `credential_mode TEXT NOT NULL DEFAULT 'custom'` (`'default' | 'custom'`, mantendo perfis v1.0 como `'custom'`);
+  - `environment TEXT NOT NULL DEFAULT 'HML'` (`'DEV' | 'HML' | 'PRD'`).
+- **Nova tabela `agent_sessions`**:
   ```sql
   CREATE TABLE IF NOT EXISTS agent_sessions (
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -132,309 +166,355 @@ flowchart TB
       PRIMARY KEY (project_id, phase, harness_id)
   );
   ```
-- **Comportamento de fluxo por `project_kind`**:
-  - `clinical_form`: mantém 100% do comportamento da v1.0 (`Overview → Form Builder → SQL & Banco → Jasper Studio`).
-  - `free_report`: ao abrir o projeto, vai direto para `jasper_studio` (ou `sql_db` em modo Workbench), **oculta/marca como opcional** o Form Builder e a aba `INSERT` de ficha clínica, e permite editar diretamente a `<queryString>` do `.jrxml` sincronizada com o artefato `sql_select` (botão bidirecional *"Extrair query do JRXML ↔ Aplicar query no JRXML"*).
+- **Testes obrigatórios do Bloco 0**: `test_secret_vault.py` (v2 AES-256-GCM + retrocompatibilidade v1 + default credentials), `test_sqlite_migration_v1_to_v1_1.py` (migração sobre banco `v1.0` real preservando projetos, revisões, gates e chat).
 
-#### 1.2 SQL Workbench & Schema Explorer Read-Only (`postgres_service.py` + `api/database.py`)
-- **Novos métodos em `PostgresService`** (sempre usando transação explícita `SET TRANSACTION READ ONLY` + `ROLLBACK` no `finally` + `SET LOCAL statement_timeout = '10000'`):
-  1. `list_schemas(profile_id) -> list[str]`: lista schemas não-sistema (`pg_catalog`, `information_schema` excluídos por padrão, priorizando `public`).
-  2. `list_tables(profile_id, *, schema: str = "public", search: str | None = None, limit: int = 100) -> list[TableSummary]`: consulta `information_schema.tables` (tabelas e views) com filtro `ILIKE` por nome e contagem estimada de linhas (`pg_class.reltuples`).
-  3. `describe_table(profile_id, *, schema: str = "public", table: str) -> TableSchemaDetail`: retorna colunas (`name`, `data_type`, `udt_name`, `is_nullable`, `default`, `java_class`), chaves primárias (`PK`) e chaves estrangeiras (`FK` apontando para tabela/coluna destino) — essencial para a IA e o analista montarem `JOIN`s corretos tanto no Ambulatorial quanto no Hospitalar!
-  4. `preview_select_query(profile_id, sql_select: str, *, params: dict[str, Any] | None = None, limit: int = 50) -> SelectPreviewResult`:
-     - Valida estritamente que a query é somente leitura (rejeita `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `GRANT`, `REVOKE`, `DO $$`, múltiplos statements separados por `;`).
-     - Substitui placeholders Jasper (`$P{nome}`, `$P!{nome}` apenas se seguro/validado, `${nome}`) usando parâmetros bindados do `psycopg` quando possível.
-     - Envolve em `SELECT * FROM (<query>) AS _studio_preview LIMIT %s` com teto rígido (`1 <= limit <= 200`, padrão `50`).
-     - Executa dentro de `BEGIN READ ONLY` com `statement_timeout = 10s` e sempre executa `ROLLBACK`.
-     - Retorna `columns` (nome + `pg_type` + `java_class`), `rows` (serializadas em JSON seguro: `date`/`datetime`/`Decimal`/`UUID`/`bytes` convertidos limpos), `row_count`, `truncated: bool`, `latency_ms`.
-- **Novos endpoints em `backend/app/api/database.py`**:
+---
+
+### Frente A / Bloco 1 — Modo Relatório Livre + SQL Workbench & MCP de Schema + Parâmetros `$P{}` + Sessão Contínua
+
+**Objetivo de negócio:** Permitir criar e dar manutenção em **qualquer relatório JasperReports** (Ambulatorial ou Hospitalar) com queries SQL complexas, sem depender do fluxo de ficha clínica (`ficha.json`/`INSERT`), substituindo o DataGrip para exploração de banco e tornando a iteração com IA muito mais rápida e precisa.
+
+#### 1.1 Fluxo por `project_kind` (`workspace_service.py` + `api/projects.py`)
+- `clinical_form`: mantém 100% do comportamento da v1.0 (`Overview → Form Builder → SQL & Banco → Jasper Studio`).
+- `free_report`: ao abrir o projeto, vai direto para `jasper_studio` (ou `sql_db` em modo Workbench), oculta/marca como opcional o Form Builder e a aba `INSERT` de ficha clínica, e sincroniza bidirecionalmente a `<queryString>` do `.jrxml` com o artefato `sql_select` (*"Extrair query do JRXML ↔ Aplicar query no JRXML"*).
+
+#### 1.2 SQL Workbench & Schema Explorer Read-Only (`backend/app/services/pg_schema_inspector.py` + `api/database.py`)
+- Separar a introspecção em módulo dedicado `pg_schema_inspector.py` (mantendo `postgres_service.py` focado em perfis + Dry-Run/Commit).
+- Todas as operações usam `BEGIN READ ONLY` + `SET LOCAL statement_timeout = '10000'` + `ROLLBACK` no `finally`:
+  1. `list_schemas(profile_id) -> list[str]` (exclui `pg_catalog`, `information_schema`, prioriza `public`);
+  2. `list_tables(profile_id, *, schema="public", search=None, limit=100) -> list[TableSummary]` (tabelas e views + contagem estimada via `pg_class.reltuples`);
+  3. `describe_table(profile_id, *, schema="public", table) -> TableSchemaDetail` (colunas, `pg_type`, `java_class`, `is_nullable`, `default`, `PK` e `FK` com tabela/coluna destino);
+  4. `preview_select_query(profile_id, sql_select, *, params=None, limit=50) -> SelectPreviewResult`:
+     - Valida estritamente read-only (bloqueia `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `CREATE`, `GRANT`, `REVOKE`, `DO $$`, múltiplos statements);
+     - Substitui placeholders Jasper (`$P{nome}`, `${nome}`, `$P!{nome}` validado) usando parâmetros bindados do `psycopg`;
+     - Envolve em `SELECT * FROM (<query>) AS _studio_preview LIMIT %s` (`1 <= limit <= 200`, padrão `50`);
+     - Serializa tipos PostgreSQL (`date`/`datetime`/`Decimal`/`UUID`/`bytes`) de forma segura.
+- Novos endpoints em `backend/app/api/database.py`:
   - `GET /api/db/profiles/{profile_id}/schemas`
   - `GET /api/db/profiles/{profile_id}/tables?schema=public&search=...&limit=100`
   - `GET /api/db/profiles/{profile_id}/tables/{table_name}?schema=public`
   - `POST /api/db/profiles/{profile_id}/preview-select`
 
-#### 1.3 Novas Ferramentas MCP de Introspecção de Banco (`backend/app/mcp_tools/`)
-Criar `backend/app/mcp_tools/db_tools.py` e registrar 3 novas ferramentas read-only em `studio_tools.py` e `STUDIO_MCP_TOOL_NAMES` (`base.py`):
-1. `list_db_tables(profile_id: str | None = None, project_id: str | None = None, schema: str = "public", search: str = "", limit: int = 50)` — resolve `profile_id` diretamente ou pelo `default_db_profile_id` do projeto (ou perfil default do Studio).
-2. `describe_db_table(table: str, schema: str = "public", profile_id: str | None = None, project_id: str | None = None)` — devolve colunas, tipos, PKs e FKs para a IA montar `JOIN`s sem alucinar.
-3. `preview_db_select(sql_select: str, params: dict | None = None, limit: int = 10, profile_id: str | None = None, project_id: str | None = None)` — permite à IA testar sua própria query real contra o PostgreSQL em modo `READ ONLY` (máx. 20 linhas na tool para economizar contexto) e verificar colunas + amostra de dados antes de gravar no `.jrxml`!
+#### 1.3 Novas Ferramentas MCP de Introspecção de Banco (`backend/app/mcp_tools/db_tools.py`)
+Registrar 3 novas ferramentas read-only em `studio_tools.py` e `STUDIO_MCP_TOOL_NAMES` (`harnesses/base.py`):
+1. `list_db_tables(profile_id=None, project_id=None, schema="public", search="", limit=50)`
+2. `describe_db_table(table, schema="public", profile_id=None, project_id=None)`
+3. `preview_db_select(sql_select, params=None, limit=10, profile_id=None, project_id=None)` (teto rígido de 20 linhas na tool para economizar contexto).
+> **Segurança MCP:** `annotations = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}` — nunca permite escrita, independentemente do perfil.
 
-> **Regra de segurança MCP:** todas as 3 tools têm `annotations = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}` e **nunca** permitem escrita no banco, independentemente do perfil ser `read_only` ou não.
+#### 1.4 Parâmetros Dinâmicos `$P{...}` & Preview `db_live` (`backend/app/jrxml/parameters.py` + `api/jasper_preview.py`)
+- Utilitário `extract_jrxml_parameters(jrxml_xml: str) -> list[JrxmlParameterInfo]` + `extract_jrxml_query(jrxml_xml)` / `replace_jrxml_query(jrxml_xml, new_sql)`:
+  - Parseia `<parameter name="..." class="...">` e `<defaultValueExpression>`, marcando parâmetros de sistema (`SUBREPORT_DIR`, `caminho_relatorio`, `REPORT_*`) como `is_system=True`.
+- Novo endpoint `GET /api/projects/{project_id}/jasper/parameters`.
+- Estender `JasperPreviewRequest`:
+  - `mode: Literal["auto", "offline", "db_hybrid", "db_live"] = "auto"`;
+  - `report_params: dict[str, Any] = Field(default_factory=dict)`;
+  - No modo **`db_live`**: executa o `.jrxml` **sem reescrever a query com CTE fictícia**, passando `db_url`/`db_user`/`db_pass` (resolvidos via `SecretVault`, respeitando `default`/`custom`) + `report_params` tipados (`Long`, `Integer`, `Date`, `Boolean`, `String`) direto para o **Jasper Daemon JVM**.
 
-#### 1.4 Parâmetros Dinâmicos `$P{...}` no Preview Live (`api/jasper_preview.py` + `jrxml/`)
-- Criar utilitário `extract_jrxml_parameters(jrxml_xml: str) -> list[JrxmlParameterInfo]` em `backend/app/jrxml/`:
-  - Parseia todos os `<parameter name="..." class="...">` + `<defaultValueExpression>` do `.jrxml`, ignorando parâmetros internos/sistema (`SUBREPORT_DIR`, `caminho_relatorio`, `REPORT_*`) ou marcando-os como `is_system=True`.
-- Novo endpoint `GET /api/projects/{project_id}/jasper/parameters` (ou incluir na resposta de `/compile` e `/artifacts/jrxml`).
-- Estender `JasperPreviewRequest` em `backend/app/api/jasper_preview.py`:
-  - Adicionar `mode: Literal["auto", "offline", "db_hybrid", "db_live"] = "auto"`.
-  - Adicionar `report_params: dict[str, Any] = Field(default_factory=dict)`.
-  - No novo modo **`db_live`**: executa o `.jrxml` **sem reescrever a query com CTE fictícia**, passando `db_url`/`db_user`/`db_pass` do perfil PostgreSQL + `report_params` (convertidos para o tipo esperado: `Long`, `Integer`, `Date`, `Boolean`, `String`) diretamente para o **Jasper Daemon JVM**!
-  - Isso permite testar relatórios complexos do **Hospitalar e JasperServer** com dados reais de homologação/produção (somente leitura) em 150ms!
+#### 1.5 Continuidade de Sessão dos Agentes & Skill `manutencao_relatorio`
+- Nova skill embutida: `backend/app/skills/manutencao_relatorio/SKILL.md` (registrada em `studio_tools.py` e `/api/skills`).
+  - Em projetos `project_kind == "free_report"`, o orquestrador seleciona `manutencao_relatorio` em vez de `gerador_jrxml`.
+- Continuidade de sessão nos 4 harnesses (`resume_session_id: str | None = None` em `HarnessRunRequest`):
+  - **AGY**: `--conversation <id>`;
+  - **Claude Code**: `--resume <id>`;
+  - **Codex**: `codex exec resume <id>`;
+  - **OpenCode**: reutilizar `session_id`;
+  - Fallback automático para sessão nova se a sessão salva expirar/falhar.
+- Endpoint `DELETE /api/projects/{project_id}/agent/session?phase=...&harness_id=...` + botão **"Nova sessão"** no `AgentChatPanel`.
 
-#### 1.5 Continuidade de Sessão dos Agentes & Nova Skill `manutencao_relatorio`
-- **Nova skill embutida:** `backend/app/skills/manutencao_relatorio/SKILL.md`:
-  - Registrada em `studio_tools.py` (`get_salutem_skill`) e `api/harnesses_and_tools.py` (`/api/skills`).
-  - Focada em: ajustes cirúrgicos em `.jrxml` existentes (preservando estrutura/estilo original sem reescrever tudo do zero), relatórios livres do JasperServer (Ambulatorial e Hospitalar), construção/otimização de queries SQL complexas usando `list_db_tables` → `describe_db_table` → `preview_db_select`, e validação via `validate_and_compile_jrxml` + `render_preview_images`.
-  - Em projetos `project_kind == "free_report"`, o orquestrador carrega automaticamente `manutencao_relatorio` em vez de `gerador_jrxml` (que é específico de fichas ambulatoriais com 36 fields fixos e header de 182px).
-- **Continuidade de sessão nativa nos 4 harnesses**:
-  - Adicionar `resume_session_id: str | None = None` em `HarnessRunRequest` (`backend/app/harnesses/types.py`).
-  - Capturar `session_id` / `conversation_id` / `thread_id` dos eventos retornados pelo CLI e emiti-lo em `DONE.metadata["session_id"]`:
-    - **AGY**: capturar `conversation_id` do stream JSON e passar `--conversation <id>` nos turnos seguintes;
-    - **Claude Code**: capturar `session_id` do evento `system`/`result` e passar `--resume <id>`;
-    - **Codex**: capturar `thread_id` e usar `codex exec resume <id> ...`;
-    - **OpenCode**: reutilizar `session_id` existente no servidor/CLI.
-  - Em caso de falha ao retomar sessão expirada/inválida, limpar `agent_sessions` e fazer fallback automático para sessão nova sem travar o usuário.
-  - Novo endpoint `DELETE /api/projects/{project_id}/agent/session?phase=...&harness_id=...` + botão **"Nova sessão"** no `AgentChatPanel`.
-
-#### 1.6 UI do Bloco 1 (`frontend/src/`)
-- **`CreateProjectDialog`**: nova opção destacada **"Relatório Livre / Manutenção"** (além de PDF, JSON, JRXML) com seletor opcional de Perfil PostgreSQL padrão.
-- **`SqlDbView`**:
-  - Em `free_report`, foca na aba **SQL Workbench** (esconde o bloco `INSERT` de ficha clínica ou recolhe como secundário);
-  - Novo painel lateral colapsável **Schema Explorer** (busca de tabelas → clique expande colunas, tipos, PK/FK + botão copiar nome/gerar `SELECT` base);
-  - Botão **"Executar Preview (READ ONLY · LIMIT 50)"** com grade de resultados limpa (colunas, tipos Java, contagem e tempo em ms);
-  - Botão **"Sincronizar Query ↔ JRXML"** para puxar `<queryString>` do `.jrxml` para o editor SQL ou atualizar a `<queryString>` do `.jrxml` com o SQL validado.
-- **`JasperStudioView`**:
-  - Na `PreviewControlBar`, suportar modo **`Live (Banco Real)`** ao lado de `Auto` / `Offline` / `Híbrido CTE`;
-  - Popover/barra de **Parâmetros do Relatório (`$P{...}`)** gerada dinamicamente a partir do XML, persistindo os últimos valores usados por projeto em `localStorage`.
-- **`AgentChatPanel`**: indicador sutil de sessão ativa + botão **"Nova sessão"** para limpar contexto do harness quando trocar de assunto.
+#### 1.6 UI da Frente A
+- `CreateProjectDialog`: opção **"Relatório Livre / Manutenção"** com seletor opcional de Cliente/Sistema ou Perfil PostgreSQL padrão.
+- `SqlDbView`: modo Workbench para `free_report` + painel lateral colapsável **Schema Explorer** + botão **"Executar Preview (READ ONLY · LIMIT 50)"** com grade de resultados + **"Sincronizar Query ↔ JRXML"**.
+- `JasperStudioView`: modo **`Live (Banco Real)`** na `PreviewControlBar` + barra/popover de **Parâmetros `$P{...}`** persistidos por projeto em `localStorage`.
+- `AgentChatPanel`: indicador de sessão ativa + botão **"Nova sessão"**.
 
 ---
 
-### Bloco 2 — Conector SSH/SFTP (Substitui Tabby / FileZilla para Fichas Ambulatoriais)
+### Frente B / Bloco 2 — Conector SSH/SFTP (Substitui Tabby / FileZilla para Fichas Ambulatoriais)
 
-**Objetivo de negócio:** Permitir listar, importar (incluindo decompilação automática de `.jasper`!), editar com IA e publicar de volta os relatórios de fichas clínicas hospedados em pastas dos servidores Linux ambulatoriais — com diff e backup automático `.bak` antes de sobrescrever.
+**Objetivo de negócio:** Listar, importar (incluindo decompilação automática de `.jasper`), editar com IA e publicar de volta fichas hospedadas em servidores Linux ambulatoriais — com diff e backup automático `.bak.<timestamp>` antes de sobrescrever.
 
-#### 2.1 Dependência & Modelo de Dados
-- Adicionar `paramiko>=3.5.0` em `backend/requirements.txt`.
-- Nova tabela `sftp_profiles` em SQLite (criada via `SftpService` no padrão de `db_profiles`):
-  ```sql
-  CREATE TABLE IF NOT EXISTS sftp_profiles (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      host TEXT NOT NULL,
-      port INTEGER NOT NULL DEFAULT 22,
-      username TEXT NOT NULL,
-      auth_type TEXT NOT NULL DEFAULT 'password' CHECK (auth_type IN ('password', 'private_key')),
-      remote_base_dir TEXT NOT NULL DEFAULT '/',
-      environment TEXT NOT NULL DEFAULT 'HML' CHECK (environment IN ('DEV', 'HML', 'PRD')),
-      read_only INTEGER NOT NULL DEFAULT 1,
-      linked_db_profile_id TEXT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-  );
-  ```
-  - **Segredos no cofre (`SecretVault`)**: senha (`sftp_password:<id>`), conteúdo PEM da chave privada (`sftp_key:<id>`) e passphrase opcional (`sftp_passphrase:<id>`). **Nunca** armazenados no SQLite nem retornados pela API (apenas `has_secret: bool`).
-  - **Segurança padrão**: perfis criados com `environment='PRD'` vêm com `read_only=True` por padrão na UI.
+#### 2.1 Modelo de Dados (`sftp_profiles`)
+```sql
+CREATE TABLE IF NOT EXISTS sftp_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL DEFAULT 22,
+    username TEXT NOT NULL DEFAULT '',
+    auth_type TEXT NOT NULL DEFAULT 'password' CHECK (auth_type IN ('password', 'private_key')),
+    credential_mode TEXT NOT NULL DEFAULT 'custom' CHECK (credential_mode IN ('default', 'custom')),
+    remote_base_dir TEXT NOT NULL DEFAULT '/',
+    environment TEXT NOT NULL DEFAULT 'HML' CHECK (environment IN ('DEV', 'HML', 'PRD')),
+    read_only INTEGER NOT NULL DEFAULT 1,
+    linked_db_profile_id TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+```
+- Segredos personalizados no `SecretVault` (`sftp_password:<id>`, `sftp_key:<id>`, `sftp_passphrase:<id>`); quando `credential_mode='default'`, herda de `default:sftp:*`.
+- Perfis `PRD` nascem com `read_only=True` por padrão.
 
-#### 2.2 Serviço SFTP (`backend/app/services/sftp_service.py`)
-- **Conexão segura e limpa**: `paramiko.SSHClient()` com timeouts explícitos (`timeout=15`, `banner_timeout=15`), fechamento garantido via context manager, proteção contra *path traversal* (normalização POSIX `posixpath.normpath` impedindo escapar de `remote_base_dir` se configurado como raiz restrita, ou permitindo navegar quando `remote_base_dir='/'`).
-- **Operações principais**:
-  1. `test_connection(profile_id) -> SftpConnectionTestResult`: testa SSH + abertura de canal SFTP, valida existência de `remote_base_dir`, retorna latência e contagem de itens.
-  2. `list_directory(profile_id, remote_path: str | None = None, search: str | None = None) -> SftpListResult`: lista pastas e arquivos (`.jrxml`, `.jasper`, outros) com `size_bytes`, `modified_at`, `is_dir`, e indicação se existe par `.jrxml`/`.jasper` no mesmo diretório.
-  3. `import_report_to_project(profile_id, remote_path: str, *, project_name: str | None = None, db_profile_id: str | None = None, sync_subreports: bool = False) -> SftpImportResult`:
-     - Se `remote_path` termina com `.jrxml`: baixa o XML UTF-8 diretamente.
-     - Se `remote_path` termina com `.jasper`: baixa o binário temporariamente e chama **`JasperDaemonService.decompile()`** (já existente no `java-engine`!) para obter o `.jrxml` editável automaticamente!
-     - Cria (ou atualiza) um projeto `project_kind="free_report"` (ou vincula a um projeto existente) com `entry_mode="sftp_import"` e grava `source_origin_json` com `profile_id` + `remote_path`.
-     - Opcionalmente detecta referências `<subreportExpression>` no XML e oferece baixar os `.jasper` faltantes da mesma pasta remota para `custom_subreports` (ou pasta do projeto).
-  4. `prepare_deploy_preview(project_id, profile_id, remote_dir: str, base_filename: str, *, publish_mode: Literal["both", "jasper_only", "jrxml_only"] = "both") -> SftpDeployPreview`:
-     - **Pré-checagem obrigatória**:
-       - Bloqueia imediatamente com HTTP `403` se perfil estiver `read_only=True`.
-       - Compila o `.jrxml` atual na **Jasper Daemon JVM** (`compile`) — **não permite deploy de XML que não compila!**
-       - Se já existir `.jrxml` remoto no destino, baixa e gera um **diff unificado** (`difflib.unified_diff`) + SHA-256 remoto vs local.
-       - Emite um **token de deploy** (`deploy_token` atrelado a `project_id + profile_id + remote_path + jrxml_sha256`, análogo ao Dry-Run token do PostgreSQL!).
-  5. `execute_deploy(project_id, deploy_token: str, ...) -> SftpDeployResult`:
-     - Valida `read_only=False` e `deploy_token` válido e não consumido.
-     - Para cada arquivo alvo (`.jrxml` e/ou `.jasper` conforme `publish_mode`):
-       - Se o arquivo remoto já existir, **cria backup automático no servidor remoto** antes de substituir (ex.: copia/renomeia para `<nome>.bak.<YYYYMMDD_HHMMSS>` ou pasta `_studio_backups/` configurável — mantendo também cópia do original remoto no `workspaces/<proj>/backups/` local!).
-       - Faz upload atômico via arquivo temporário `.studio_tmp` + `posix_rename` (ou fallback `put` se o SFTP server não suportar `posix_rename`), preservando permissões se possível.
-     - Registra evento de auditoria no histórico do projeto (timestamp, perfil, caminho remoto, arquivos publicados, caminho do backup).
+#### 2.2 Serviço SFTP (`backend/app/services/sftp_service.py`) & API (`backend/app/api/sftp.py`)
+- Conexão `paramiko.SSHClient()` com timeouts explícitos (`15s`), context manager e normalização POSIX contra *path traversal*.
+- Operações:
+  1. `test_connection(profile_id)` → testa SSH/SFTP, valida `remote_base_dir`, retorna latência e contagem de itens;
+  2. `list_directory(profile_id, remote_path=None, search=None)` → lista diretórios, `.jrxml` e `.jasper` (indicando par `.jrxml`/`.jasper`);
+  3. `import_report_to_project(profile_id, remote_path, ...)` → baixa `.jrxml` direto ou baixa `.jasper` e chama **`JasperDaemonService.decompile()`** automaticamente; cria projeto `free_report` com `entry_mode="sftp_import"` e `source_origin_json` (e opção de baixar subreports `.jasper` faltantes da mesma pasta);
+  4. `prepare_deploy_preview(project_id, profile_id, remote_dir, base_filename, publish_mode="jrxml_only")` → bloqueia `read_only=True` (`403`), compila na JVM (bloqueia se falhar!), baixa remoto atual gerando `unified_diff` + SHA-256 e emite `deploy_token` de uso único. *(Padrão operacional confirmado: `jrxml_only`, mantendo opções `both` e `jasper_only` no seletor.)*
+  5. `execute_deploy(project_id, deploy_token)` → valida token, cria backup remoto `<nome>.bak.<YYYYMMDD_HHMMSS>` + cópia local em `workspaces/<proj>/backups/`, faz upload atômico (`.studio_tmp` + `posix_rename` com fallback `put`) e registra auditoria.
+- Endpoints:
+  - `GET / POST / PUT / DELETE /api/sftp/profiles[/{profile_id}]`
+  - `POST /api/sftp/profiles/{profile_id}/test`
+  - `GET /api/sftp/profiles/{profile_id}/browse?path=...&search=...`
+  - `POST /api/sftp/import`
+  - `POST /api/projects/{project_id}/deploy/sftp/prepare`
+  - `POST /api/projects/{project_id}/deploy/sftp/execute`
 
-#### 2.3 Endpoints REST (`backend/app/api/sftp.py`)
-- `GET / POST / PUT / DELETE /api/sftp/profiles[/{profile_id}]`
-- `POST /api/sftp/profiles/{profile_id}/test`
-- `GET /api/sftp/profiles/{profile_id}/browse?path=...&search=...`
-- `POST /api/sftp/import` (cria projeto a partir de `.jrxml`/`.jasper` remoto)
-- `POST /api/projects/{project_id}/deploy/sftp/prepare` (compila + diff + emite `deploy_token`)
-- `POST /api/projects/{project_id}/deploy/sftp/execute` (backup `.bak` + upload + log)
-
-#### 2.4 UI do Bloco 2
-- **`SettingsView`**: nova aba **Servidores SFTP** (CRUD de perfis, toggle senha vs chave privada SSH, ambiente `DEV/HML/PRD`, trava `read_only`, botão **Testar Conexão** com latência).
-- **`CreateProjectDialog`**: nova aba **"Importar via SFTP"** com navegador de pastas, busca rápida de `.jrxml`/`.jasper`, indicador visual quando um `.jasper` será descompilado automaticamente e seletor de perfil PostgreSQL vinculado.
-- **`JasperStudioView`**: botão **"Publicar no SFTP"** → modal em 2 etapas:
-  1. Escolher perfil SFTP (pré-preenchido se o projeto veio de SFTP), pasta destino, modo (`Ambos .jrxml + .jasper`, `Só .jasper`, `Só .jrxml`) → clicar em **"Pré-validar e Ver Diff"** (compila na JVM + mostra diff lado a lado/unificado + aviso do backup `.bak`);
-  2. Confirmar publicação (bloqueado com badge vermelho se o perfil for `read_only`).
+#### 2.3 UI da Frente B
+- `SettingsView` → nova aba **Servidores SFTP** (CRUD com toggle `Credencial Padrão` vs `Personalizada`, senha vs chave privada, `DEV/HML/PRD`, `read_only`, botão Testar Conexão).
+- `CreateProjectDialog` → aba **"Importar via SFTP"** (navegador de pastas, filtro, badge de decompilação automática de `.jasper`).
+- `JasperStudioView` → botão **"Publicar no SFTP"** (modal em 2 etapas: Pré-validar JVM + Diff + Confirmação com aviso de `.bak`).
 
 ---
 
-### Bloco 3 — Conector JasperReports Server (`Report Unit` — Hospitalar & Relatórios Gerais)
+### Frente C / Bloco 3 — Conector JasperReports Server (`Report Unit` — Hospitalar & Relatórios Gerais)
 
-**Objetivo de negócio:** Cobrir integralmente o **Salutem Hospitalar** e os relatórios gerais do **Ambulatorial** hospedados no JasperReports Server, permitindo importar uma **`Report Unit`** completa em 1 clique, trabalhar com IA + SQL Workbench + Preview Live, e publicar de volta com diff e backup automático.
+**Objetivo de negócio:** Cobrir integralmente o **Salutem Hospitalar** e relatórios gerais hospedados no JasperReports Server, permitindo importar uma **`Report Unit`** completa em 1 clique, trabalhar com IA + SQL Workbench + Preview Live, e publicar de volta com diff e backup automático.
 
-#### 3.1 Contratos REST v2 Validados (referência: `fernandocalisto/jasper-reports-tools`)
-O serviço Python `backend/app/services/jasperserver_service.py` (usando `httpx.Client` já instalado!) portará e estenderá a lógica comprovada em `src/services/jasperServerClient.ts`:
+#### 3.1 Modelo de Dados (`jasperserver_profiles`)
+```sql
+CREATE TABLE IF NOT EXISTS jasperserver_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    organization TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL DEFAULT '',
+    credential_mode TEXT NOT NULL DEFAULT 'custom' CHECK (credential_mode IN ('default', 'custom')),
+    default_folder_uri TEXT NOT NULL DEFAULT '/',
+    environment TEXT NOT NULL DEFAULT 'HML' CHECK (environment IN ('DEV', 'HML', 'PRD')),
+    read_only INTEGER NOT NULL DEFAULT 1,
+    linked_db_profile_id TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+```
+- Senha personalizada no `SecretVault` (`jasperserver_password:<id>`); quando `credential_mode='default'`, herda de `default:jasperserver:*`.
 
-- **Autenticação**:
-  - `POST {base_url}/rest_v2/login` com `Content-Type: application/x-www-form-urlencoded`, body `j_username={user|org}` (ou `{user}` se sem organização) + `j_password={password}`.
-  - Extração e cache em memória do cookie `JSESSIONID`, com fallback automático para HTTP Basic Auth se o servidor não emitir cookie e re-login automático em `HTTP 401`.
-- **Diagnóstico**:
-  - `GET {base_url}/rest_v2/serverInfo` (header `Accept: application/json`) → retorna `version`, `edition`, `build`.
-- **Navegação de Repositório**:
-  - `GET {base_url}/rest_v2/resources?folderUri={uri}&recursive=false&forceFullPage=true` (com suporte a busca `q=...&recursive=true` e filtro `type=reportUnit,folder,file`).
-  - Mapeamento de tipos: `folder`, `reportUnit`, `jrxml`, `jasper`, `datasource`, `other`.
-- **Inspeção e Download Completo de `Report Unit`**:
-  - `GET {base_url}/rest_v2/resources{uri}` com `Accept: application/repository.reportUnit+json` → obtém o descritor completo da `Report Unit`:
-    - `jrxml` (`fileReference` ou embutido, ex.: `{uri}_files/main_jrxml`);
-    - `dataSource` (referência ao DataSource no servidor);
-    - `inputControls` (parâmetros cadastrados no JasperServer);
-    - `resources` (subreports `.jrxml`/`.jasper`, imagens, logos em `{uri}_files/*`).
-  - Download do `main_jrxml`: `GET {base_url}/rest_v2/resources{uri}?file=jrxml` com fallback para `GET {base_url}/rest_v2/resources{main_jrxml_uri}` (e decompile automático via JVM se algum recurso vier apenas em `.jasper`).
-  - Download opcional dos recursos internos (`{uri}_files/*`) para `workspaces/<proj>/report_unit_resources/` (com compilação automática de subreports `.jrxml` → `.jasper` via JVM Daemon para que o preview local funcione com subreports da própria `Report Unit`!).
-- **Publicação / Atualização Segura (`PUT`)**:
-  - **Atualizar `main_jrxml` de uma `Report Unit` existente**:
-    - Primeiro baixa e arquiva uma cópia local de backup (`workspaces/<proj>/backups/jasperserver_<timestamp>_main.jrxml`) e opcionalmente salva revisão no histórico do Studio.
-    - Envia `PUT {base_url}/rest_v2/resources{main_jrxml_uri}?overwrite=true&createFolders=true` usando `Content-Type: application/repository.file+json` (payload JSON com `type: "jrxml"`, `label`, `content: base64(xml)`) ou `multipart/form-data`, exatamente como validado em `jasperServerClient.ts`.
-  - **Criar nova `Report Unit` (quando publicando um relatório novo)**:
-    - Envia `PUT {base_url}/rest_v2/resources{target_folder}/{slug}?overwrite=false&createFolders=true` com `Content-Type: application/repository.reportUnit+json`, incluindo o `jrxml` embutido (`jrxmlFile`), `label`, `description` e `dataSource` selecionado pelo usuário dentre os DataSources listados no servidor!
-
-#### 3.2 Modelo de Dados & Endpoints (`backend/app/api/jasperserver.py`)
-- Nova tabela `jasperserver_profiles`:
-  ```sql
-  CREATE TABLE IF NOT EXISTS jasperserver_profiles (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      base_url TEXT NOT NULL,
-      organization TEXT NOT NULL DEFAULT '',
-      username TEXT NOT NULL,
-      default_folder_uri TEXT NOT NULL DEFAULT '/',
-      environment TEXT NOT NULL DEFAULT 'HML' CHECK (environment IN ('DEV', 'HML', 'PRD')),
-      read_only INTEGER NOT NULL DEFAULT 1,
-      linked_db_profile_id TEXT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-  );
-  ```
-  - Senha armazenada exclusivamente no cofre (`jasperserver_password:<id>`).
-- Endpoints REST:
+#### 3.2 Serviço REST v2 (`backend/app/services/jasperserver_service.py`) & API (`backend/app/api/jasperserver.py`)
+Portando os contratos validados de `fernandocalisto/jasper-reports-tools` (`httpx.Client`):
+- **Auth**: `POST {base_url}/rest_v2/login` (`j_username={user|org}`, `j_password`), cache de `JSESSIONID` em memória com fallback Basic Auth e re-login automático em `401`.
+- **Diagnóstico**: `GET {base_url}/rest_v2/serverInfo` → `version`, `edition`, `build`.
+- **Navegação**: `GET {base_url}/rest_v2/resources?folderUri={uri}&recursive=false&forceFullPage=true` (busca `q=...&recursive=true`, tipos `folder`, `reportUnit`, `jrxml`, `jasper`, `datasource`).
+- **Inspeção & Importação de `Report Unit`**:
+  - `GET {base_url}/rest_v2/resources{uri}` (`Accept: application/repository.reportUnit+json`) → `main_jrxml`, `dataSource`, `inputControls`, `resources` (`{uri}_files/*`).
+  - Download de `main_jrxml` (+ fallback `.jasper` → `decompile()` via JVM) e resolução automática de **ambos os modelos de subreports**:
+    1. **Subreports embutidos na unit (`{uri}_files/*`)**: baixados para `workspaces/<proj>/report_unit_resources/` e compilados (`.jrxml` → `.jasper`) via JVM Daemon;
+    2. **Subreports compartilhados em pastas do repositório (`repo:/...`)**: detectados via parsing de `<subreportExpression>` no `main_jrxml`, baixados do caminho correspondente no JasperServer (`.jrxml` ou `.jasper`), compilados se necessário e disponibilizados para o preview local (mantendo o `main_jrxml` original intacto para deploy).
+- **Publicação Segura (`PUT`)**:
+  - **Atualizar existente**: compila na JVM → baixa remoto + diff + `deploy_token` → salva backup local `workspaces/<proj>/backups/jasperserver_<timestamp>_main.jrxml` → `PUT {base_url}/rest_v2/resources{main_jrxml_uri}?overwrite=true&createFolders=true` (`application/repository.file+json` em base64).
+  - **Criar nova `Report Unit`**: `PUT {base_url}/rest_v2/resources{target_folder}/{slug}?overwrite=false&createFolders=true` (`application/repository.reportUnit+json`) com `jrxmlFile` + `dataSource` escolhido do servidor.
+- Endpoints:
   - `GET / POST / PUT / DELETE /api/jasperserver/profiles[/{profile_id}]`
   - `POST /api/jasperserver/profiles/{profile_id}/test`
   - `GET /api/jasperserver/profiles/{profile_id}/resources?folder_uri=/&q=...`
-  - `GET /api/jasperserver/profiles/{profile_id}/report-unit?uri=...` (inspeciona descritor, subreports, datasource e input controls)
-  - `POST /api/jasperserver/import` (importa `Report Unit` ou `.jrxml` avulso para um projeto `free_report`)
-  - `POST /api/projects/{project_id}/deploy/jasperserver/prepare` (compila na JVM + baixa remoto atual + gera diff + emite `deploy_token`)
-  - `POST /api/projects/{project_id}/deploy/jasperserver/execute` (backup local/revisão + `PUT` REST v2 + log de auditoria)
+  - `GET /api/jasperserver/profiles/{profile_id}/report-unit?uri=...`
+  - `POST /api/jasperserver/import`
+  - `POST /api/projects/{project_id}/deploy/jasperserver/prepare`
+  - `POST /api/projects/{project_id}/deploy/jasperserver/execute`
 
-#### 3.3 UI do Bloco 3
-- **`SettingsView`**: nova aba **JasperReports Server** (CRUD de perfis com `base_url`, `organization` opcional, `username`, senha, `environment`, trava `read_only`, perfil PG vinculado e botão **Testar Conexão** exibindo versão/edição do servidor).
-- **`CreateProjectDialog`**: nova aba **"Importar do JasperServer"** com navegador de pastas/busca, badge diferenciando `Report Unit` vs `.jrxml`, pré-visualização dos recursos internos (subreports/input controls) e importação em 1 clique.
-- **`JasperStudioView`**: botão **"Publicar no JasperServer"** com o mesmo fluxo seguro de 2 etapas (pré-validação JVM + diff + confirmação; bloqueado em `read_only`; pré-preenchido com o `resource_uri` de origem quando importado do JasperServer).
+#### 3.3 UI da Frente C
+- `SettingsView` → aba **JasperReports Server** (CRUD com `Credencial Padrão` vs `Personalizada`, `organization`, `DEV/HML/PRD`, `read_only`, perfil PG vinculado e teste exibindo versão/edição).
+- `CreateProjectDialog` → aba **"Importar do JasperServer"** (navegador + busca + prévia de recursos da `Report Unit`).
+- `JasperStudioView` → botão **"Publicar no JasperServer"** (fluxo em 2 etapas: validação JVM + diff + confirmação).
 
 ---
 
-### Bloco 4 — Hardening do Cofre (`cryptography`), Refatoração Modular & Gancho do Catálogo de Unidades
+### Frente D / Bloco 4 — Aba de Clientes (Multi-Sistema) + Sincronização via Portal Logado + UI de Credenciais Padrão
 
-**Objetivo técnico:** Consolidar a segurança das credenciais (agora cobrindo PostgreSQL + SFTP + JasperServer), reduzir acoplamento em módulos grandes e deixar o ponto de extensão pronto para o **site interno de gestão de unidades**.
+**Objetivo de negócio:** Centralizar todos os clientes/unidades e seus múltiplos sistemas (Ambulatorial, Hospitalar, HML/PRD) em uma **aba dedicada "Clientes"** no Studio, com links diretos para o sistema web, atalhos para SQL Workbench / SFTP / JasperServer, gestão de credenciais padrão vs personalizadas e sincronização segura a partir da sessão logada do colaborador no portal de gestão — **sem nenhum dado corporativo hardcoded no GitHub**.
 
-#### 4.1 Cofre Unificado com Criptografia Padrão (`backend/app/services/secret_vault.py`)
-- Adicionar `cryptography>=43.0.0` em `backend/requirements.txt`.
-- Extrair `_EncryptedVault` de `postgres_service.py` para um serviço dedicado `SecretVaultService` reutilizado por `PostgresService`, `SftpService` e `JasperServerService` (e futuramente BYOK de IA).
-- **Migração sem quebra do `.vault.json`**:
-  - Novas gravações usam formato **`version: 2`** com **PBKDF2-HMAC-SHA256 (600.000 iterações) + AES-256-GCM** (AEAD nativo da biblioteca `cryptography`, autenticando `account` como AAD).
-  - Leitura continua suportando entradas legadas **`version: 1`** (da `v1.0.0`) de forma transparente, migrando automaticamente para `v2` ao regravar.
-  - Em Windows local, continua usando `keyring` (Windows Credential Manager) como primário e `.vault.json` como fallback (Docker/headless).
+#### 4.1 Modelo de Dados (`client_units`, `client_systems` e vínculos de perfis)
+```sql
+CREATE TABLE IF NOT EXISTS client_units (
+    id TEXT PRIMARY KEY,
+    external_id TEXT NULL,
+    unit_code TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    hosting TEXT NOT NULL DEFAULT '',
+    license_status TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    integrations_json TEXT NOT NULL DEFAULT '[]',
+    last_synced_at TEXT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 
-#### 4.2 Desacoplamento de Arquivos Grandes
-- Com a extração de `secret_vault.py`, `postgres_service.py` (atualmente 1.152 LOC) perde ~200 linhas e pode separar `pg_schema_inspector.py` (introspecção de tabelas/colunas + `preview_select_query`) mantendo `postgres_service.py` limpo e focado em perfis + Dry-Run/Commit.
+CREATE TABLE IF NOT EXISTS client_systems (
+    id TEXT PRIMARY KEY,
+    client_unit_id TEXT NOT NULL REFERENCES client_units(id) ON DELETE CASCADE,
+    system_key TEXT NOT NULL,
+    label TEXT NOT NULL,
+    system_type TEXT NOT NULL DEFAULT 'ambulatorial'
+        CHECK (system_type IN ('ambulatorial', 'hospitalar', 'painel', 'compras', 'outro')),
+    environment TEXT NOT NULL DEFAULT 'PRD'
+        CHECK (environment IN ('DEV', 'HML', 'PRD')),
+    system_url TEXT NOT NULL DEFAULT '',
+    version_label TEXT NOT NULL DEFAULT '',
+    db_profile_id TEXT NULL,
+    sftp_profile_id TEXT NULL,
+    jasperserver_profile_id TEXT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (client_unit_id, system_key)
+);
+```
+- **Modelagem alinhada à estrutura real do portal de gestão**:
+  - Cada cliente pode ter **múltiplos sistemas e ambientes** no mesmo cadastro (`Ambulatorial`, `Hospitalar`, `Painel`, `Portal de Compras`, `Homologação`, `BASE NOVA`, etc.) — o ambiente (`HML` vs `PRD`) é inferido automaticamente do rótulo.
+  - **PostgreSQL (`BD`)**: como o portal informa `Nome` + `host:port` (sem `dbname`), cada perfil criado suporta `dbname` herdado de `default_dbname` (configurável nas Credenciais Padrão) **e** ação **Listar Bancos (`pg_database`)** na UI para escolher o banco real em 1 clique!
+  - **SSH / SFTP**: como o portal já exibe múltiplos acessos SSH com `Nome`, `host:port`, `usuário` e senha (mascarada), o importador oferece toggle opcional *"Importar senhas SSH no cofre local (modo custom)"* vs *"Usar credencial SSH padrão"*, herdando `default_remote_base_dir` configurável.
+  - **JasperServer (`Jasper`)**: suporta 1 ou mais URLs por cliente vinculadas aos sistemas do cliente, usando `credential_mode='default'` por padrão.
 
-#### 4.3 Interface Plugável para o Site de Gestão de Unidades (`backend/app/services/unit_catalog.py`)
-- Definir protocolo abstrato:
+#### 4.2 Serviço de Catálogo & Sincronização (`backend/app/services/client_catalog_service.py` + `backend/app/api/clients.py`)
+- Protocolo plugável `UnitCatalogProvider` + schema normalizado `ClientCatalogPayload`:
   ```python
-  class UnitCatalogEntry(BaseModel):
-      unit_code: str
-      unit_name: str
-      system_type: Literal["ambulatorial", "hospitalar", "outro"]
+  class ClientSystemEntry(BaseModel):
+      system_key: str
+      label: str
+      system_type: Literal["ambulatorial", "hospitalar", "painel", "compras", "outro"] = "ambulatorial"
       environment: Literal["DEV", "HML", "PRD"] = "PRD"
-      postgres: dict[str, Any] | None = None
-      sftp: dict[str, Any] | None = None
-      jasperserver: dict[str, Any] | None = None
+      system_url: str = ""
+      version_label: str = ""
+      postgres: dict[str, Any] | None = None      # label, host, port, dbname?, user?, credential_mode='default'
+      sftp: dict[str, Any] | None = None          # label, host, port, remote_base_dir?, user?, password?, credential_mode
+      jasperserver: dict[str, Any] | None = None  # label?, base_url, organization?, user?, credential_mode='default'
 
-  class UnitCatalogProvider(Protocol):
-      def fetch_units(self) -> list[UnitCatalogEntry]: ...
+  class ClientUnitEntry(BaseModel):
+      external_id: str | None = None
+      unit_code: str
+      name: str
+      hosting: str = ""
+      license_status: str = ""
+      tags: list[str] = Field(default_factory=list)
+      integrations: list[str] = Field(default_factory=list)
+      systems: list[ClientSystemEntry] = Field(default_factory=list)
   ```
-- Implementar um provider inicial simples baseado em JSON/arquivo ou URL REST (`JsonUrlUnitCatalogProvider`) + serviço de sincronização idempotente (`sync_unit_catalog()`) que cria/atualiza perfis PostgreSQL, SFTP e JasperServer com `read_only=True` por padrão em `PRD` e vincula automaticamente `linked_db_profile_id`.
-- Assim que for descoberto com o time como o site interno de gestão expõe os dados, basta escrever **1 adaptador pequeno** implementando `UnitCatalogProvider` sem tocar em nenhuma outra camada do Studio!
+- **Fluxos de Sincronização (100% locais e sob demanda do usuário autenticado)**:
+  1. **Coletor na Sessão Logada do Navegador (Bookmarklet / Snippet)**:
+     - Roda na aba onde o colaborador já está logado no portal de gestão (URL configurada localmente pelo usuário em `app_settings`, **nunca** hardcoded no código);
+     - Tenta primeiro capturar o JSON completo via endpoint interno da sessão autenticada (todos os clientes de uma vez, já que a paginação do portal é 100% client-side) **e** faz fallback automático lendo os cards renderizados do DOM (incluindo DNS, BD, SSH, Jasper e Versões);
+     - Copia o JSON normalizado para a área de transferência ou baixa `.json` temporário para colar/importar no Studio.
+  2. **Pré-visualização (`POST /api/clients/sync/preview`)**: aceita JSON normalizado, JSON bruto do portal ou HTML salvo da página, e devolve o **diff detalhado** (`to_create`, `to_update`, `unchanged`, contagem de sistemas/perfis e avisos) sem gravar nada ainda.
+  3. **Aplicação idempotente (`POST /api/clients/sync/apply`)**: cria/atualiza `client_units`, `client_systems` e os respectivos `db_profiles`, `sftp_profiles` e `jasperserver_profiles`:
+     - Perfis PG e JasperServer nascem com `credential_mode='default'` (herdando as credenciais padrão do cofre local — editável para `'custom'` a qualquer momento);
+     - Perfis de `environment='PRD'` nascem **sempre** com `read_only=True`;
+     - Vincula automaticamente `linked_db_profile_id` nos perfis SFTP e JasperServer correspondentes;
+     - Nunca sobrescreve senhas personalizadas já configuradas pelo usuário em sincronizações futuras!
+  4. **Descoberta de Databases PostgreSQL (`GET /api/db/profiles/{profile_id}/databases`)**: consulta `pg_database` em modo read-only conectando no banco de manutenção (`postgres`) quando o perfil ainda não tem `dbname` definido, facilitando completar o `dbname` em 1 clique.
+  5. **CRUD manual completo** (`GET/POST/PUT/DELETE /api/clients` e `/api/clients/{unit_id}/systems`).
+
+#### 4.3 UI da Frente D (`frontend/src/features/clients/` + `SettingsView`)
+- **Nova aba de navegação superior `"Clientes"`** no `StudioShell` (ao lado de `"Projetos"`, sem exigir projeto aberto, `StudioSection = "clients"`):
+  - Barra de busca rápida por nome/código/tag + filtros por tipo (`Ambulatorial`, `Hospitalar`) e ambiente (`DEV`, `HML`, `PRD`);
+  - Cards expansíveis de **Clientes** listando cada **Sistema** da unidade com badges (`Ambulatorial`/`Hospitalar`, `PRD`/`HML`, `RO`) e ações em 1 clique:
+    - **Abrir Sistema Web** (`system_url` em nova aba);
+    - **Testar Conexões** (PG / SFTP / JasperServer daquele sistema);
+    - **Novo Relatório Livre** já pré-vinculado ao banco daquele sistema;
+    - **Importar do SFTP** ou **Importar do JasperServer** já pré-selecionando o perfil daquele sistema;
+    - **Editar Credenciais** (alternar entre `Usar Credencial Padrão` ou definir `Credencial Personalizada` só para aquele sistema).
+  - Botão **"Sincronizar do Portal"** → abre `ClientSyncDialog`:
+    - Campo para a **URL do Portal de Gestão** (salva apenas localmente no `studio.db`, nunca hardcoded);
+    - Guia visual simples com **Bookmarklet / Snippet copiável** para executar na aba onde o colaborador já está logado + área para colar JSON ou enviar arquivo `.json`/`.html` salvo da página;
+    - Etapa de **Prévia / Diff** (*Novos / Atualizados / Sem alterações*) antes de confirmar a sincronização.
+- **Nova aba `"Credenciais Padrão"`** em `SettingsView` (`DefaultCredentialsTab.tsx`):
+  - Cards limpos para configurar/atualizar/limpar as credenciais padrão no cofre local para **PostgreSQL**, **JasperReports Server** e **SSH/SFTP** (com aviso explícito de que tudo fica apenas no cofre local da máquina).
 
 ---
 
-## 6. Regras de Negócio & Segurança Inegociáveis
+## 6. Estratégia de Execução Paralela com Swarm
 
-1. **Zero regressão na `v1.0.0`**: todo o fluxo existente de criação de fichas ambulatoriais (`PDF → JSON → Form Builder → INSERT Dry-Run/Commit → SELECT → JRXML → Preview → ZIP`) deve continuar funcionando integralmente e passando nos 123 testes backend + 49 testes frontend existentes.
-2. **Proteção absoluta de bancos de produção**:
+Para maximizar velocidade mantendo qualidade e evitando conflitos de merge, o desenvolvimento será executado em **3 ondas**:
+
+```mermaid
+flowchart LR
+    B0["Onda 1 · Sequencial\nBloco 0: Fundação\n(SecretVault v2 + Credenciais Padrão\n+ Migração SQLite + Schemas Base)"]
+    FA["Frente A (Worker 1)\nBloco 1: Relatório Livre,\nSQL Workbench, MCP DB,\n$P{} Live & Sessões"]
+    FB["Frente B (Worker 2)\nBloco 2: Conector SFTP\n(Backend + UI Modular + Testes)"]
+    FC["Frente C (Worker 3)\nBloco 3: Conector JasperServer\n(Backend + UI Modular + Testes)"]
+    FD["Frente D (Worker 4)\nBloco 4: Aba Clientes,\nMulti-Sistema & Sync Portal\n(Backend + UI Modular + Testes)"]
+    INT["Onda 3 · Integração & QA\nWiring final (main.py, App.tsx,\nStudioShell, SettingsView, CreateDialog)\n+ Suíte Completa + Auditoria Segurança"]
+
+    B0 --> FA
+    B0 --> FB
+    B0 --> FC
+    B0 --> FD
+    FA --> INT
+    FB --> INT
+    FC --> INT
+    FD --> INT
+```
+
+### Fronteiras de Arquivos por Frente (Zero Conflito no Swarm)
+- **Onda 1 (Coordenador — Bloco 0)**: `requirements.txt`, `secret_vault.py`, `default_credentials_service.py`, `api/credentials.py`, `sqlite_store.py`, `schemas.py`, `postgres_service.py` (integração `SecretVault` + `credential_mode`), `frontend/src/types/studio.ts` (tipos compartilhados).
+- **Onda 2 (4 Workers em paralelo — workspaces isolados `share`)**:
+  - **Worker A (`sql-free-report`)**: `pg_schema_inspector.py`, `mcp_tools/db_tools.py`, `jrxml/parameters.py`, `skills/manutencao_relatorio/SKILL.md`, `agent_orchestrator.py`, `harnesses/*`, `api/database.py`, `api/jasper_preview.py`, `features/sql-db/*`, `features/jasper-studio/*`, `features/agent-chat/*` + testes dedicados.
+  - **Worker B (`sftp-connector`)**: `services/sftp_service.py`, `api/sftp.py`, `features/settings/SftpProfilesTab.tsx`, `features/sftp/*` (`SftpBrowser`, `SftpImportTab`, `SftpDeployModal`) + `test_sftp_service.py` e testes Vitest.
+  - **Worker C (`jasperserver-connector`)**: `services/jasperserver_service.py`, `api/jasperserver.py`, `features/settings/JasperServerProfilesTab.tsx`, `features/jasperserver/*` (`JasperServerBrowser`, `JasperServerImportTab`, `JasperServerDeployModal`) + `test_jasperserver_service.py` e testes Vitest.
+  - **Worker D (`clients-hub`)**: `services/client_catalog_service.py`, `api/clients.py`, `features/clients/*` (`ClientsView`, `ClientCard`, `ClientSyncDialog`, `ClientFormDialog`), `features/settings/DefaultCredentialsTab.tsx` + `test_client_catalog.py` e testes Vitest.
+- **Onda 3 (Coordenador — Integração Final)**:
+  - Conectar routers em `backend/app/main.py`, rotas MCP em `studio_tools.py`, métodos REST em `frontend/src/lib/api.ts`, aba `Clientes` em `StudioShell.tsx`/`App.tsx`, abas em `SettingsView.tsx` e `CreateProjectDialog.tsx`, botões de deploy em `JasperStudioView.tsx`.
+  - Rodar verificação completa: `pytest`, `typecheck`, `vitest`, `vite build` e revisão de segurança.
+
+---
+
+## 7. Regras de Negócio & Segurança Inegociáveis
+
+1. **Zero dados sensíveis ou corporativos no GitHub / código-fonte**: nenhuma URL de portal interno, nenhum nome/IP de cliente e nenhuma credencial (padrão ou personalizada) podem existir no código, testes ou documentação versionada.
+2. **Zero regressão na `v1.0.0`**: todo o fluxo existente de criação de fichas ambulatoriais (`PDF → JSON → Form Builder → INSERT Dry-Run/Commit → SELECT → JRXML → Preview → ZIP`) deve continuar passando integralmente nos testes existentes.
+3. **Proteção absoluta de bancos de produção**:
    - `SQL Workbench` (Schema Explorer + Preview `SELECT`) e as 3 novas MCP tools de banco **SEMPRE** rodam em `BEGIN READ ONLY` + `statement_timeout` + `LIMIT` rígido + `ROLLBACK`.
    - `INSERT` continua exigindo `read_only=False` + Dry-Run token SHA-256 válido.
-3. **Proteção absoluta de servidores remotos (SFTP e JasperServer)**:
+4. **Proteção absoluta de servidores remotos (SFTP e JasperServer)**:
    - Perfis `PRD` nascem `read_only=True` por padrão (bloqueio HTTP `403` no backend, não apenas na UI).
    - **Nunca publicar `.jrxml` que não compila na JVM**: o passo `prepare` sempre executa compilação JVM antes de emitir `deploy_token`.
    - **Backup obrigatório antes de sobrescrever**: SFTP cria `<arquivo>.bak.<timestamp>` no servidor remoto + cópia local; JasperServer arquiva cópia local do XML remoto antes do `PUT`.
-4. **Sigilo de credenciais**: senhas de PostgreSQL, SFTP, chaves privadas SSH e senhas do JasperServer **nunca** vão para o SQLite, **nunca** aparecem em logs/respostas HTTP e **nunca** são passadas no prompt dos agentes de IA.
-5. **Isolamento do escopo de IA**: o agente recebe acesso apenas às ferramentas MCP read-only de schema/preview e às ferramentas de artefato do projeto — **nunca** tem ferramenta MCP para fazer `COMMIT` no banco nem `deploy` em SFTP/JasperServer (ações destrutivas/publicação são 100% humanas via UI + Gate!).
+5. **Sigilo de credenciais**: senhas de PostgreSQL, SFTP, chaves privadas SSH, senhas do JasperServer e credenciais padrão **nunca** vão para o SQLite, **nunca** aparecem em logs/respostas HTTP e **nunca** são passadas no prompt dos agentes de IA.
+6. **Isolamento do escopo de IA**: o agente recebe acesso apenas às ferramentas MCP read-only de schema/preview e às ferramentas de artefato do projeto — **nunca** tem ferramenta MCP para fazer `COMMIT` no banco nem `deploy` em SFTP/JasperServer.
 
 ---
 
-## 7. Questões Abertas para Confirmar Antes de Iniciar os Blocos 2 e 4
+## 8. Decisões Operacionais Confirmadas na Validação
 
-Antes de codar os respectivos blocos, validar rapidamente:
-
-1. **(Para o Bloco 2 — SFTP Ambulatorial):** Na pasta de fichas clínicas do servidor ambulatorial, o ERP Salutem lê **apenas o `.jasper` compilado**, **apenas o `.jrxml`**, ou o padrão operacional é subir **os dois arquivos juntos (`.jrxml` + `.jasper`)**? *(O desenho suporta os 3 modos via `publish_mode`, mas saber o padrão define qual opção vem selecionada por default.)*
-2. **(Para o Bloco 3 — JasperServer):** Em ambientes do Hospitalar, os subreports de uma `Report Unit` costumam ficar dentro do próprio `{unit}_files/` da unit ou referenciados numa pasta compartilhada do repositório (ex.: `/reports/subreports/...`)?
-3. **(Para o Bloco 4 — Site de Gestão de Unidades):** Descobrir com os colegas que já consultam o site se há uma API JSON/endpoint direto, banco de dados próprio ou apenas página HTML autenticada (e qual tipo de autenticação).
+1. **SFTP Ambulatorial (Bloco 2):** padrão de deploy definido como **`jrxml_only` (Só `.jrxml`)**, mantendo opções `both` (`.jrxml` + `.jasper`) e `jasper_only` no seletor para casos pontuais.
+2. **JasperServer (Bloco 3):** suporte híbrido a **ambos os modelos de subreports** — embutidos em `{unit}_files/` e externos/compartilhados referenciados via `repo:/...` no `<subreportExpression>`.
+3. **Portal de Gestão (Bloco 4):** estrutura inspecionada em modo somente leitura com sucesso:
+   - Todos os clientes são carregados em uma única resposta JSON (paginação 100% client-side), permitindo captura completa em 1 clique pelo coletor na sessão logada do navegador (com fallback DOM);
+   - Múltiplos sistemas (`Ambulatorial`, `Hospitalar`, `Painel`, `Portal de Compras`, `Homologação`, etc.) convivem dentro do mesmo card de cliente (blocos `Versões`, `DNS`, `SSH`, `BD`, `Jasper`, `Integrações`);
+   - Como `BD` exibe apenas `Nome` + `host:port` (sem `dbname`) e `SSH` não exibe diretório remoto, as **Credenciais Padrão** incluem também `default_dbname` (por tipo) + descoberta automática via `pg_database` e `default_remote_base_dir` para SFTP;
+   - **Zero** URLs corporativas, nomes de clientes ou credenciais são versionados no código ou neste plano.
 
 ---
 
-## 8. Backlog Adiado (Pós-`v1.1` / Sob Demanda)
+## 9. Backlog Adiado (Pós-`v1.1` / Sob Demanda)
 
-Itens conscientemente deixados fora da `v1.1` para manter o foco total em produtividade imediata:
 - **Contas multiusuário & Login (`STUDIO_AUTH_ENABLED=true`, papéis `admin`/`member`, trava otimista `409`)** — adiado por tempo indeterminado até haver demanda formal de servidor compartilhado.
-- **BYOK simplificado (API Key do Claude/OpenAI/Gemini na tela de Configurações)** — excelente candidato a incremento rápido (`v1.1.x`) caso colegas que usam Claude queiram usar o Studio hospedado sem precisar configurar OAuth multiusuário.
-- **Engenharia Reversa de `template_ficha_clinica` (PostgreSQL Ambulatorial → `ficha.json`)** — útil para clonar/editar formulários ambulatoriais antigos direto do banco.
+- **BYOK simplificado (API Key Claude/OpenAI/Gemini)** na UI de Configurações.
+- **Engenharia Reversa de `template_ficha_clinica` (PostgreSQL Ambulatorial → `ficha.json`)**.
 - **UI de Regras OCR / Regex Customizadas** (`backend/app/core/custom_regex.py`).
 - **Comparação visual lado a lado** (*PDF Original vs Preview Jasper*) e biblioteca de blocos JRXML reutilizáveis.
 - **Atualização de Actions no CI** (`actions/*@v4` → versões Node 24).
 
 ---
 
-## 9. Estratégia de Testes & Critérios de Aceite da `v1.1`
-
-Cada bloco só é considerado concluído quando passar em testes automatizados **e** verificação manual/E2E:
+## 10. Estratégia de Testes & Critérios de Aceite da `v1.1`
 
 | Bloco | Novos Testes Obrigatórios | Critério de Aceite ("Pronto") |
 | :--- | :--- | :--- |
-| **Bloco 1** | `test_sql_workbench.py` (schemas, tables, PK/FK, `preview_select_query` bloqueando DDL/DML, timeout/limit), `test_db_mcp_tools.py` (3 novas tools via MCP stdio), `test_agent_sessions.py` (persistência/resume/reset), `test_sqlite_migration_v1_to_v1_1.py` (migração sobre banco v1.0 real), testes Vitest para Schema Explorer e parâmetros `$P{}`. | Criar projeto `Relatório Livre`, consultar schema de um banco real (Ambulatorial ou Hospitalar), pedir à IA para escrever uma query com `JOIN`, testar `SELECT` no Workbench, rodar Preview Live com parâmetros `$P{}` e iterar na mesma sessão do agente. |
-| **Bloco 2** | `test_sftp_service.py` (fake SFTP client: browse, import `.jrxml`, import `.jasper` com decompile JVM, bloqueio `read_only`, falha de compilação bloqueando deploy, geração de `.bak.<timestamp>` antes de sobrescrever, consumo único do `deploy_token`), Vitest para aba SFTP e modal de deploy. | Baixar uma ficha real de um servidor de homologação via SFTP no Studio, editar no Jasper Studio, compilar, ver diff e publicar de volta gerando `.bak` sem abrir FileZilla/Tabby. |
-| **Bloco 3** | `test_jasperserver_service.py` (mock `httpx.MockTransport`: login `JSESSIONID` + fallback Basic, `username\|org`, `serverInfo`, `list_resources`, resolução `reportUnit` → `_files/main_jrxml` + subreports, bloqueio `read_only`, backup local + `PUT` com `overwrite=true`), Vitest para aba JasperServer e importação de `Report Unit`. | Navegar num JasperServer de homologação, importar uma `Report Unit` real (Hospitalar ou geral), ajustar query/layout com IA + Preview Live e publicar de volta com diff + backup. |
-| **Bloco 4** | `test_secret_vault.py` (round-trip AES-256-GCM v2, leitura retrocompatível de v1, rejeição de tamper/placeholder, isolamento por namespace), `test_unit_catalog.py` (sync idempotente de unidades com `read_only=True` em PRD). | Suíte completa verde (`pytest`, `typecheck`, `vitest`, `vite build` e Docker build). |
-
----
-
-## 10. Guia Rápido para Retomar em Outra Sessão / Outro PC
-
-Ao iniciar uma nova sessão neste repositório em outro computador:
-
-1. **Sincronizar o repositório:**
-   ```powershell
-   git pull origin main
-   ```
-2. **Garantir ambiente local (se PC novo):**
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\pip.exe install -r backend\requirements.txt
-   npm --prefix frontend ci
-   ```
-3. **Validar baseline antes de codar:**
-   ```powershell
-   $env:PYTHONPATH = "$PWD\backend;$PWD"
-   .\.venv\Scripts\pytest.exe
-   npm --prefix frontend run typecheck
-   npm --prefix frontend test
-   ```
-4. **Prompt sugerido para abrir a próxima sessão com o agente:**
-   > *"Leia `state.md` e `implementation_plan_v1.1.md`. Vamos iniciar a implementação da `v1.1` começando pelo Bloco 1 (Modo Relatório Livre + SQL Workbench & MCP de Schema + Parâmetros Dinâmicos + Sessão Contínua)."*
+| **Bloco 0 (Fundação)** | `test_secret_vault.py` (AES-256-GCM v2, leitura retrocompatível v1, tamper/placeholder, default vs custom), `test_sqlite_migration_v1_to_v1_1.py` (migração sobre banco v1.0 real). | Cofre unificado, credenciais padrão/personalizadas funcionando e migração v1.0 → v1.1 sem perda de dados. |
+| **Bloco 1 (Frente A)** | `test_sql_workbench.py` (schemas, tables, PK/FK, bloqueio DDL/DML, timeout/limit), `test_db_mcp_tools.py` (3 tools via MCP stdio), `test_agent_sessions.py` (resume/reset), `test_jrxml_parameters.py`, testes Vitest para Schema Explorer e `$P{}`. | Criar `Relatório Livre`, explorar schema real, pedir query com `JOIN` à IA, testar `SELECT` read-only, rodar Preview `db_live` com `$P{}` e iterar na mesma sessão. |
+| **Bloco 2 (Frente B)** | `test_sftp_service.py` (fake SFTP: browse, import `.jrxml`/`.jasper` + decompile JVM, `default` vs `custom`, bloqueio `read_only`, falha de compilação bloqueando deploy, `.bak.<timestamp>`, consumo único do `deploy_token`), Vitest para aba SFTP e modal de deploy. | Importar ficha real via SFTP, editar, compilar, ver diff e publicar de volta gerando `.bak` sem FileZilla/Tabby. |
+| **Bloco 3 (Frente C)** | `test_jasperserver_service.py` (`httpx.MockTransport`: login `JSESSIONID` + Basic, `username\|org`, `serverInfo`, `resources`, `reportUnit` + `_files/*`, `default` vs `custom`, `read_only`, backup local + `PUT overwrite=true`), Vitest para aba JasperServer e modal de deploy. | Navegar num JasperServer, importar `Report Unit`, ajustar query/layout com IA + Preview Live e publicar de volta com diff + backup. |
+| **Bloco 4 (Frente D)** | `test_client_catalog.py` (CRUD multi-sistema, `system_url`, sync preview/apply idempotente, `PRD` sempre `read_only=True`, preservação de credenciais custom, 0 dados hardcoded), Vitest para `ClientsView`, `ClientSyncDialog` e `DefaultCredentialsTab`. | Abrir aba **Clientes**, cadastrar credenciais padrão no cofre local, sincronizar clientes via sessão logada, abrir link web de sistemas Ambulatorial/Hospitalar e iniciar trabalho direto nos bancos/SFTP/JasperServer vinculados. |
+| **Integração Final** | Suíte completa: `pytest` (123 baseline + novos), `npm --prefix frontend run typecheck`, `npm --prefix frontend test`, `npm --prefix frontend run build` + auditoria garantindo zero URLs/segredos corporativos no diff. | 100% dos testes verdes e bundle pronto para uso local/LAN/Docker. |

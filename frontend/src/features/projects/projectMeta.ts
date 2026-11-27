@@ -77,6 +77,21 @@ export const ENTRY_MODE_META: Record<
   pdf: { label: "PDF Clínico", shortLabel: "PDF", tone: "blueprint" },
   json: { label: "Importação JSON", shortLabel: "JSON", tone: "accent" },
   jrxml: { label: "Importação JRXML", shortLabel: "JRXML", tone: "warning" },
+  blank_report: {
+    label: "Relatório Livre",
+    shortLabel: "Livre",
+    tone: "success",
+  },
+  sftp_import: {
+    label: "Importação SFTP",
+    shortLabel: "SFTP",
+    tone: "blueprint",
+  },
+  jasperserver_import: {
+    label: "JasperServer",
+    shortLabel: "JS Server",
+    tone: "accent",
+  },
 };
 
 export interface GateDescriptor {

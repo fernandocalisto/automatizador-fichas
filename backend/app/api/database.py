@@ -213,6 +213,20 @@ def get_sample_atendimento_id(
         raise
 
 
+@router.get("/db/profiles/{profile_id}/databases")
+def list_profile_databases(
+    profile_id: str,
+    service: PostgresSvcDep,
+) -> dict[str, Any]:
+    """Discover non-template databases on the PostgreSQL host in a read-only transaction."""
+    try:
+        databases = service.list_databases(profile_id)
+        return {"profile_id": profile_id, "databases": databases}
+    except Exception as exc:
+        _raise_http_for_db_error(exc)
+        raise
+
+
 # =============================================================================
 # Project Transactional SQL Execution Endpoints (/api/projects/{project_id}/db/*)
 # =============================================================================

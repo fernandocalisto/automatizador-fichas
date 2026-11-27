@@ -32,6 +32,7 @@ from backend.app.db.schemas import (
     GateApprovalUpdate,
     GateName,
     ProjectCreate,
+    ProjectKind,
     ProjectRead,
     ProjectStage,
     ProjectUpdate,
@@ -203,10 +204,14 @@ class WorkspaceService:
             slug=row["slug"],
             name=row["name"],
             description=row.get("description") or "",
+            project_kind=row.get("project_kind") or "clinical_form",
             current_stage=row["current_stage"],
             entry_mode=row["entry_mode"],
             preferred_harness=row.get("preferred_harness") or "agy",
             template_db_id=row.get("template_db_id"),
+            default_db_profile_id=row.get("default_db_profile_id"),
+            client_system_id=row.get("client_system_id"),
+            source_origin=row.get("source_origin") if isinstance(row.get("source_origin"), dict) else {},
             workspace_dir=str(ws_dir),
             has_pdf=pdf_path.is_file(),
             gates=gates,
@@ -239,6 +244,13 @@ class WorkspaceService:
             entry_mode = "json"
         elif payload.initial_jrxml is not None and payload.entry_mode == "pdf":
             entry_mode = "jrxml"
+
+        if payload.project_kind is not None:
+            project_kind: ProjectKind = payload.project_kind
+        elif entry_mode in ("blank_report", "sftp_import", "jasperserver_import"):
+            project_kind = "free_report"
+        else:
+            project_kind = "clinical_form"
 
         # Pre-validate initial artifacts BEFORE creating DB rows or leaving orphan folders
         normalized_json_str: str | None = None
@@ -274,7 +286,9 @@ class WorkspaceService:
             initial_stage: ProjectStage = payload.current_stage
         elif entry_mode == "json":
             initial_stage = "form_builder"
-        elif entry_mode == "jrxml":
+        elif entry_mode in ("jrxml", "blank_report", "sftp_import", "jasperserver_import"):
+            initial_stage = "jrxml_design"
+        elif project_kind == "free_report":
             initial_stage = "jrxml_design"
         elif pdf_bytes is not None:
             initial_stage = "extraction"
@@ -290,10 +304,14 @@ class WorkspaceService:
                 slug=slug,
                 name=payload.name.strip(),
                 description=payload.description.strip(),
+                project_kind=project_kind,
                 current_stage=initial_stage,
                 entry_mode=entry_mode,
                 preferred_harness=payload.preferred_harness or "agy",
                 template_db_id=payload.template_db_id,
+                default_db_profile_id=payload.default_db_profile_id,
+                client_system_id=payload.client_system_id,
+                source_origin=payload.source_origin,
                 workspace_dir=workspace_dir,
             )
 

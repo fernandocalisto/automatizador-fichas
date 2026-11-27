@@ -386,8 +386,8 @@ def test_keyring_error_falls_back_to_encrypted_vault_with_hmac_tamper_check(
     creds = svc.get_jdbc_credentials(profile.id)
     assert creds["db_pass"] == secret_pw
 
-    # Corrupting HMAC inside .vault.json must raise PostgresServiceError
-    corrupted_text = vault_raw_text.replace('"hmac": "', '"hmac": "0000')
+    # Corrupting authenticated ciphertext inside .vault.json must raise PostgresServiceError
+    corrupted_text = vault_raw_text.replace('"ciphertext": "', '"ciphertext": "AAAA')
     svc.vault_path.write_text(corrupted_text, encoding="utf-8")
     with pytest.raises(PostgresServiceError, match="HMAC"):
         svc.get_jdbc_credentials(profile.id)

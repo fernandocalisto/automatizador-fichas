@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.app.api import (
     agent,
+    credentials,
     database,
     harnesses_and_tools,
     jasper_preview,
@@ -34,8 +35,10 @@ from backend.app.api import (
 from backend.app.config import APP_NAME, APP_VERSION, FRONTEND_DIST_DIR
 from backend.app.db.sqlite_store import SQLiteStore
 from backend.app.services.agent_orchestrator import AgentOrchestratorService
+from backend.app.services.default_credentials_service import DefaultCredentialsService
 from backend.app.services.jasper_daemon import JasperDaemonService
 from backend.app.services.postgres_service import PostgresService
+from backend.app.services.secret_vault import SecretVaultService
 from backend.app.services.subreport_service import SubreportService
 from backend.app.services.workspace_service import WorkspaceService
 
@@ -280,6 +283,8 @@ def create_app(
     store: SQLiteStore | None = None,
     workspace_service: WorkspaceService | None = None,
     subreport_service: SubreportService | None = None,
+    secret_vault: SecretVaultService | None = None,
+    default_credentials_service: DefaultCredentialsService | None = None,
     postgres_service: PostgresService | None = None,
     jasper_daemon: JasperDaemonService | None = None,
     agent_orchestrator: AgentOrchestratorService | None = None,
@@ -287,9 +292,18 @@ def create_app(
 ) -> FastAPI:
     """Create and configure the Salutem Ficha Studio FastAPI application."""
     resolved_store = store or SQLiteStore()
+    resolved_vault = secret_vault or SecretVaultService()
+    resolved_default_creds = default_credentials_service or DefaultCredentialsService(
+        store=resolved_store,
+        vault=resolved_vault,
+    )
     resolved_workspace = workspace_service or WorkspaceService(store=resolved_store)
     resolved_subreports = subreport_service or SubreportService()
-    resolved_postgres = postgres_service or PostgresService(store=resolved_store)
+    resolved_postgres = postgres_service or PostgresService(
+        store=resolved_store,
+        vault=resolved_vault,
+        default_credentials_service=resolved_default_creds,
+    )
     resolved_agent = agent_orchestrator or AgentOrchestratorService(
         workspace_service=resolved_workspace
     )
@@ -316,6 +330,8 @@ def create_app(
     )
 
     app_instance.state.store = resolved_store
+    app_instance.state.secret_vault = resolved_vault
+    app_instance.state.default_credentials_service = resolved_default_creds
     app_instance.state.workspace_service = resolved_workspace
     app_instance.state.subreport_service = resolved_subreports
     app_instance.state.postgres_service = resolved_postgres
@@ -336,6 +352,7 @@ def create_app(
     app_instance.include_router(projects.router)
     app_instance.include_router(subreports.router)
     app_instance.include_router(system.router)
+    app_instance.include_router(credentials.router)
     app_instance.include_router(harnesses_and_tools.router)
     app_instance.include_router(database.router)
     app_instance.include_router(jasper_preview.router)

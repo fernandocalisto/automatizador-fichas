@@ -129,12 +129,43 @@ function Stop-ProcessTree {
     }
 }
 
+function Test-FrontendBuildStale {
+    param(
+        [string]$FrontendPath,
+        [string]$IndexHtmlPath
+    )
+
+    if (-not (Test-Path -LiteralPath $IndexHtmlPath)) {
+        return $true
+    }
+
+    $DistTimestamp = (Get-Item -LiteralPath $IndexHtmlPath).LastWriteTimeUtc
+    $PackageJsonPath = Join-Path $FrontendPath "package.json"
+    if (Test-Path -LiteralPath $PackageJsonPath) {
+        if ((Get-Item -LiteralPath $PackageJsonPath).LastWriteTimeUtc -gt $DistTimestamp) {
+            return $true
+        }
+    }
+
+    $SrcDir = Join-Path $FrontendPath "src"
+    if (Test-Path -LiteralPath $SrcDir) {
+        $NewerFile = Get-ChildItem -LiteralPath $SrcDir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTimeUtc -gt $DistTimestamp } |
+            Select-Object -First 1
+        if ($null -ne $NewerFile) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "  Salutem Ficha Studio - Launcher de Rede Local (LAN)" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 
-# 1. Validar ambiente virtual Python
+# 1. Validar ambiente virtual Python e pacotes obrigatorios
 $PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $PythonExe)) {
     Write-Host "[ERRO] Ambiente virtual Python nao encontrado em:" -ForegroundColor Red
@@ -146,6 +177,14 @@ if (-not (Test-Path -LiteralPath $PythonExe)) {
     exit 1
 }
 
+& $PythonExe -c "import cryptography, paramiko" 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERRO] Dependencias Python obrigatorias ausentes no .venv (cryptography / paramiko)." -ForegroundColor Red
+    Write-Host "       Se voce acabou de atualizar via 'git pull', sincronize backend\requirements.txt:" -ForegroundColor Yellow
+    Write-Host "       .\.venv\Scripts\pip.exe install -r backend\requirements.txt" -ForegroundColor White
+    exit 1
+}
+
 # 2. Verificar Java (opcional para JSON/SQL, obrigatorio para Jasper Daemon / Preview PDF)
 $JavaCmd = Get-Command java -ErrorAction SilentlyContinue
 if ($null -eq $JavaCmd) {
@@ -154,45 +193,58 @@ if ($null -eq $JavaCmd) {
     Write-Host "[OK] Java detectado: $($JavaCmd.Source)" -ForegroundColor DarkGray
 }
 
-# 3. Garantir build do frontend SPA (frontend/dist/index.html)
+# 3. Garantir build atualizado do frontend SPA (frontend/dist/index.html)
 $FrontendDir = Join-Path $ProjectRoot "frontend"
 $FrontendNodeModules = Join-Path $FrontendDir "node_modules"
 $FrontendIndexHtml = Join-Path $FrontendDir "dist\index.html"
+$DistExists = Test-Path -LiteralPath $FrontendIndexHtml
+$FrontendStale = $false
+if ($DistExists -and (-not $RebuildFrontend)) {
+    $FrontendStale = Test-FrontendBuildStale -FrontendPath $FrontendDir -IndexHtmlPath $FrontendIndexHtml
+}
 
-if ($RebuildFrontend -or (-not (Test-Path -LiteralPath $FrontendIndexHtml))) {
+if ($RebuildFrontend -or (-not $DistExists) -or $FrontendStale) {
+    if ($FrontendStale) {
+        Write-Host "[BUILD] Alteracoes recentes em frontend\src ou frontend\package.json detectadas; recompilando bundle SPA..." -ForegroundColor Yellow
+    }
+
     $NpmCmd = Get-Command npm.cmd -ErrorAction SilentlyContinue
     if ($null -eq $NpmCmd) {
         $NpmCmd = Get-Command npm -ErrorAction SilentlyContinue
     }
     if ($null -eq $NpmCmd) {
-        Write-Host "[ERRO] Node.js/npm nao encontrado no PATH e frontend/dist/index.html nao existe." -ForegroundColor Red
-        Write-Host "Instale Node.js 20+ e execute novamente este script." -ForegroundColor Yellow
-        exit 1
-    }
+        if ($DistExists -and (-not $RebuildFrontend)) {
+            Write-Warning "Node.js/npm nao encontrado no PATH; servindo frontend\dist existente (pode estar desatualizado apos git pull)."
+        } else {
+            Write-Host "[ERRO] Node.js/npm nao encontrado no PATH e frontend/dist/index.html nao existe." -ForegroundColor Red
+            Write-Host "Instale Node.js 20+ e execute novamente este script." -ForegroundColor Yellow
+            exit 1
+        }
+    } else {
+        if (-not (Test-Path -LiteralPath $FrontendNodeModules)) {
+            Write-Host "[BUILD] Instalando dependencias do frontend (npm --prefix frontend ci)..." -ForegroundColor Yellow
+            & $NpmCmd.Source --prefix frontend ci
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Falha ao instalar dependencias do frontend (exit code $LASTEXITCODE)."
+                exit $LASTEXITCODE
+            }
+        }
 
-    if (-not (Test-Path -LiteralPath $FrontendNodeModules)) {
-        Write-Host "[BUILD] Instalando dependencias do frontend (npm --prefix frontend ci)..." -ForegroundColor Yellow
-        & $NpmCmd.Source --prefix frontend ci
+        Write-Host "[BUILD] Compilando bundle SPA (npm --prefix frontend run build)..." -ForegroundColor Yellow
+        & $NpmCmd.Source --prefix frontend run build
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "Falha ao instalar dependencias do frontend (exit code $LASTEXITCODE)."
+            Write-Error "Falha ao compilar o frontend (exit code $LASTEXITCODE)."
             exit $LASTEXITCODE
         }
-    }
 
-    Write-Host "[BUILD] Compilando bundle SPA (npm --prefix frontend run build)..." -ForegroundColor Yellow
-    & $NpmCmd.Source --prefix frontend run build
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Falha ao compilar o frontend (exit code $LASTEXITCODE)."
-        exit $LASTEXITCODE
+        if (-not (Test-Path -LiteralPath $FrontendIndexHtml)) {
+            Write-Error "Build concluido, mas $FrontendIndexHtml nao foi gerado."
+            exit 1
+        }
+        Write-Host "[OK] Frontend compilado em frontend\dist" -ForegroundColor Green
     }
-
-    if (-not (Test-Path -LiteralPath $FrontendIndexHtml)) {
-        Write-Error "Build concluido, mas $FrontendIndexHtml nao foi gerado."
-        exit 1
-    }
-    Write-Host "[OK] Frontend compilado em frontend\dist" -ForegroundColor Green
 } else {
-    Write-Host "[OK] Bundle SPA existente detectado (use -RebuildFrontend para recompilar)." -ForegroundColor DarkGray
+    Write-Host "[OK] Bundle SPA atualizado detectado (use -RebuildFrontend para forcar recompilacao)." -ForegroundColor DarkGray
 }
 
 # 4. Validar porta fixa de rede (padrao 8000)

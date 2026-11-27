@@ -26,6 +26,7 @@ from backend.app.services.postgres_service import (
     DryRunInsertResult,
     DryRunRequiredError,
     InspectSelectResult,
+    PostgresConnectionError,
     PostgresExecutionError,
     PostgresService,
     PostgresServiceError,
@@ -128,6 +129,8 @@ def _raise_http_for_db_error(exc: Exception) -> None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     if isinstance(exc, ReadOnlyProfileError):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    if isinstance(exc, PostgresConnectionError):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     if isinstance(
         exc,
         (

@@ -40,6 +40,7 @@ from backend.app.db.schemas import (
     SqlValidateResponse,
 )
 from backend.app.db.sqlite_store import SQLiteStore
+from backend.app.jrxml.scaffolder import scaffold_free_report_jrxml
 
 
 class WorkspaceError(Exception):
@@ -352,6 +353,19 @@ class WorkspaceService:
                     validated_jrxml_str,
                     summary="Initial JRXML import",
                     created_by="user",
+                )
+            elif entry_mode == "blank_report":
+                starter_jrxml = scaffold_free_report_jrxml(
+                    title=payload.name.strip(),
+                    report_name=slug,
+                )
+                self._write_artifact_file(workspace_dir, slug, "jrxml", starter_jrxml)
+                self.store.add_artifact_revision(
+                    project_id,
+                    "jrxml",
+                    starter_jrxml,
+                    summary="Starter free-report .jrxml",
+                    created_by="system",
                 )
 
             refreshed = self._require_project_row(project_id)

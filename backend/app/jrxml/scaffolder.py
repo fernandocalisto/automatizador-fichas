@@ -370,10 +370,144 @@ def scaffold_salutem_jrxml(
     return "\n".join(xml_lines) + "\n"
 
 
+def scaffold_free_report_jrxml(
+    title: str | None = None,
+    *,
+    report_name: str | None = None,
+    query_sql: str | None = None,
+    orientacao: str | None = "RETRATO",
+    options: dict[str, Any] | None = None,
+) -> str:
+    """
+    Gera um `.jrxml` limpo e pronto para compilação/preview para Relatórios Livres
+    (sem dependência de `ficha.json` nem de subreports clínicos).
+
+    Suporta `RETRATO`/`PORTRAIT` (595x842) e `PAISAGEM`/`LANDSCAPE` (842x595).
+    Quando `query_sql` não é informada, gera a consulta starter `SELECT 1 AS exemplo`
+    com o `<field name="exemplo" class="java.lang.Integer">` correspondente.
+    """
+    opts = dict(options or {})
+    raw_orient = str(
+        opts.get("orientacao") or opts.get("orientation") or orientacao or "RETRATO"
+    ).strip().upper()
+    if raw_orient in ("LANDSCAPE", "PAISAGEM"):
+        norm_orient = "PAISAGEM"
+    else:
+        norm_orient = "RETRATO"
+
+    metrics = get_page_metrics(norm_orient)
+    col_w = metrics["column_width"]
+    page_w = metrics["page_width"]
+    page_h = metrics["page_height"]
+    orientation_attr = ' orientation="Landscape"' if metrics["is_landscape"] else ""
+
+    clean_title = str(title or opts.get("title") or "").strip() or "Relatório Livre"
+    raw_name = str(report_name or opts.get("report_name") or clean_title).strip()
+    slug = normalizar_slug(raw_name)
+    safe_report_name = slug if slug and slug != "campo" else "relatorio_livre"
+
+    custom_sql = str(query_sql if query_sql is not None else opts.get("query_sql") or "").strip()
+    using_default_query = not custom_sql
+    effective_sql = custom_sql if custom_sql else "SELECT 1 AS exemplo"
+
+    report_uuid = str(uuid.uuid4())
+    title_uuid = str(uuid.uuid4())
+    detail_label_uuid = str(uuid.uuid4())
+    detail_value_uuid = str(uuid.uuid4())
+
+    xml_lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        (
+            '<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports" '
+            'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" '
+            'xsi:schemaLocation="http://jasperreports.sourceforge.net/jasperreports '
+            'http://jasperreports.sourceforge.net/xsd/jasperreport.xsd" '
+            f'name="{_xml_attr_escape(safe_report_name)}"{orientation_attr} '
+            f'pageWidth="{page_w}" pageHeight="{page_h}" columnWidth="{col_w}" '
+            f'leftMargin="{metrics["left_margin"]}" rightMargin="{metrics["right_margin"]}" '
+            f'topMargin="{metrics["top_margin"]}" bottomMargin="{metrics["bottom_margin"]}" '
+            f'uuid="{report_uuid}">'
+        ),
+        '\t<property name="com.jaspersoft.studio.data.sql.tables" value=""/>',
+        '\t<queryString language="SQL">',
+        f"\t\t<![CDATA[{_safe_cdata(effective_sql)}]]>",
+        "\t</queryString>",
+    ]
+
+    if using_default_query:
+        xml_lines.append(_render_field_xml("exemplo", "java.lang.Integer", None))
+
+    xml_lines.extend(
+        [
+            "\t<title>",
+            '\t\t<band height="36" splitType="Stretch">',
+            '\t\t\t<property name="com.jaspersoft.studio.unit.height" value="px"/>',
+            "\t\t\t<staticText>",
+            f'\t\t\t\t<reportElement x="0" y="0" width="{col_w}" height="30" uuid="{title_uuid}"/>',
+            "\t\t\t\t<box>",
+            '\t\t\t\t\t<bottomPen lineWidth="1.0" lineStyle="Solid" lineColor="#000000"/>',
+            "\t\t\t\t</box>",
+            '\t\t\t\t<textElement textAlignment="Left" verticalAlignment="Middle">',
+            '\t\t\t\t\t<font size="13" isBold="true"/>',
+            "\t\t\t\t</textElement>",
+            f"\t\t\t\t<text><![CDATA[{_safe_cdata(clean_title)}]]></text>",
+            "\t\t\t</staticText>",
+            "\t\t</band>",
+            "\t</title>",
+            "\t<detail>",
+            '\t\t<band height="24" splitType="Stretch">',
+            '\t\t\t<property name="com.jaspersoft.studio.unit.height" value="px"/>',
+        ]
+    )
+
+    if using_default_query:
+        xml_lines.extend(
+            [
+                "\t\t\t<staticText>",
+                f'\t\t\t\t<reportElement x="0" y="2" width="80" height="18" uuid="{detail_label_uuid}"/>',
+                '\t\t\t\t<textElement verticalAlignment="Middle">',
+                '\t\t\t\t\t<font size="9" isBold="true"/>',
+                "\t\t\t\t</textElement>",
+                "\t\t\t\t<text><![CDATA[Exemplo:]]></text>",
+                "\t\t\t</staticText>",
+                '\t\t\t<textField isBlankWhenNull="true">',
+                f'\t\t\t\t<reportElement x="84" y="2" width="160" height="18" uuid="{detail_value_uuid}"/>',
+                '\t\t\t\t<textElement verticalAlignment="Middle">',
+                '\t\t\t\t\t<font size="9"/>',
+                "\t\t\t\t</textElement>",
+                "\t\t\t\t<textFieldExpression><![CDATA[$F{exemplo}]]></textFieldExpression>",
+                "\t\t\t</textField>",
+            ]
+        )
+    else:
+        xml_lines.extend(
+            [
+                "\t\t\t<staticText>",
+                f'\t\t\t\t<reportElement x="0" y="2" width="{col_w}" height="18" uuid="{detail_label_uuid}"/>',
+                '\t\t\t\t<textElement verticalAlignment="Middle">',
+                '\t\t\t\t\t<font size="9"/>',
+                "\t\t\t\t</textElement>",
+                "\t\t\t\t<text><![CDATA[Estrutura inicial gerada. Adicione campos ($F{...}) conforme a consulta SQL.]]></text>",
+                "\t\t\t</staticText>",
+            ]
+        )
+
+    xml_lines.extend(
+        [
+            "\t\t</band>",
+            "\t</detail>",
+            "</jasperReport>",
+        ]
+    )
+
+    return "\n".join(xml_lines) + "\n"
+
+
 __all__ = [
     "STANDARD_HEADER_FIELDS",
     "STANDARD_SALUTEM_FIELDS",
     "STANDARD_TAIL_FIELDS",
     "get_page_metrics",
+    "scaffold_free_report_jrxml",
     "scaffold_salutem_jrxml",
 ]

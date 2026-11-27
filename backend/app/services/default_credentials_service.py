@@ -9,12 +9,45 @@ metadata) and `SecretVaultService` (passwords / SSH keys). Zero credentials are 
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from backend.app.db.sqlite_store import SQLiteStore, utc_now_iso
 from backend.app.services.secret_vault import SecretVaultService
+
+_SSH_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
+_SSH_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY-----")
+
+
+def validate_ssh_private_key_pem(value: str | None) -> str | None:
+    """
+    Validate that a non-empty SSH private key has plausible PEM/OpenSSH structure
+    (`-----BEGIN ... PRIVATE KEY-----` ... `-----END ... PRIVATE KEY-----`).
+    `None` and empty string `""` (used to clear a stored key) are allowed.
+    """
+    if value is None or value == "":
+        return value
+    cleaned = value.lstrip("\ufeff").strip()
+    if not cleaned:
+        raise ValueError(
+            "Chave privada SSH inválida: forneça uma chave em formato PEM/OpenSSH "
+            "(-----BEGIN ... PRIVATE KEY----- / -----END ... PRIVATE KEY-----)."
+        )
+    begin_match = _SSH_PEM_BEGIN_RE.search(cleaned)
+    end_match = _SSH_PEM_END_RE.search(cleaned)
+    if (
+        begin_match is None
+        or end_match is None
+        or begin_match.end() >= end_match.start()
+        or not cleaned[begin_match.end() : end_match.start()].strip()
+    ):
+        raise ValueError(
+            "Chave privada SSH inválida: forneça uma chave em formato PEM/OpenSSH "
+            "(-----BEGIN ... PRIVATE KEY----- / -----END ... PRIVATE KEY-----)."
+        )
+    return value
 
 CredentialKind = Literal["postgres", "sftp", "jasperserver"]
 CredentialMode = Literal["default", "custom"]
@@ -63,6 +96,11 @@ class DefaultCredentialUpdate(BaseModel):
     password: str | None = Field(default=None, repr=False)
     private_key: str | None = Field(default=None, repr=False)
     passphrase: str | None = Field(default=None, repr=False)
+
+    @field_validator("private_key")
+    @classmethod
+    def _validate_private_key(cls, value: str | None) -> str | None:
+        return validate_ssh_private_key_pem(value)
 
 
 class DefaultCredentialsService:
@@ -160,6 +198,8 @@ class DefaultCredentialsService:
                 if secret_field == "private_key" and "private_key_filename" not in fields:
                     fields["private_key_filename"] = ""
             else:
+                if secret_field == "private_key":
+                    validate_ssh_private_key_pem(raw_val)
                 self.vault.set_secret(account, raw_val)
 
         meta_map = self._load_meta_map()

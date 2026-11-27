@@ -27,10 +27,10 @@ from backend.app.core import (
     update_question,
 )
 from backend.app.harnesses import get_default_registry
-from backend.app.jrxml import lint_jrxml, scaffold_salutem_jrxml
+from backend.app.jrxml import lint_jrxml, scaffold_free_report_jrxml, scaffold_salutem_jrxml
 from backend.app.mcp_tools.pdf_tools import extract_pdf_geometry
 from backend.app.mcp_tools.studio_tools import get_all_mcp_tool_descriptors
-from backend.app.services.workspace_service import WorkspaceService
+from backend.app.services.workspace_service import ArtifactNotFoundError, WorkspaceService
 
 router = APIRouter(prefix="/api", tags=["etapa1-studio-tools"])
 
@@ -191,11 +191,28 @@ def scaffold_project_jrxml(
     service: WorkspaceSvcDep,
     payload: ScaffoldJrxmlRequest = Body(default_factory=ScaffoldJrxmlRequest),
 ) -> dict[str, Any]:
-    """Generate a valid Salutem base .jrxml (RETRATO or PAISAGEM) from the project's clinical JSON."""
+    """Generate a valid base .jrxml (RETRATO or PAISAGEM) from clinical JSON or free-report starter."""
     try:
-        rev = service.get_latest_artifact(project_id, "json")
-        json_data = json.loads(rev.content)
-        jrxml_text = scaffold_salutem_jrxml(json_data, options=payload.options)
+        project = service.get_project(project_id)
+        try:
+            rev = service.get_latest_artifact(project_id, "json")
+            json_data = json.loads(rev.content)
+            jrxml_text = scaffold_salutem_jrxml(json_data, options=payload.options)
+            scaffold_summary = "Scaffold base Salutem .jrxml"
+        except ArtifactNotFoundError:
+            sql_select_text: str | None = None
+            try:
+                sql_select_text = service.get_latest_artifact(project_id, "sql_select").content
+            except ArtifactNotFoundError:
+                sql_select_text = None
+            jrxml_text = scaffold_free_report_jrxml(
+                title=project.name,
+                report_name=project.slug,
+                query_sql=sql_select_text,
+                options=payload.options,
+            )
+            scaffold_summary = "Scaffold base relatório livre .jrxml"
+
         lint_report = lint_jrxml(jrxml_text)
 
         saved_rev = None
@@ -204,7 +221,7 @@ def scaffold_project_jrxml(
                 project_id,
                 "jrxml",
                 jrxml_text,
-                summary="Scaffold base Salutem .jrxml",
+                summary=scaffold_summary,
                 created_by="system",
             )
             saved_rev = save_res.artifact.model_dump()

@@ -139,6 +139,10 @@ class PostgresExecutionError(PostgresServiceError):
     """Raised when PostgreSQL driver execution fails."""
 
 
+class PostgresConnectionError(PostgresExecutionError):
+    """Raised when establishing a network connection to PostgreSQL fails (timeout/refused)."""
+
+
 # =============================================================================
 # Pydantic Schemas
 # =============================================================================
@@ -608,11 +612,12 @@ class PostgresService:
         return self._row_to_profile_read(dict(row) if row is not None else existing)
 
     def delete_profile(self, profile_id: str) -> bool:
-        """Delete a PostgreSQL connection profile and purge its stored password."""
+        """Delete a PostgreSQL connection profile, clear references, and purge its stored password."""
         self._require_profile_row(profile_id)
         self._delete_password(profile_id)
         with self.store.connection() as conn:
             conn.execute("DELETE FROM db_dry_run_tokens WHERE profile_id = ?", (profile_id,))
+            self.store.clear_profile_references(conn, kind="db", profile_id=profile_id)
             cursor = conn.execute("DELETE FROM db_profiles WHERE id = ?", (profile_id,))
             deleted = cursor.rowcount > 0
         self._sync_profiles_setting_mirror()
@@ -783,7 +788,14 @@ class PostgresService:
         """Discover non-template databases on the PostgreSQL host in a READ ONLY transaction."""
         conn: Any = None
         try:
-            conn = self._open_pg_connection(profile_id, dbname_override="postgres")
+            try:
+                conn = self._open_pg_connection(profile_id, dbname_override="postgres")
+            except PostgresServiceError:
+                raise
+            except Exception as exc:
+                raise PostgresConnectionError(
+                    f"Failed to connect to PostgreSQL host to list databases: {exc}"
+                ) from exc
             with self._cursor_context(conn) as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
                 cur.execute("SET LOCAL statement_timeout = '10000'")

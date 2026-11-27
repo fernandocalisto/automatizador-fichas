@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from backend.app.services.postgres_service import (
     DbProfileValidationError,
+    PostgresConnectionError,
     PostgresExecutionError,
     PostgresService,
     PostgresServiceError,
@@ -40,6 +41,7 @@ _FORBIDDEN_SQL_KEYWORD_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_SELECT_INTO_RE = re.compile(r"\bSELECT\b[\s\S]*?\bINTO\b", re.IGNORECASE)
 _DOLLAR_QUOTE_RE = re.compile(r"\$[A-Za-z0-9_]*\$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.$]*$")
 
@@ -344,6 +346,11 @@ def validate_and_bind_readonly_select(
             f"Forbidden SQL statement/keyword '{forbidden_match.group(1).upper()}' in read-only SELECT preview."
         )
 
+    if _SELECT_INTO_RE.search(code_only):
+        raise DbProfileValidationError(
+            "Forbidden 'SELECT ... INTO' table-creating syntax in read-only SELECT preview."
+        )
+
     param_map = dict(params or {})
     bound_values: list[Any] = []
     out_parts: list[str] = []
@@ -422,7 +429,14 @@ class PgSchemaInspector:
         self.postgres_service.get_profile(profile_id)
         conn: Any = None
         try:
-            conn = self.postgres_service._open_pg_connection(profile_id)
+            try:
+                conn = self.postgres_service._open_pg_connection(profile_id)
+            except PostgresServiceError:
+                raise
+            except Exception as exc:
+                raise PostgresConnectionError(
+                    f"Failed to connect to PostgreSQL profile '{profile_id}': {exc}"
+                ) from exc
             with self.postgres_service._cursor_context(conn) as cur:
                 cur.execute("SET TRANSACTION READ ONLY")
                 cur.execute(f"SET LOCAL statement_timeout = '{self.statement_timeout_ms}'")

@@ -287,6 +287,19 @@ class ClientUnitUpdate(BaseModel):
         return cleaned
 
 
+def _validate_system_url(value: str) -> str:
+    """Validate that a non-empty `system_url` uses an explicit `http://` or `https://` scheme."""
+    cleaned = (value or "").strip()
+    if not cleaned:
+        return ""
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            "system_url deve começar com 'http://' ou 'https://' (esquemas como javascript: ou file: não são permitidos)."
+        )
+    return cleaned
+
+
 class ClientSystemCreate(BaseModel):
     """Payload to create or upsert a system under a client unit."""
 
@@ -310,6 +323,11 @@ class ClientSystemCreate(BaseModel):
         if not cleaned:
             raise ValueError("System label cannot be blank.")
         return cleaned
+
+    @field_validator("system_url")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        return _validate_system_url(value)
 
 
 class ClientSystemUpdate(BaseModel):
@@ -337,6 +355,13 @@ class ClientSystemUpdate(BaseModel):
         if not cleaned:
             raise ValueError("System label cannot be blank.")
         return cleaned
+
+    @field_validator("system_url")
+    @classmethod
+    def _validate_optional_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_system_url(value)
 
 
 class ClientSyncDiffItem(BaseModel):
@@ -453,11 +478,13 @@ def _clean_url(url: str) -> str:
     text = (url or "").strip()
     if not text:
         return ""
-    if text.startswith(("http://", "https://")):
+    if text.lower().startswith(("http://", "https://")):
         return text
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", text):
+        return ""
     if re.match(r"^[A-Za-z0-9.-]+\.[A-Za-z]{2,}(:\d+)?(/.*)?$", text):
         return f"https://{text}"
-    return text
+    return ""
 
 
 def _parse_host_port(

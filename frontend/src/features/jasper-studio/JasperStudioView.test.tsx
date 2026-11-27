@@ -205,11 +205,13 @@ describe("JasperStudio utils", () => {
 
 describe("JasperStudioView", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     vi.spyOn(api, "listDbProfiles").mockResolvedValue(MOCK_DB_PROFILES);
     vi.spyOn(api, "listChat").mockResolvedValue([]);
   });
 
   afterEach(() => {
+    window.localStorage.clear();
     vi.restoreAllMocks();
   });
 
@@ -686,5 +688,314 @@ describe("JasperStudioView", () => {
       },
       { timeout: 2500 },
     );
+  });
+
+  it("defaults free_report to Visual mode, persists 3-mode switcher in localStorage, and exposes AI CTA", async () => {
+    const freeProject: ProjectRead = {
+      ...MOCK_PROJECT,
+      id: "proj-free-visual",
+      slug: "guia_encaminhamento",
+      name: "Guia de Encaminhamento",
+      project_kind: "free_report",
+      entry_mode: "jasperserver_import",
+      default_db_profile_id: "prof-homolog",
+      source_origin: { provider: "jasperserver", profile_id: "js-1" },
+    };
+
+    vi.spyOn(api, "getArtifact").mockResolvedValue(
+      makeArtifactRevision(SAMPLE_PORTRAIT_JRXML, 1),
+    );
+    vi.spyOn(api, "generatePreview").mockResolvedValue(
+      makePreviewResponse({
+        project_id: freeProject.id,
+        effective_mode: "db_live",
+        page_count: 3,
+        single_page_ok: false,
+      }),
+    );
+
+    const openChatSpy = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <JasperStudioView
+          project={freeProject}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+          onOpenAgentChat={openChatSpy}
+        />
+      </ToastProvider>,
+    );
+
+    // Default layout mode for free_report with no saved preference is "visual"
+    expect(
+      await screen.findByTestId("jasper-studio-visual-mode"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Editor XML JRXML")).not.toBeInTheDocument();
+    expect(screen.getByTestId("visual-mode-tip-bar")).toBeInTheDocument();
+
+    // Prominent AI CTA calls onOpenAgentChat("jrxml")
+    await user.click(
+      screen.getByRole("button", { name: /Pedir ajuste à IA/i }),
+    );
+    expect(openChatSpy).toHaveBeenCalledWith("jrxml");
+
+    // Switch to Split mode -> persists in localStorage and shows XML editor
+    await user.click(
+      screen.getByRole("button", { name: /Dividido \(Código \+ Preview\)/i }),
+    );
+    expect(screen.getByTestId("jasper-studio-split-mode")).toBeInTheDocument();
+    expect(screen.getByLabelText("Editor XML JRXML")).toBeInTheDocument();
+    expect(window.localStorage.getItem("salutem:jasper-layout-mode")).toBe(
+      "split",
+    );
+
+    // Switch to Code-only mode -> persists and hides preview canvas
+    await user.click(screen.getByRole("button", { name: /Só Código/i }));
+    expect(screen.getByTestId("jasper-studio-code-mode")).toBeInTheDocument();
+    expect(screen.getByLabelText("Editor XML JRXML")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("preview-control-bar-free-report"),
+    ).not.toBeInTheDocument();
+    expect(window.localStorage.getItem("salutem:jasper-layout-mode")).toBe(
+      "code",
+    );
+  });
+
+  it("defers initial preview on free_report with unfilled required $P{} params (Option A) and runs db_live after filling", async () => {
+    const jrxmlWithRequiredParam = `<?xml version="1.0" encoding="UTF-8"?>
+<jasperReport xmlns="http://jasperreports.sourceforge.net/jasperreports" name="guia_proc" pageWidth="595" pageHeight="842" columnWidth="555" leftMargin="20" rightMargin="20" topMargin="20" bottomMargin="20">
+  <parameter name="SUBREPORT_DIR" class="java.lang.String"/>
+  <parameter name="id_atendimento" class="java.lang.Long"/>
+  <parameter name="exibir_obs" class="java.lang.Boolean">
+    <defaultValueExpression><![CDATA[Boolean.TRUE]]></defaultValueExpression>
+  </parameter>
+  <detail><band height="200"/></detail>
+</jasperReport>`;
+
+    const freeProject: ProjectRead = {
+      ...MOCK_PROJECT,
+      id: "proj-free-params",
+      slug: "guia_proc",
+      name: "Guia Procedimentos",
+      project_kind: "free_report",
+      entry_mode: "jasperserver_import",
+      default_db_profile_id: "prof-homolog",
+    };
+
+    vi.spyOn(api, "getArtifact").mockResolvedValue(
+      makeArtifactRevision(jrxmlWithRequiredParam, 1),
+    );
+    const previewSpy = vi
+      .spyOn(api, "generatePreview")
+      .mockResolvedValue(
+        makePreviewResponse({
+          project_id: freeProject.id,
+          requested_mode: "db_live",
+          effective_mode: "db_live",
+          page_count: 2,
+          single_page_ok: false,
+        }),
+      );
+
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <JasperStudioView
+          project={freeProject}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    // Calm empty state shown, NO doomed auto-preview fired on mount!
+    const emptyCard = await screen.findByTestId("required-params-empty-state");
+    expect(emptyCard).toHaveTextContent(
+      /Este relatório precisa de parâmetros para gerar o preview \(id_atendimento\)/i,
+    );
+    expect(previewSpy).not.toHaveBeenCalled();
+
+    // Mode defaulted automatically to db_live because default_db_profile_id is set
+    expect(screen.getByLabelText(/Modo de preview/i)).toHaveValue("db_live");
+
+    // Fill required param and click Gerar Preview
+    const paramInput = screen.getByLabelText(/Parâmetro id_atendimento/i);
+    await user.type(paramInput, "98765");
+    await user.click(
+      within(emptyCard).getByRole("button", { name: /Gerar Preview/i }),
+    );
+
+    await waitFor(() => {
+      expect(previewSpy).toHaveBeenCalledWith(
+        freeProject.id,
+        expect.objectContaining({
+          mode: "db_live",
+          db_profile_id: "prof-homolog",
+          report_params: { id_atendimento: "98765" },
+        }),
+      );
+    });
+
+    // Multi-page free_report shows neutral "2 páginas" badge (NO red "Estouro de página")
+    expect(await screen.findByText("2 páginas")).toBeInTheDocument();
+    expect(screen.queryByText(/Estouro de página/i)).not.toBeInTheDocument();
+  });
+
+  it("renders clean free_report bar: hides scenarios, uses SearchableSelect, Exportar dropdown, and repo: chip with 1-click sync", async () => {
+    const freeProject: ProjectRead = {
+      ...MOCK_PROJECT,
+      id: "proj-free-repo",
+      slug: "relatorio_hosp",
+      name: "Relatório Hospitalar",
+      project_kind: "free_report",
+      entry_mode: "jasperserver_import",
+      default_db_profile_id: "prof-homolog",
+      source_origin: { provider: "jasperserver", profile_id: "js-1" },
+    };
+
+    vi.spyOn(api, "getArtifact").mockResolvedValue(
+      makeArtifactRevision(SAMPLE_PORTRAIT_JRXML, 1),
+    );
+    const previewSpy = vi
+      .spyOn(api, "generatePreview")
+      .mockResolvedValue(
+        makePreviewResponse({
+          project_id: freeProject.id,
+          requested_mode: "db_live",
+          effective_mode: "db_live",
+          page_count: 4,
+          single_page_ok: false,
+        }),
+      );
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.includes("/jasper/repo-resources")) {
+          return new Response(
+            JSON.stringify({
+              project_id: freeProject.id,
+              total: 2,
+              resolved_count: 1,
+              missing_count: 1,
+              can_sync_remote: true,
+              items: [
+                {
+                  uri: "repo:/Hospitalar/Cabecalhos/cabecalho",
+                  local_path: null,
+                  resolved: false,
+                  compiled: false,
+                  kind: "subreport",
+                },
+                {
+                  uri: "repo:/Hospitalar/Imagens/logo.png",
+                  local_path: "repo/Hospitalar/Imagens/logo.png",
+                  resolved: true,
+                  compiled: false,
+                  kind: "image",
+                },
+              ],
+              warnings: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (
+          url.includes("/jasper/sync-repo-resources") &&
+          init?.method === "POST"
+        ) {
+          return new Response(
+            JSON.stringify({
+              project_id: freeProject.id,
+              total: 2,
+              resolved_count: 2,
+              missing_count: 0,
+              can_sync_remote: true,
+              items: [],
+              warnings: [],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ parameters: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <JasperStudioView
+          project={freeProject}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    // Zero required params -> auto-preview runs on mount!
+    await waitFor(() => {
+      expect(previewSpy).toHaveBeenCalledTimes(1);
+    });
+
+    // Clinical scenario pills and atendimento_id input are hidden for free_report
+    expect(
+      screen.queryByRole("button", { name: /Preenchido completo/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/atendimento_id \(opcional\)/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("4 páginas")).toBeInTheDocument();
+    expect(screen.queryByText(/Estouro de página/i)).not.toBeInTheDocument();
+
+    // repo: pending chip + 1-click sync
+    expect(await screen.findByText("repo: 1 pendente(s)")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: /Sincronizar repo:/i }),
+    );
+    await waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalledWith(
+        `/api/projects/${freeProject.id}/jasper/sync-repo-resources`,
+        { method: "POST" },
+      );
+    });
+    expect(await screen.findByText("repo: 2 OK")).toBeInTheDocument();
+
+    // SearchableSelect for PostgreSQL profile
+    const dbTrigger = screen.getByRole("button", {
+      name: /Perfil PostgreSQL/i,
+    });
+    await user.click(dbTrigger);
+    const searchInput = screen.getByPlaceholderText(
+      /Buscar por nome, host, banco ou ambiente/i,
+    );
+    await user.type(searchInput, "salutem_dev");
+    await user.click(screen.getByRole("option", { name: /Local Dev/i }));
+
+    await waitFor(() => {
+      expect(previewSpy).toHaveBeenLastCalledWith(
+        freeProject.id,
+        expect.objectContaining({
+          mode: "db_live",
+          db_profile_id: "prof-dev",
+        }),
+      );
+    });
+
+    // Exportar dropdown groups Baixar .jrxml, Abrir .pdf, and Pacote .zip
+    await user.click(screen.getByRole("button", { name: /Exportar/i }));
+    const menu = screen.getByRole("menu", { name: /Opções de exportação/i });
+    expect(
+      within(menu).getByRole("menuitem", { name: /Baixar \.jrxml/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(menu).getByRole("menuitem", { name: /Abrir \.pdf/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(menu).getByRole("menuitem", { name: /Pacote \.zip/i }),
+    ).toHaveAttribute("download", `${freeProject.slug}_entrega_salutem.zip`);
   });
 });

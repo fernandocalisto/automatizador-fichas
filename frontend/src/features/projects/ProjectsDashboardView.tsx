@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   CheckCircle2,
   Clock,
+  CloudDownload,
   Database,
   FileCode2,
   FileText,
@@ -11,6 +12,8 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Server,
+  Sparkles,
   Trash2,
   X,
   XCircle,
@@ -24,11 +27,14 @@ import {
   Input,
   Select,
   useToast,
+  type BadgeTone,
 } from "@/components/ui";
+import { cn } from "@/lib/cn";
 import type { ProjectsDashboardProps } from "@/types/feature-props";
 import type {
   ArtifactType,
   GateStatus,
+  ProjectKind,
   ProjectRead,
   ProjectStage,
 } from "@/types/studio";
@@ -51,6 +57,42 @@ const ARTIFACT_KEYS: ArtifactType[] = [
   "jrxml",
 ];
 
+type KindFilter = "all" | ProjectKind;
+
+function isFreeReportProject(project: ProjectRead): boolean {
+  return project.project_kind === "free_report";
+}
+
+function getFreeReportOriginMeta(project: ProjectRead): {
+  label: string;
+  tone: BadgeTone;
+  icon: React.ReactNode;
+} {
+  const provider = String(project.source_origin?.provider ?? "").toLowerCase();
+  if (
+    project.entry_mode === "jasperserver_import" ||
+    provider === "jasperserver"
+  ) {
+    return {
+      label: "JasperServer",
+      tone: "accent",
+      icon: <CloudDownload className="h-3 w-3" />,
+    };
+  }
+  if (project.entry_mode === "sftp_import" || provider === "sftp") {
+    return {
+      label: "SFTP",
+      tone: "blueprint",
+      icon: <Server className="h-3 w-3" />,
+    };
+  }
+  return {
+    label: "Relatório Livre",
+    tone: "success",
+    icon: <Sparkles className="h-3 w-3" />,
+  };
+}
+
 function GateIndicator({ status }: { status: GateStatus }) {
   if (status === "approved") {
     return <CheckCircle2 className="h-3 w-3 text-success" />;
@@ -71,6 +113,7 @@ export function ProjectsDashboardView({
   const { pushToast } = useToast();
 
   const [query, setQuery] = useState("");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [stageFilter, setStageFilter] = useState<"all" | ProjectStage>("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ProjectRead | null>(null);
@@ -78,9 +121,25 @@ export function ProjectsDashboardView({
 
   const safeProjects = Array.isArray(projects) ? projects : [];
 
+  const counts = useMemo(() => {
+    let reports = 0;
+    let clinical = 0;
+    for (const p of safeProjects) {
+      if (isFreeReportProject(p)) reports += 1;
+      else clinical += 1;
+    }
+    return { all: safeProjects.length, free_report: reports, clinical_form: clinical };
+  }, [safeProjects]);
+
   const filteredProjects = useMemo(() => {
     const q = query.trim().toLowerCase();
     return safeProjects.filter((project) => {
+      if (kindFilter === "free_report" && !isFreeReportProject(project)) {
+        return false;
+      }
+      if (kindFilter === "clinical_form" && isFreeReportProject(project)) {
+        return false;
+      }
       if (stageFilter !== "all" && project.current_stage !== stageFilter) {
         return false;
       }
@@ -91,7 +150,7 @@ export function ProjectsDashboardView({
         (project.description && project.description.toLowerCase().includes(q))
       );
     });
-  }, [safeProjects, query, stageFilter]);
+  }, [safeProjects, query, kindFilter, stageFilter]);
 
   const handleConfirmDelete = async () => {
     if (!deleteTarget) return;
@@ -114,86 +173,141 @@ export function ProjectsDashboardView({
     <div className="flex h-full flex-col overflow-hidden bg-canvas">
       {/* Top toolbar */}
       <div className="shrink-0 border-b border-border bg-surface px-5 py-3.5">
-        <div className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
-              <FolderKanban className="h-4.5 w-4.5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-base font-semibold tracking-tight text-ink">
-                  Projetos de Fichas Clínicas
-                </h1>
-                <Badge tone="neutral" className="tabular-nums">
-                  {filteredProjects.length}
-                  {filteredProjects.length !== safeProjects.length
-                    ? ` / ${safeProjects.length}`
-                    : ""}
-                </Badge>
+        <div className="mx-auto flex max-w-7xl flex-col gap-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-accent">
+                <FolderKanban className="h-4.5 w-4.5" />
               </div>
-              <p className="text-xs text-ink-muted">
-                Gerencie workspaces, revise gates de homologação e acesse
-                diretamente cada etapa do pipeline Salutem.
-              </p>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-base font-semibold tracking-tight text-ink">
+                    Projetos &amp; Relatórios
+                  </h1>
+                  <Badge tone="neutral" className="tabular-nums">
+                    {filteredProjects.length}
+                    {filteredProjects.length !== safeProjects.length
+                      ? ` / ${safeProjects.length}`
+                      : ""}
+                  </Badge>
+                </div>
+                <p className="text-xs text-ink-muted">
+                  Gerencie relatórios Jasper, fichas clínicas Salutem e acesse
+                  diretamente cada área de trabalho.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-[220px] flex-1 sm:w-64 sm:flex-none">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
+                <Input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Buscar por nome ou slug..."
+                  aria-label="Buscar projetos por nome ou slug"
+                  className="pl-8 pr-7"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => setQuery("")}
+                    aria-label="Limpar busca"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink cursor-pointer"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <Select
+                aria-label="Filtrar por etapa"
+                value={stageFilter}
+                onChange={(e) =>
+                  setStageFilter(e.target.value as "all" | ProjectStage)
+                }
+                className="w-44"
+              >
+                <option value="all">Todas as etapas</option>
+                {PROJECT_STAGES.map((stage) => (
+                  <option key={stage.id} value={stage.id}>
+                    {stage.label}
+                  </option>
+                ))}
+              </Select>
+
+              <Button
+                variant="outline"
+                size="sm"
+                loading={loading}
+                onClick={() => void onRefreshProjects()}
+                icon={<RefreshCw className="h-3.5 w-3.5" />}
+              >
+                Atualizar
+              </Button>
+
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setCreateOpen(true)}
+                icon={<Plus className="h-3.5 w-3.5" />}
+              >
+                Novo projeto
+              </Button>
             </div>
           </div>
 
+          {/* Filter pills by project kind */}
           <div className="flex flex-wrap items-center gap-2">
-            <div className="relative min-w-[220px] flex-1 sm:w-64 sm:flex-none">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Buscar por nome ou slug..."
-                aria-label="Buscar projetos por nome ou slug"
-                className="pl-8 pr-7"
-              />
-              {query && (
-                <button
-                  type="button"
-                  onClick={() => setQuery("")}
-                  aria-label="Limpar busca"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink cursor-pointer"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
+            <div
+              role="group"
+              aria-label="Filtrar por tipo de projeto"
+              className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-subtle p-0.5"
+            >
+              {(
+                [
+                  { id: "all", label: "Todos", count: counts.all },
+                  {
+                    id: "free_report",
+                    label: "Relatórios",
+                    count: counts.free_report,
+                  },
+                  {
+                    id: "clinical_form",
+                    label: "Fichas Clínicas",
+                    count: counts.clinical_form,
+                  },
+                ] as { id: KindFilter; label: string; count: number }[]
+              ).map((pill) => {
+                const active = kindFilter === pill.id;
+                return (
+                  <button
+                    key={pill.id}
+                    type="button"
+                    aria-pressed={active}
+                    onClick={() => setKindFilter(pill.id)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer",
+                      active
+                        ? "bg-surface text-ink shadow-xs"
+                        : "text-ink-muted hover:text-ink",
+                    )}
+                  >
+                    <span>{pill.label}</span>
+                    <span
+                      className={cn(
+                        "rounded px-1 py-0.2 text-[10px] tabular-nums",
+                        active
+                          ? "bg-accent-soft text-accent"
+                          : "bg-surface text-ink-muted",
+                      )}
+                    >
+                      {pill.count}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
-
-            <Select
-              aria-label="Filtrar por etapa"
-              value={stageFilter}
-              onChange={(e) =>
-                setStageFilter(e.target.value as "all" | ProjectStage)
-              }
-              className="w-44"
-            >
-              <option value="all">Todas as etapas</option>
-              {PROJECT_STAGES.map((stage) => (
-                <option key={stage.id} value={stage.id}>
-                  {stage.label}
-                </option>
-              ))}
-            </Select>
-
-            <Button
-              variant="outline"
-              size="sm"
-              loading={loading}
-              onClick={() => void onRefreshProjects()}
-              icon={<RefreshCw className="h-3.5 w-3.5" />}
-            >
-              Atualizar
-            </Button>
-
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => setCreateOpen(true)}
-              icon={<Plus className="h-3.5 w-3.5" />}
-            >
-              Novo projeto
-            </Button>
           </div>
         </div>
       </div>
@@ -215,7 +329,7 @@ export function ProjectsDashboardView({
             <EmptyState
               icon={<FolderKanban className="h-5 w-5" />}
               title="Nenhum projeto cadastrado"
-              description="Crie um novo projeto a partir de um PDF clínico, importe um JSON Salutem existente ou carregue um template JRXML."
+              description="Crie um novo projeto a partir de um PDF clínico, importe um relatório via JasperServer/SFTP ou crie um relatório livre."
               action={
                 <Button
                   variant="primary"
@@ -231,12 +345,13 @@ export function ProjectsDashboardView({
             <EmptyState
               icon={<Search className="h-5 w-5" />}
               title="Nenhum projeto corresponde aos filtros"
-              description="Ajuste o termo de busca ou selecione outra etapa para visualizar os workspaces disponíveis."
+              description="Ajuste o termo de busca, tipo ou etapa para visualizar os projetos disponíveis."
               action={
                 <Button
                   variant="outline"
                   onClick={() => {
                     setQuery("");
+                    setKindFilter("all");
                     setStageFilter("all");
                   }}
                 >
@@ -247,10 +362,14 @@ export function ProjectsDashboardView({
           ) : (
             <div className="space-y-2.5">
               {filteredProjects.map((project) => {
+                const freeReport = isFreeReportProject(project);
                 const stage =
                   STAGE_MAP[project.current_stage] ?? PROJECT_STAGES[0];
                 const entry =
                   ENTRY_MODE_META[project.entry_mode] ?? ENTRY_MODE_META.pdf;
+                const originMeta = freeReport
+                  ? getFreeReportOriginMeta(project)
+                  : null;
                 const artifactEntries = ARTIFACT_KEYS.filter(
                   (key) => (project.latest_artifacts?.[key] ?? 0) > 0,
                 );
@@ -267,7 +386,10 @@ export function ProjectsDashboardView({
                           <button
                             type="button"
                             onClick={() =>
-                              onSelectProject(project, "workspace")
+                              onSelectProject(
+                                project,
+                                freeReport ? "jasper_studio" : "workspace",
+                              )
                             }
                             className="truncate text-left text-sm font-semibold text-ink hover:text-accent transition-colors cursor-pointer"
                           >
@@ -278,13 +400,23 @@ export function ProjectsDashboardView({
                             {project.slug}
                           </span>
 
-                          <Badge tone={stage.tone} dot>
-                            {stage.label}
-                          </Badge>
+                          {freeReport && originMeta ? (
+                            <Badge tone={originMeta.tone}>
+                              {originMeta.icon}
+                              {originMeta.label}
+                            </Badge>
+                          ) : (
+                            <>
+                              <Badge tone={stage.tone} dot>
+                                {stage.label}
+                              </Badge>
+                              <Badge tone={entry.tone}>
+                                {entry.shortLabel}
+                              </Badge>
+                            </>
+                          )}
 
-                          <Badge tone={entry.tone}>{entry.shortLabel}</Badge>
-
-                          {project.has_pdf && (
+                          {!freeReport && project.has_pdf && (
                             <Badge
                               tone="neutral"
                               title="source.pdf anexado ao workspace"
@@ -294,7 +426,8 @@ export function ProjectsDashboardView({
                             </Badge>
                           )}
 
-                          {project.template_db_id !== null &&
+                          {!freeReport &&
+                            project.template_db_id !== null &&
                             project.template_db_id !== undefined && (
                               <Badge tone="accent" className="tabular-nums">
                                 ID #{project.template_db_id}
@@ -308,33 +441,35 @@ export function ProjectsDashboardView({
                           </p>
                         )}
 
-                        {/* Gates + Artifacts + UpdatedAt row */}
+                        {/* Gates (clinical_form only) + Artifacts + UpdatedAt row */}
                         <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-xs">
-                          <div
-                            className="flex flex-wrap items-center gap-1.5"
-                            aria-label="Indicadores de gates"
-                          >
-                            {GATE_DESCRIPTORS.map((gate) => {
-                              const found = getGateStatus(
-                                project.gates,
-                                gate.name,
-                              );
-                              const status: GateStatus =
-                                found?.status ?? "pending";
-                              const statusMeta = GATE_STATUS_META[status];
-                              return (
-                                <Badge
-                                  key={gate.name}
-                                  tone={statusMeta.tone}
-                                  title={`${gate.title}: ${statusMeta.label}`}
-                                  className="px-1.5 py-0.5 text-[11px]"
-                                >
-                                  <GateIndicator status={status} />
-                                  <span>{gate.shortLabel}</span>
-                                </Badge>
-                              );
-                            })}
-                          </div>
+                          {!freeReport && (
+                            <div
+                              className="flex flex-wrap items-center gap-1.5"
+                              aria-label="Indicadores de gates"
+                            >
+                              {GATE_DESCRIPTORS.map((gate) => {
+                                const found = getGateStatus(
+                                  project.gates,
+                                  gate.name,
+                                );
+                                const status: GateStatus =
+                                  found?.status ?? "pending";
+                                const statusMeta = GATE_STATUS_META[status];
+                                return (
+                                  <Badge
+                                    key={gate.name}
+                                    tone={statusMeta.tone}
+                                    title={`${gate.title}: ${statusMeta.label}`}
+                                    className="px-1.5 py-0.5 text-[11px]"
+                                  >
+                                    <GateIndicator status={status} />
+                                    <span>{gate.shortLabel}</span>
+                                  </Badge>
+                                );
+                              })}
+                            </div>
+                          )}
 
                           <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-muted">
                             {artifactEntries.length > 0 ? (
@@ -365,23 +500,30 @@ export function ProjectsDashboardView({
                         <Button
                           variant="primary"
                           size="sm"
-                          onClick={() => onSelectProject(project, "workspace")}
+                          onClick={() =>
+                            onSelectProject(
+                              project,
+                              freeReport ? "jasper_studio" : "workspace",
+                            )
+                          }
                           icon={<FolderOpen className="h-3.5 w-3.5" />}
                         >
                           Abrir
                         </Button>
 
-                        <Button
-                          variant="outline"
-                          size="xs"
-                          onClick={() =>
-                            onSelectProject(project, "form_builder")
-                          }
-                          icon={<LayoutList className="h-3.5 w-3.5" />}
-                          title="Abrir no Form Builder"
-                        >
-                          Form Builder
-                        </Button>
+                        {!freeReport && (
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            onClick={() =>
+                              onSelectProject(project, "form_builder")
+                            }
+                            icon={<LayoutList className="h-3.5 w-3.5" />}
+                            title="Abrir no Form Builder"
+                          >
+                            Form Builder
+                          </Button>
+                        )}
 
                         <Button
                           variant="outline"

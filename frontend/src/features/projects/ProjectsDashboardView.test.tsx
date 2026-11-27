@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/ui";
 import { api } from "@/lib/api";
-import type { ProjectRead } from "@/types/studio";
+import type { DbProfileRead, ProjectRead } from "@/types/studio";
 import { ProjectsDashboardView } from "./ProjectsDashboardView";
 
 function makeProject(overrides: Partial<ProjectRead> = {}): ProjectRead {
@@ -305,6 +305,202 @@ describe("ProjectsDashboardView", () => {
         }),
       );
       expect(onSelectProject).toHaveBeenCalledWith(jrxmlProject);
+    });
+  });
+
+  it("filters by project kind pills (Todos / Relatórios / Fichas Clínicas) and hides clinical gate badges on free_report cards", async () => {
+    const user = userEvent.setup();
+    const clinicalProj = makeProject({
+      id: "proj-clin",
+      slug: "ficha_obstetrica",
+      name: "Ficha Obstétrica",
+      project_kind: "clinical_form",
+    });
+    const jsReport = makeProject({
+      id: "proj-js",
+      slug: "guia_internacao",
+      name: "Guia de Internação",
+      project_kind: "free_report",
+      entry_mode: "jasperserver_import",
+      source_origin: { provider: "jasperserver" },
+      current_stage: "jrxml_design",
+      template_db_id: null,
+      has_pdf: false,
+      latest_artifacts: { jrxml: 2 },
+    });
+    const sftpReport = makeProject({
+      id: "proj-sftp",
+      slug: "receituario_sftp",
+      name: "Receituário SFTP",
+      project_kind: "free_report",
+      entry_mode: "sftp_import",
+      source_origin: { provider: "sftp" },
+      current_stage: "jrxml_design",
+      template_db_id: null,
+      has_pdf: false,
+      latest_artifacts: { jrxml: 1 },
+    });
+    const blankReport = makeProject({
+      id: "proj-blank",
+      slug: "relatorio_produtividade",
+      name: "Relatório Produtividade",
+      project_kind: "free_report",
+      entry_mode: "blank_report",
+      current_stage: "jrxml_design",
+      template_db_id: null,
+      has_pdf: false,
+      latest_artifacts: {},
+    });
+
+    render(
+      <ToastProvider>
+        <ProjectsDashboardView
+          projects={[clinicalProj, jsReport, sftpReport, blankReport]}
+          loading={false}
+          onRefreshProjects={vi.fn().mockResolvedValue(undefined)}
+          onSelectProject={vi.fn()}
+          onDeleteProject={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>,
+    );
+
+    // Filter to Relatórios -> only free_report projects visible, zero gate badges (G1/G2/G3)
+    const filterGroup = screen.getByRole("group", {
+      name: /Filtrar por tipo de projeto/i,
+    });
+    await user.click(
+      within(filterGroup).getByRole("button", { name: /Relatórios/i }),
+    );
+
+    expect(screen.queryByText("Ficha Obstétrica")).not.toBeInTheDocument();
+    expect(screen.getByText("Guia de Internação")).toBeInTheDocument();
+    expect(screen.getByText("Receituário SFTP")).toBeInTheDocument();
+    expect(screen.getByText("Relatório Produtividade")).toBeInTheDocument();
+
+    // Clean origin badges shown; clinical-only gate jargon hidden
+    expect(screen.getByText("JasperServer")).toBeInTheDocument();
+    expect(screen.getByText("SFTP")).toBeInTheDocument();
+    expect(screen.getByText("Relatório Livre")).toBeInTheDocument();
+    expect(screen.queryByText("G1 JSON")).not.toBeInTheDocument();
+    expect(screen.queryByText("G2 SQL")).not.toBeInTheDocument();
+    expect(screen.queryByText("G3 JRXML")).not.toBeInTheDocument();
+
+    // Filter to Fichas Clínicas -> gate badges preserved
+    await user.click(
+      within(filterGroup).getByRole("button", { name: /Fichas Clínicas/i }),
+    );
+    expect(screen.getByText("Ficha Obstétrica")).toBeInTheDocument();
+    expect(screen.queryByText("Guia de Internação")).not.toBeInTheDocument();
+    expect(screen.getByText("G1 JSON")).toBeInTheDocument();
+    expect(screen.getByText("G2 SQL")).toBeInTheDocument();
+    expect(screen.getByText("G3 JRXML")).toBeInTheDocument();
+
+    // Back to Todos -> all 4 visible
+    await user.click(
+      within(filterGroup).getByRole("button", { name: /Todos/i }),
+    );
+    expect(screen.getByText("Ficha Obstétrica")).toBeInTheDocument();
+    expect(screen.getByText("Guia de Internação")).toBeInTheDocument();
+  });
+
+  it("uses SearchableSelect for PostgreSQL profile in CreateProjectDialog (free_report)", async () => {
+    const user = userEvent.setup();
+    const profiles: DbProfileRead[] = [
+      {
+        id: "db-hml",
+        name: "Banco Homologação",
+        host: "10.1.2.3",
+        port: 5432,
+        dbname: "salutem_hml",
+        user: "ro",
+        sslmode: "prefer",
+        environment: "HML",
+        read_only: true,
+        is_default: false,
+        has_password: true,
+        created_at: "2026-03-01T00:00:00Z",
+        updated_at: "2026-03-01T00:00:00Z",
+      },
+      {
+        id: "db-prd",
+        name: "Banco Produção",
+        host: "10.9.8.7",
+        port: 5432,
+        dbname: "salutem_prd",
+        user: "ro",
+        sslmode: "require",
+        environment: "PRD",
+        read_only: true,
+        is_default: true,
+        has_password: true,
+        created_at: "2026-03-01T00:00:00Z",
+        updated_at: "2026-03-01T00:00:00Z",
+      },
+    ];
+
+    vi.spyOn(api, "listDbProfiles").mockResolvedValue(profiles);
+    const createdFree = makeProject({
+      id: "proj-free-1",
+      name: "Relatório Faturamento",
+      project_kind: "free_report",
+      entry_mode: "blank_report",
+      default_db_profile_id: "db-hml",
+      current_stage: "jrxml_design",
+    });
+    const createSpy = vi
+      .spyOn(api, "createProject")
+      .mockResolvedValue(createdFree);
+    const onSelectProject = vi.fn();
+
+    render(
+      <ToastProvider>
+        <ProjectsDashboardView
+          projects={[]}
+          loading={false}
+          onRefreshProjects={vi.fn().mockResolvedValue(undefined)}
+          onSelectProject={onSelectProject}
+          onDeleteProject={vi.fn().mockResolvedValue(undefined)}
+        />
+      </ToastProvider>,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Novo projeto/i }));
+    const dialog = screen.getByRole("dialog", { name: "Novo projeto" });
+    await user.click(
+      within(dialog).getByRole("tab", { name: /Relatório Livre/i }),
+    );
+    await user.type(
+      within(dialog).getByLabelText(/Nome do projeto/i),
+      "Relatório Faturamento",
+    );
+
+    // Open SearchableSelect and filter by environment/host
+    const dbTrigger = within(dialog).getByRole("button", {
+      name: /Perfil PostgreSQL padrão/i,
+    });
+    await user.click(dbTrigger);
+    const searchInput = within(dialog).getByPlaceholderText(
+      /Buscar por nome, host, banco ou ambiente/i,
+    );
+    await user.type(searchInput, "10.1.2.3");
+    await user.click(
+      within(dialog).getByRole("option", { name: /Banco Homologação/i }),
+    );
+
+    await user.click(
+      within(dialog).getByRole("button", { name: /^Criar projeto$/i }),
+    );
+
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "Relatório Faturamento",
+          entry_mode: "blank_report",
+          project_kind: "free_report",
+          default_db_profile_id: "db-hml",
+        }),
+      );
+      expect(onSelectProject).toHaveBeenCalledWith(createdFree);
     });
   });
 });

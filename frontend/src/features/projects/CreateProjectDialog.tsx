@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type DragEvent,
@@ -21,10 +22,12 @@ import {
   Dialog,
   FieldLabel,
   Input,
+  SearchableSelect,
   Select,
   Tabs,
   Textarea,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { JasperServerImportTab } from "@/features/jasperserver";
 import { SftpImportTab } from "@/features/sftp";
@@ -269,6 +272,18 @@ export function CreateProjectDialog({
     }
   };
 
+  const dbProfileOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      dbProfiles.map((prof) => ({
+        value: prof.id,
+        label: prof.name,
+        sublabel: `${prof.host}:${prof.port}/${prof.dbname}`,
+        badge: prof.environment ?? (prof.is_default ? "Padrão" : undefined),
+        keywords: `${prof.name} ${prof.host} ${prof.dbname} ${prof.environment ?? ""}`,
+      })),
+    [dbProfiles],
+  );
+
   const isRemoteImportTab =
     entryMode === "sftp_import" || entryMode === "jasperserver_import";
 
@@ -396,18 +411,18 @@ export function CreateProjectDialog({
                   <FieldLabel htmlFor="project-db-profile-select">
                     Perfil PostgreSQL padrão (opcional)
                   </FieldLabel>
-                  <Select
+                  <SearchableSelect
                     id="project-db-profile-select"
+                    ariaLabel="Perfil PostgreSQL padrão (opcional)"
                     value={defaultDbProfileId}
-                    onChange={(e) => setDefaultDbProfileId(e.target.value)}
-                  >
-                    <option value="">Usar perfil padrão do Studio</option>
-                    {dbProfiles.map((prof) => (
-                      <option key={prof.id} value={prof.id}>
-                        {prof.name} ({prof.host}:{prof.port})
-                      </option>
-                    ))}
-                  </Select>
+                    onChange={setDefaultDbProfileId}
+                    options={dbProfileOptions}
+                    allowClear
+                    clearLabel="Usar perfil padrão do Studio"
+                    placeholder="Usar perfil padrão do Studio"
+                    searchPlaceholder="Buscar por nome, host, banco ou ambiente..."
+                    emptyLabel="Nenhum perfil PostgreSQL encontrado."
+                  />
                 </div>
               )}
             </div>

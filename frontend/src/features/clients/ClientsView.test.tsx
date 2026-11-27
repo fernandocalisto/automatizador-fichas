@@ -1,8 +1,14 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/ui";
-import type { ClientUnitRead } from "@/types/studio";
+import { CommandPalette } from "@/components/layout/CommandPalette";
+import { StudioShell } from "@/components/layout/StudioShell";
+import { FAVORITE_CLIENTS_STORAGE_KEY, HomeView } from "@/features/home";
+import { jasperServerApi } from "@/features/jasperserver/jasperServerApi";
+import { sftpApi } from "@/features/sftp/sftpApi";
+import { api } from "@/lib/api";
+import type { ClientUnitRead, ProjectRead } from "@/types/studio";
 import { clientsApi } from "./clientsApi";
 import { ClientsView } from "./ClientsView";
 
@@ -33,7 +39,10 @@ const SAMPLE_CLIENTS: ClientUnitRead[] = [
         db_profile_id: "pg-alpha-amb",
         sftp_profile_id: "sftp-alpha-amb",
         jasperserver_profile_id: null,
-        metadata: {},
+        metadata: {
+          pg_host: "db-amb.alpha.example.local",
+          sftp_host: "sftp.alpha.example.local",
+        },
         created_at: "2026-11-27T10:00:00Z",
         updated_at: "2026-11-27T10:00:00Z",
       },
@@ -49,7 +58,9 @@ const SAMPLE_CLIENTS: ClientUnitRead[] = [
         db_profile_id: "pg-alpha-hosp",
         sftp_profile_id: null,
         jasperserver_profile_id: "js-alpha-hosp",
-        metadata: {},
+        metadata: {
+          jasper_url: "https://jasper.alpha.example.local/jasperserver",
+        },
         created_at: "2026-11-27T10:00:00Z",
         updated_at: "2026-11-27T10:00:00Z",
       },
@@ -89,47 +100,149 @@ const SAMPLE_CLIENTS: ClientUnitRead[] = [
   },
 ];
 
-describe("ClientsView & ClientSyncDialog", () => {
+const SAMPLE_IMPORTED_PROJECT: ProjectRead = {
+  id: "proj-imp-1",
+  slug: "resumo_alta",
+  name: "Resumo de Alta",
+  description: "Importado do JasperServer",
+  project_kind: "free_report",
+  current_stage: "jrxml_design",
+  entry_mode: "jasperserver_import",
+  preferred_harness: "agy",
+  template_db_id: null,
+  default_db_profile_id: "pg-alpha-hosp",
+  client_system_id: null,
+  source_origin: { provider: "jasperserver" },
+  workspace_dir: "/tmp/workspaces/resumo_alta",
+  has_pdf: false,
+  gates: [],
+  latest_artifacts: { jrxml: 1 },
+  created_at: "2026-11-27T10:00:00Z",
+  updated_at: "2026-11-27T10:00:00Z",
+};
+
+describe("ClientsView Master-Detail & ClientSyncDialog", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("lists clients, filters by search/type/environment, and triggers 1-click workflow callbacks", async () => {
+  it("renders Master-Detail layout, defaults to inline JasperServer explorer, and opens report in 1 click", async () => {
     const user = userEvent.setup();
     vi.spyOn(clientsApi, "listClients").mockResolvedValue(SAMPLE_CLIENTS);
+    vi.spyOn(jasperServerApi, "listResources").mockResolvedValue([
+      {
+        uri: "/reports/resumo_alta",
+        label: "Resumo de Alta",
+        description: "Relatório hospitalar",
+        resource_type: "reportUnit",
+        updated_at: "2026-11-27T09:00:00Z",
+      },
+    ]);
+    const importJasperSpy = vi
+      .spyOn(jasperServerApi, "importReport")
+      .mockResolvedValue(SAMPLE_IMPORTED_PROJECT);
+    vi.spyOn(sftpApi, "browse").mockResolvedValue({
+      profile_id: "sftp-alpha-amb",
+      current_path: "/opt/salutem/relatorios",
+      parent_path: "/opt/salutem",
+      entries: [
+        {
+          name: "ficha_evolucao.jrxml",
+          path: "/opt/salutem/relatorios/ficha_evolucao.jrxml",
+          is_dir: false,
+          size_bytes: 4096,
+          modified_at: "2026-11-27T09:00:00Z",
+          kind: "jrxml",
+          has_paired_file: true,
+        },
+      ],
+    });
+    const importSftpSpy = vi.spyOn(sftpApi, "importReport").mockResolvedValue({
+      ...SAMPLE_IMPORTED_PROJECT,
+      id: "proj-sftp-2",
+      name: "ficha evolucao",
+      entry_mode: "sftp_import",
+    });
 
+    const onProjectImported = vi.fn();
     const onCreateFreeReport = vi.fn();
-    const onOpenSftpImport = vi.fn();
-    const onOpenJasperImport = vi.fn();
     const onOpenSettings = vi.fn();
 
     render(
       <ToastProvider>
         <ClientsView
+          onProjectImported={onProjectImported}
           onCreateFreeReport={onCreateFreeReport}
-          onOpenSftpImport={onOpenSftpImport}
-          onOpenJasperImport={onOpenJasperImport}
           onOpenSettings={onOpenSettings}
         />
       </ToastProvider>,
     );
 
+    // Master list renders both clients and auto-selects first client
     await waitFor(() => {
-      expect(screen.getByText("Unidade Alpha Exemplo")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Unidade Alpha Exemplo" }),
+      ).toBeInTheDocument();
       expect(screen.getByText("Unidade Beta Exemplo")).toBeInTheDocument();
     });
 
-    // External link rendered with safe target/rel
-    const openLinks = screen.getAllByRole("link", { name: /Abrir Sistema/i });
-    expect(openLinks[0]).toHaveAttribute(
-      "href",
-      "https://amb.alpha.example.local",
-    );
-    expect(openLinks[0]).toHaveAttribute("target", "_blank");
+    // Header direct clickable web links
+    const ambLink = screen.getByRole("link", { name: /Abrir Ambulatorial/i });
+    expect(ambLink).toHaveAttribute("href", "https://amb.alpha.example.local");
+    expect(ambLink).toHaveAttribute("target", "_blank");
 
-    // 1-click callbacks
+    // Defaults to JasperServer tab and loads report units inline
+    await waitFor(() => {
+      expect(screen.getByText("Resumo de Alta")).toBeInTheDocument();
+    });
+
+    // 1-click "Abrir no Studio" imports report and notifies parent
     await user.click(
-      screen.getAllByRole("button", { name: /Novo Relatório Livre/i })[0],
+      screen.getByRole("button", { name: /Abrir no Studio/i }),
+    );
+    await waitFor(() => {
+      expect(importJasperSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profile_id: "js-alpha-hosp",
+          resource_uri: "/reports/resumo_alta",
+          db_profile_id: "pg-alpha-hosp",
+          sync_subreports: true,
+        }),
+      );
+      expect(onProjectImported).toHaveBeenCalledWith(SAMPLE_IMPORTED_PROJECT);
+    });
+
+    // Switch to SFTP tab and open file in 1 click
+    await user.click(screen.getByRole("tab", { name: /Fichas \(SFTP\)/i }));
+    await waitFor(() => {
+      expect(screen.getByText("ficha_evolucao.jrxml")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: /Abrir no Studio/i }),
+    );
+    await waitFor(() => {
+      expect(importSftpSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          profile_id: "sftp-alpha-amb",
+          remote_path: "/opt/salutem/relatorios/ficha_evolucao.jrxml",
+          db_profile_id: "pg-alpha-amb",
+          sync_subreports: true,
+        }),
+      );
+    });
+
+    // Switch to Conexões & Sistemas tab -> test Novo Relatório Livre & Credenciais Padrão
+    await user.click(
+      screen.getByRole("tab", { name: /Conexões & Sistemas/i }),
+    );
+    await user.click(
+      screen.getAllByRole("button", {
+        name: /Novo Relatório Livre neste Banco/i,
+      })[0],
     );
     expect(onCreateFreeReport).toHaveBeenCalledWith({
       clientSystemId: "sys-amb-prd",
@@ -137,44 +250,72 @@ describe("ClientsView & ClientSyncDialog", () => {
       defaultName: "Unidade Alpha Exemplo — Ambulatorial PRD",
     });
 
-    await user.click(screen.getByRole("button", { name: /Importar SFTP/i }));
-    expect(onOpenSftpImport).toHaveBeenCalledWith(
-      "sftp-alpha-amb",
-      "pg-alpha-amb",
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: /Importar JasperServer/i }),
-    );
-    expect(onOpenJasperImport).toHaveBeenCalledWith(
-      "js-alpha-hosp",
-      "pg-alpha-hosp",
-    );
-
     await user.click(
       screen.getByRole("button", { name: /Credenciais Padrão/i }),
     );
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
+  });
 
-    // Filter by system_type = hospitalar
-    await user.selectOptions(
-      screen.getByLabelText(/Filtrar por tipo de sistema/i),
-      "hospitalar",
-    );
-    expect(screen.getByText("Unidade Alpha Exemplo")).toBeInTheDocument();
-    expect(screen.queryByText("Unidade Beta Exemplo")).not.toBeInTheDocument();
+  it("supports favorites persistence, filter pills, instant search, and initialSelectedClientId", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(clientsApi, "listClients").mockResolvedValue(SAMPLE_CLIENTS);
+    vi.spyOn(jasperServerApi, "listResources").mockResolvedValue([]);
 
-    // Reset filter and search by tag
-    await user.selectOptions(
-      screen.getByLabelText(/Filtrar por tipo de sistema/i),
-      "all",
+    render(
+      <ToastProvider>
+        <ClientsView initialSelectedClientId="unit-2" />
+      </ToastProvider>,
     );
-    await user.type(
-      screen.getByLabelText(/Buscar clientes/i),
-      "regional",
+
+    // initialSelectedClientId selects Unidade Beta Exemplo right away
+    await waitFor(() => {
+      expect(
+        screen.getByRole("heading", { name: "Unidade Beta Exemplo" }),
+      ).toBeInTheDocument();
+    });
+
+    // Star Unidade Beta Exemplo -> persisted in localStorage
+    await user.click(
+      screen.getByRole("button", {
+        name: /Marcar Unidade Beta Exemplo como favorito/i,
+      }),
     );
-    expect(screen.queryByText("Unidade Alpha Exemplo")).not.toBeInTheDocument();
-    expect(screen.getByText("Unidade Beta Exemplo")).toBeInTheDocument();
+    expect(
+      JSON.parse(
+        window.localStorage.getItem(FAVORITE_CLIENTS_STORAGE_KEY) || "[]",
+      ),
+    ).toEqual(["unit-2"]);
+
+    // Filter by ★ Favoritos pill
+    await user.click(screen.getByRole("button", { name: /^Favoritos/i }));
+    expect(
+      screen.queryByText("Unidade Alpha Exemplo"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("Unidade Beta Exemplo").length,
+    ).toBeGreaterThanOrEqual(1);
+
+    // Reset with "Todos" pill, then filter by "Hospitalar"
+    await user.click(screen.getByRole("button", { name: /^Todos$/i }));
+    await user.click(screen.getByRole("button", { name: /^Hospitalar$/i }));
+    expect(
+      screen.getAllByText("Unidade Alpha Exemplo").length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.queryByRole("button", {
+        name: /Remover Unidade Beta Exemplo dos favoritos/i,
+      }),
+    ).not.toBeInTheDocument();
+
+    // Reset and search by tag
+    await user.click(screen.getByRole("button", { name: /^Todos$/i }));
+    await user.type(screen.getByLabelText(/Buscar clientes/i), "regional");
+    expect(
+      screen.queryByText("Unidade Alpha Exemplo"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getAllByText("Unidade Beta Exemplo").length,
+    ).toBeGreaterThanOrEqual(1);
   });
 
   it("completes the 2-step portal sync dialog (local URL config -> preview diff -> apply)", async () => {
@@ -182,7 +323,8 @@ describe("ClientsView & ClientSyncDialog", () => {
     vi.spyOn(clientsApi, "listClients").mockResolvedValue([]);
     vi.spyOn(clientsApi, "getSyncSnippet").mockResolvedValue({
       management_portal_url: "",
-      console_snippet: "fetch('/api/management/data', { credentials: 'include' })",
+      console_snippet:
+        "fetch('/api/management/data', { credentials: 'include' })",
       bookmarklet: "javascript:void(0)",
       instructions: ["Passo 1: abrir portal", "Passo 2: colar JSON"],
     });
@@ -235,7 +377,7 @@ describe("ClientsView & ClientSyncDialog", () => {
 
     // Open Sync Dialog
     await user.click(
-      screen.getAllByRole("button", { name: /Sincronizar do Portal/i })[0],
+      screen.getByRole("button", { name: /Sincronizar do Portal/i }),
     );
 
     const dialog = await screen.findByRole("dialog", {
@@ -262,17 +404,23 @@ describe("ClientsView & ClientSyncDialog", () => {
     // Paste synthetic JSON and click Preview
     const textarea = within(dialog).getByLabelText(/Colar JSON \/ HTML/i);
     await user.click(textarea);
-    await user.paste('{"units":[{"unit_code":"GAMMA-01","name":"Unidade Gamma Exemplo","systems":[]}]}');
+    await user.paste(
+      '{"units":[{"unit_code":"GAMMA-01","name":"Unidade Gamma Exemplo","systems":[]}]}',
+    );
 
     await user.click(
-      within(dialog).getByRole("button", { name: /Analisar e Pré-visualizar/i }),
+      within(dialog).getByRole("button", {
+        name: /Analisar e Pré-visualizar/i,
+      }),
     );
 
     // Step 2: Diff table rendered
     await waitFor(() => {
       expect(previewSpy).toHaveBeenCalledTimes(1);
       expect(screen.getByText("Unidade Gamma Exemplo")).toBeInTheDocument();
-      expect(screen.getByText("Novo cliente com 2 sistema(s)")).toBeInTheDocument();
+      expect(
+        screen.getByText("Novo cliente com 2 sistema(s)"),
+      ).toBeInTheDocument();
     });
 
     // Confirm Apply
@@ -287,5 +435,182 @@ describe("ClientsView & ClientSyncDialog", () => {
         }),
       );
     });
+  });
+});
+
+describe("HomeView, CommandPalette & StudioShell Dual-Mode", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders HomeView action cards, favorite clients, recent work, and quick guide", async () => {
+    const user = userEvent.setup();
+    window.localStorage.setItem(
+      FAVORITE_CLIENTS_STORAGE_KEY,
+      JSON.stringify(["unit-1"]),
+    );
+    vi.spyOn(clientsApi, "listClients").mockResolvedValue(SAMPLE_CLIENTS);
+
+    const onSelectProject = vi.fn();
+    const onNavigateSection = vi.fn();
+    const onOpenCreateDialog = vi.fn();
+    const onOpenClientById = vi.fn();
+    const onOpenCommandPalette = vi.fn();
+
+    render(
+      <HomeView
+        projects={[SAMPLE_IMPORTED_PROJECT]}
+        onSelectProject={onSelectProject}
+        onNavigateSection={onNavigateSection}
+        onOpenCreateDialog={onOpenCreateDialog}
+        onOpenClientById={onOpenClientById}
+        onOpenCommandPalette={onOpenCommandPalette}
+      />,
+    );
+
+    expect(
+      screen.getByText("O que você quer fazer agora?"),
+    ).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(screen.getByText("Unidade Alpha Exemplo")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByText("Unidade Alpha Exemplo"));
+    expect(onOpenClientById).toHaveBeenCalledWith("unit-1");
+
+    await user.click(screen.getByText("Nova Ficha Clínica (de PDF)"));
+    expect(onOpenCreateDialog).toHaveBeenCalledWith("pdf");
+
+    await user.click(screen.getByText("Novo Relatório Livre (SQL + Jasper)"));
+    expect(onOpenCreateDialog).toHaveBeenCalledWith("blank_report");
+
+    await user.click(screen.getByRole("button", { name: /Continuar/i }));
+    expect(onSelectProject).toHaveBeenCalledWith(SAMPLE_IMPORTED_PROJECT);
+  });
+
+  it("navigates CommandPalette across clients, projects, and settings profiles with keyboard", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(clientsApi, "listClients").mockResolvedValue(SAMPLE_CLIENTS);
+    vi.spyOn(api, "listDbProfiles").mockResolvedValue([]);
+    vi.spyOn(sftpApi, "listProfiles").mockResolvedValue([]);
+    vi.spyOn(jasperServerApi, "listProfiles").mockResolvedValue([]);
+
+    const onClose = vi.fn();
+    const onSelectProject = vi.fn();
+    const onSelectClient = vi.fn();
+    const onOpenSettingsTab = vi.fn();
+
+    render(
+      <CommandPalette
+        open={true}
+        onClose={onClose}
+        projects={[SAMPLE_IMPORTED_PROJECT]}
+        onSelectProject={onSelectProject}
+        onSelectClient={onSelectClient}
+        onOpenSettingsTab={onOpenSettingsTab}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Unidade Alpha Exemplo")).toBeInTheDocument();
+      expect(screen.getByText("Resumo de Alta")).toBeInTheDocument();
+    });
+
+    const input = screen.getByLabelText(/Buscar clientes, projetos/i);
+    await user.type(input, "Beta");
+    await user.keyboard("{Enter}");
+
+    expect(onSelectClient).toHaveBeenCalledWith("unit-2");
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("renders StudioShell Global Mode without disabled tabs and Active Project Mode with contextual tabs", () => {
+    const onNavigate = vi.fn();
+    const onToggleTheme = vi.fn();
+
+    const { rerender } = render(
+      <StudioShell
+        activeSection="home"
+        onNavigate={onNavigate}
+        projects={[SAMPLE_IMPORTED_PROJECT]}
+        activeProject={null}
+        onSelectProjectId={vi.fn()}
+        theme="light"
+        onToggleTheme={onToggleTheme}
+        health={null}
+        jasperUp={true}
+        onOpenCommandPalette={vi.fn()}
+      >
+        <div>Body</div>
+      </StudioShell>,
+    );
+
+    expect(screen.getByRole("button", { name: "Início" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Clientes" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Meus Projetos" })).toBeEnabled();
+    expect(screen.queryByText(/Form Builder/i)).not.toBeInTheDocument();
+
+    // Free Report Project Mode
+    rerender(
+      <StudioShell
+        activeSection="jasper_studio"
+        onNavigate={onNavigate}
+        projects={[SAMPLE_IMPORTED_PROJECT]}
+        activeProject={SAMPLE_IMPORTED_PROJECT}
+        onSelectProjectId={vi.fn()}
+        theme="light"
+        onToggleTheme={onToggleTheme}
+        health={null}
+        jasperUp={true}
+        onToggleChat={vi.fn()}
+      >
+        <div>Body</div>
+      </StudioShell>,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /Relatório & Preview/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Banco & SQL/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Assistente IA/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/2\. Perguntas/i)).not.toBeInTheDocument();
+
+    // Clinical Form Project Mode
+    const clinicalProject: ProjectRead = {
+      ...SAMPLE_IMPORTED_PROJECT,
+      id: "proj-clin-1",
+      name: "Ficha Anamnese",
+      project_kind: "clinical_form",
+    };
+    rerender(
+      <StudioShell
+        activeSection="workspace"
+        onNavigate={onNavigate}
+        projects={[clinicalProject]}
+        activeProject={clinicalProject}
+        onSelectProjectId={vi.fn()}
+        theme="light"
+        onToggleTheme={onToggleTheme}
+        health={null}
+        jasperUp={true}
+        onToggleChat={vi.fn()}
+      >
+        <div>Body</div>
+      </StudioShell>,
+    );
+
+    expect(screen.getByText("1. Resumo & PDF")).toBeInTheDocument();
+    expect(screen.getByText("2. Perguntas")).toBeInTheDocument();
+    expect(screen.getByText("3. SQL & Banco")).toBeInTheDocument();
+    expect(screen.getByText("4. Layout & PDF")).toBeInTheDocument();
   });
 });

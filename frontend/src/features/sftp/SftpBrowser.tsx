@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowUp,
   ChevronRight,
+  ExternalLink,
   File,
   FileCode2,
   FileCog,
@@ -10,6 +11,7 @@ import {
   RefreshCw,
   Search,
   Sparkles,
+  X,
 } from "lucide-react";
 import { Badge, Button, Input } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -23,7 +25,36 @@ export interface SftpBrowserProps {
   selectableKinds?: Array<"jrxml" | "jasper">;
   onSelectFile?: (entry: SftpRemoteEntry) => void;
   onPathChange?: (currentPath: string) => void;
+  fullHeight?: boolean;
+  onQuickImport?: (entry: SftpRemoteEntry) => void;
+  importingPath?: string | null;
   className?: string;
+}
+
+function getLastPathKey(profileId: string): string {
+  return `salutem:sftp-last-folder:${profileId}`;
+}
+
+function readLastSftpPath(
+  profileId: string,
+  fallback?: string,
+): string | undefined {
+  if (typeof window === "undefined" || !profileId) return fallback;
+  try {
+    const saved = window.localStorage.getItem(getLastPathKey(profileId));
+    return saved || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLastSftpPath(profileId: string, path: string): void {
+  if (typeof window === "undefined" || !profileId || !path) return;
+  try {
+    window.localStorage.setItem(getLastPathKey(profileId), path);
+  } catch {
+    // ignore storage errors
+  }
 }
 
 function formatFileSize(bytes: number): string {
@@ -53,10 +84,13 @@ export function SftpBrowser({
   selectableKinds = ["jrxml", "jasper"],
   onSelectFile,
   onPathChange,
+  fullHeight = false,
+  onQuickImport,
+  importingPath = null,
   className,
 }: SftpBrowserProps) {
-  const [currentPath, setCurrentPath] = useState<string | undefined>(
-    initialPath,
+  const [currentPath, setCurrentPath] = useState<string | undefined>(() =>
+    readLastSftpPath(profileId, initialPath),
   );
   const [searchInput, setSearchInput] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
@@ -65,7 +99,7 @@ export function SftpBrowser({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    setCurrentPath(initialPath);
+    setCurrentPath(readLastSftpPath(profileId, initialPath));
     setSearchInput("");
     setAppliedSearch("");
   }, [profileId, initialPath]);
@@ -82,6 +116,7 @@ export function SftpBrowser({
         });
         setListing(res);
         setCurrentPath(res.current_path);
+        writeLastSftpPath(profileId, res.current_path);
         onPathChange?.(res.current_path);
       } catch (err) {
         setErrorMsg(
@@ -97,9 +132,19 @@ export function SftpBrowser({
   );
 
   useEffect(() => {
-    void fetchDirectory(currentPath, appliedSearch);
+    void fetchDirectory(
+      readLastSftpPath(profileId, initialPath),
+      appliedSearch,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId, appliedSearch]);
+
+  const visibleEntries = useMemo(() => {
+    const entries = listing?.entries ?? [];
+    const q = searchInput.trim().toLowerCase();
+    if (!q) return entries;
+    return entries.filter((entry) => entry.name.toLowerCase().includes(q));
+  }, [listing?.entries, searchInput]);
 
   const breadcrumbs = useMemo(() => {
     const path = listing?.current_path || currentPath || "/";
@@ -143,11 +188,12 @@ export function SftpBrowser({
     <div
       className={cn(
         "flex flex-col rounded-md border border-border bg-surface overflow-hidden",
+        fullHeight && "h-full min-h-0",
         className,
       )}
     >
       {/* Toolbar: Parent + Breadcrumbs + Search + Refresh */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-subtle/60 px-3 py-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface-subtle/60 px-3 py-2">
         <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto">
           <Button
             variant="ghost"
@@ -169,7 +215,10 @@ export function SftpBrowser({
             {breadcrumbs.map((crumb, idx) => {
               const isLast = idx === breadcrumbs.length - 1;
               return (
-                <span key={crumb.path} className="inline-flex items-center gap-0.5">
+                <span
+                  key={crumb.path}
+                  className="inline-flex items-center gap-0.5"
+                >
                   {idx > 0 && (
                     <ChevronRight className="h-3 w-3 text-ink-muted shrink-0" />
                   )}
@@ -193,11 +242,17 @@ export function SftpBrowser({
         </div>
 
         <div className="flex items-center gap-1.5">
-          <div className="relative w-44">
+          <div className="relative w-52">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-muted" />
             <Input
               value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
+              onChange={(e) => {
+                const nextVal = e.target.value;
+                setSearchInput(nextVal);
+                if (!nextVal.trim() && appliedSearch) {
+                  setAppliedSearch("");
+                }
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   e.preventDefault();
@@ -206,8 +261,21 @@ export function SftpBrowser({
               }}
               placeholder="Filtrar arquivos..."
               aria-label="Filtrar arquivos SFTP"
-              className="h-7 pl-7 text-xs"
+              className="h-7 pl-7 pr-6 text-xs"
             />
+            {searchInput && (
+              <button
+                type="button"
+                aria-label="Limpar filtro SFTP"
+                onClick={() => {
+                  setSearchInput("");
+                  setAppliedSearch("");
+                }}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-ink-muted hover:text-ink cursor-pointer"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
           </div>
           <Button
             variant="outline"
@@ -232,7 +300,7 @@ export function SftpBrowser({
       {errorMsg && (
         <div
           role="alert"
-          className="flex items-center gap-2 border-b border-danger/20 bg-danger-soft px-3 py-2 text-xs text-danger"
+          className="flex shrink-0 items-center gap-2 border-b border-danger/20 bg-danger-soft px-3 py-2 text-xs text-danger"
         >
           <AlertCircle className="h-3.5 w-3.5 shrink-0" />
           <span className="truncate">{errorMsg}</span>
@@ -240,39 +308,56 @@ export function SftpBrowser({
       )}
 
       {/* Entries List */}
-      <div className="max-h-64 min-h-[160px] overflow-y-auto divide-y divide-border/60">
+      <div
+        className={cn(
+          "overflow-y-auto divide-y divide-border/60",
+          fullHeight ? "min-h-0 flex-1" : "max-h-64 min-h-[160px]",
+        )}
+      >
         {loading && !listing ? (
           <div className="px-4 py-8 text-center text-xs text-ink-muted">
             Carregando diretório remoto...
           </div>
-        ) : !listing || listing.entries.length === 0 ? (
+        ) : !listing || visibleEntries.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-ink-muted">
             Nenhum item encontrado neste diretório.
           </div>
         ) : (
-          listing.entries.map((entry) => {
-            const isSelectable =
-              entry.is_dir ||
-              ((entry.kind === "jrxml" || entry.kind === "jasper") &&
-                selectableKinds.includes(entry.kind));
+          visibleEntries.map((entry) => {
+            const isImportable =
+              !entry.is_dir &&
+              (entry.kind === "jrxml" || entry.kind === "jasper") &&
+              selectableKinds.includes(entry.kind);
+            const isSelectable = entry.is_dir || isImportable;
             const isSelected = selectedPath === entry.path;
+            const isImportingThis = importingPath === entry.path;
 
             return (
-              <button
+              <div
                 key={entry.path}
-                type="button"
-                disabled={!isSelectable}
-                onClick={() => handleEntryClick(entry)}
+                onDoubleClick={() => {
+                  if (isImportable && onQuickImport && !importingPath) {
+                    onQuickImport(entry);
+                  }
+                }}
                 className={cn(
-                  "flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors",
+                  "flex w-full items-center justify-between gap-2 px-3 py-2 text-xs transition-colors",
                   isSelected
                     ? "bg-accent-soft/70 text-ink"
                     : isSelectable
-                      ? "hover:bg-surface-subtle/70 cursor-pointer text-ink"
-                      : "opacity-55 cursor-not-allowed text-ink-muted",
+                      ? "hover:bg-surface-subtle/70 text-ink"
+                      : "opacity-55 text-ink-muted",
                 )}
               >
-                <div className="flex min-w-0 items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!isSelectable}
+                  onClick={() => handleEntryClick(entry)}
+                  className={cn(
+                    "flex min-w-0 flex-1 items-center gap-2 text-left",
+                    isSelectable ? "cursor-pointer" : "cursor-not-allowed",
+                  )}
+                >
                   {entry.is_dir ? (
                     <Folder className="h-4 w-4 shrink-0 text-warning" />
                   ) : entry.kind === "jrxml" ? (
@@ -312,15 +397,31 @@ export function SftpBrowser({
                       Par .jrxml/.jasper
                     </Badge>
                   )}
-                </div>
+                </button>
 
                 <div className="flex shrink-0 items-center gap-3 text-[11px] text-ink-muted tabular-nums">
-                  {!entry.is_dir && <span>{formatFileSize(entry.size_bytes)}</span>}
+                  {!entry.is_dir && (
+                    <span>{formatFileSize(entry.size_bytes)}</span>
+                  )}
                   {entry.modified_at && (
-                    <span>{formatShortDate(entry.modified_at)}</span>
+                    <span className="hidden sm:inline">
+                      {formatShortDate(entry.modified_at)}
+                    </span>
+                  )}
+                  {onQuickImport && isImportable && (
+                    <Button
+                      variant="primary"
+                      size="xs"
+                      loading={isImportingThis}
+                      disabled={Boolean(importingPath)}
+                      onClick={() => onQuickImport(entry)}
+                      icon={<ExternalLink className="h-3 w-3" />}
+                    >
+                      Abrir no Studio
+                    </Button>
                   )}
                 </div>
-              </button>
+              </div>
             );
           })
         )}

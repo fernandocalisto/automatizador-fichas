@@ -1,17 +1,12 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import {
-  AlertCircle,
-  Download,
-  Server,
-  Sparkles,
-} from "lucide-react";
+import { AlertCircle, Download, Server, Sparkles } from "lucide-react";
 import {
   Badge,
   Button,
   EmptyState,
   FieldLabel,
   Input,
-  Select,
+  SearchableSelect,
   Switch,
   useToast,
 } from "@/components/ui";
@@ -101,6 +96,29 @@ export function SftpImportTab({
     [profiles, selectedProfileId],
   );
 
+  const profileOptions = useMemo(
+    () =>
+      profiles.map((p) => ({
+        value: p.id,
+        label: p.name,
+        sublabel: `${p.username ? `${p.username}@` : ""}${p.host}:${p.port}`,
+        badge: p.environment,
+        keywords: p.remote_base_dir,
+      })),
+    [profiles],
+  );
+
+  const dbOptions = useMemo(
+    () =>
+      dbProfiles.map((db) => ({
+        value: db.id,
+        label: db.name,
+        sublabel: `${db.host}:${db.port}/${db.dbname || "padrão"}`,
+        badge: db.environment || undefined,
+      })),
+    [dbProfiles],
+  );
+
   const handleProfileChange = (nextId: string) => {
     setSelectedProfileId(nextId);
     setSelectedEntry(null);
@@ -183,35 +201,34 @@ export function SftpImportTab({
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div>
           <FieldLabel htmlFor="sftp-import-profile">Servidor SFTP</FieldLabel>
-          <Select
+          <SearchableSelect
             id="sftp-import-profile"
+            ariaLabel="Servidor SFTP"
             value={selectedProfileId}
-            onChange={(e) => handleProfileChange(e.target.value)}
-          >
-            {profiles.map((p) => (
-              <option key={p.id} value={p.id}>
-                [{p.environment}] {p.name} ({p.host}:{p.port})
-              </option>
-            ))}
-          </Select>
+            onChange={handleProfileChange}
+            options={profileOptions}
+            placeholder="Selecionar servidor SFTP..."
+            searchPlaceholder="Buscar por nome, host ou ambiente..."
+            emptyLabel="Nenhum servidor SFTP encontrado."
+          />
         </div>
 
         <div>
           <FieldLabel htmlFor="sftp-import-db">
             Banco PostgreSQL padrão (opcional)
           </FieldLabel>
-          <Select
+          <SearchableSelect
             id="sftp-import-db"
+            ariaLabel="Banco PostgreSQL padrão"
             value={dbProfileId}
-            onChange={(e) => setDbProfileId(e.target.value)}
-          >
-            <option value="">Nenhum banco vinculado</option>
-            {dbProfiles.map((db) => (
-              <option key={db.id} value={db.id}>
-                {db.name} ({db.host}/{db.dbname || "padrão"})
-              </option>
-            ))}
-          </Select>
+            onChange={setDbProfileId}
+            options={dbOptions}
+            placeholder="Nenhum banco vinculado"
+            searchPlaceholder="Buscar banco por nome ou host..."
+            emptyLabel="Nenhum banco encontrado."
+            allowClear
+            clearLabel="Nenhum banco vinculado"
+          />
         </div>
       </div>
 
@@ -307,11 +324,7 @@ export function SftpImportTab({
 
       <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
         {onCancel && (
-          <Button
-            variant="ghost"
-            onClick={onCancel}
-            disabled={importing}
-          >
+          <Button variant="ghost" onClick={onCancel} disabled={importing}>
             Cancelar
           </Button>
         )}

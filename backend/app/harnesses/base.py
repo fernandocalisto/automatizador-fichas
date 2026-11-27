@@ -14,11 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
-try:
-    from backend.app.config import PROJECT_ROOT, SKILLS_DIR, get_data_dir, get_db_path
-except ModuleNotFoundError:  # pragma: no cover
-    from app.config import PROJECT_ROOT, SKILLS_DIR, get_data_dir, get_db_path  # type: ignore[no-redef]
-from app.harnesses.types import (
+from backend.app.config import PROJECT_ROOT, SKILLS_DIR, get_data_dir, get_db_path
+from backend.app.harnesses.types import (
     EventType,
     HarnessEvent,
     HarnessKind,

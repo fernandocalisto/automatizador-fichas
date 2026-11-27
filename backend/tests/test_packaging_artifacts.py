@@ -121,12 +121,66 @@ def test_docker_compose_schema_and_contracts() -> None:
     env = studio["environment"]
     if isinstance(env, dict):
         assert env.get("FICHA_STUDIO_DATA_DIR") == "/data"
-        assert env.get("FICHA_STUDIO_VAULT_KEY") == "${FICHA_STUDIO_VAULT_KEY:-change-me-in-production}"
+        assert env.get("FICHA_STUDIO_VAULT_KEY") == "${FICHA_STUDIO_VAULT_KEY:-}"
+        assert "STUDIO_CORS_ORIGINS" in env
     else:
         assert "FICHA_STUDIO_DATA_DIR=/data" in env
-        assert "FICHA_STUDIO_VAULT_KEY=${FICHA_STUDIO_VAULT_KEY:-change-me-in-production}" in env
+        assert "FICHA_STUDIO_VAULT_KEY=${FICHA_STUDIO_VAULT_KEY:-}" in env
 
     assert "volumes" in data and "studio_data" in data["volumes"]
+
+
+def test_github_workflow_scopes_write_permission_to_release_job() -> None:
+    workflow = yaml.safe_load(_read_text(".github/workflows/build.yml"))
+    assert isinstance(workflow, dict)
+    assert workflow.get("permissions", {}).get("contents") == "read"
+
+    jobs = workflow.get("jobs", {})
+    assert jobs["release"].get("permissions", {}).get("contents") == "write"
+    for job_name in ("backend-tests", "frontend-tests", "docker-validate"):
+        assert "permissions" not in jobs[job_name]
+
+
+def test_cors_hardening_defaults_and_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi.testclient import TestClient
+    from backend.app.main import _resolve_cors_settings, create_app
+
+    monkeypatch.delenv("STUDIO_CORS_ORIGINS", raising=False)
+    origins, regex, creds = _resolve_cors_settings()
+    assert origins == []
+    assert regex is not None
+    assert creds is True
+
+    app = create_app()
+    client = TestClient(app)
+
+    local_resp = client.options(
+        "/api/health",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert local_resp.headers.get("access-control-allow-origin") == "http://localhost:5173"
+
+    foreign_resp = client.options(
+        "/api/health",
+        headers={
+            "Origin": "https://evil.example.com",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert "access-control-allow-origin" not in foreign_resp.headers
+
+    monkeypatch.setenv("STUDIO_CORS_ORIGINS", "https://studio.salutem.local, http://10.0.0.5:8000")
+    assert _resolve_cors_settings() == (
+        ["https://studio.salutem.local", "http://10.0.0.5:8000"],
+        None,
+        True,
+    )
+
+    monkeypatch.setenv("STUDIO_CORS_ORIGINS", "*")
+    assert _resolve_cors_settings() == (["*"], None, False)
 
 
 def test_start_local_ps1_contracts() -> None:

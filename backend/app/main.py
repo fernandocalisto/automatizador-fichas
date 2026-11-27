@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import html
+import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -250,6 +251,30 @@ def _render_dev_status_html(
 """
 
 
+_DEFAULT_LOCAL_CORS_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+
+
+def _resolve_cors_settings() -> tuple[list[str], str | None, bool]:
+    """
+    Resolve configurações seguras de CORS via `STUDIO_CORS_ORIGINS`.
+
+    - Sem env definida: permite apenas origens locais (`localhost` / `127.0.0.1`).
+      Requisições same-origin em rede local (`http://<LAN-IP>:8000`) não precisam de CORS.
+    - Com `*` explícito: desabilita `allow_credentials` (conforme especificação Fetch/CORS).
+    - Com lista separada por vírgula: restringe estritamente às origens informadas.
+    """
+    raw = os.environ.get("STUDIO_CORS_ORIGINS", "").strip()
+    if not raw:
+        return ([], _DEFAULT_LOCAL_CORS_REGEX, True)
+
+    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    if not origins:
+        return ([], _DEFAULT_LOCAL_CORS_REGEX, True)
+    if "*" in origins:
+        return (["*"], None, False)
+    return (origins, None, True)
+
+
 def create_app(
     *,
     store: SQLiteStore | None = None,
@@ -298,10 +323,12 @@ def create_app(
     if jasper_daemon is not None:
         app_instance.state.jasper_daemon = jasper_daemon
 
+    cors_origins, cors_origin_regex, cors_allow_credentials = _resolve_cors_settings()
     app_instance.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=cors_origins,
+        allow_origin_regex=cors_origin_regex,
+        allow_credentials=cors_allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )

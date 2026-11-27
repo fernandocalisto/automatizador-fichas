@@ -74,6 +74,13 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
 - **Atualização automática da interface sem F5**:
   - Backend emite `latest_artifacts` nos eventos `workspace_sync` e `DONE`, e marca `exports/latest_preview.json` com `stale: true` + `jrxml_version`/`jrxml_sha256` ao salvar nova revisão `.jrxml`.
   - Frontend propaga `onArtifactSynced` / `artifactSyncTick` e observa `project.latest_artifacts` em `FormBuilderView`, `SqlDbView`, `JasperStudioView` (recarregando Monaco + disparando re-renderização automática do Preview com a nova revisão) e `ProjectOverviewView` (revisões).
+- **Quick Wins de Hardening, Imports & Build**:
+  - CORS endurecido em `backend/app/main.py` via `STUDIO_CORS_ORIGINS` (padrão restrito a `localhost` / `127.0.0.1`; wildcard `*` sem `allow_credentials`).
+  - Cofre fallback em `backend/app/services/postgres_service.py` rejeitando placeholders inseguros (`change-me-in-production`) e remoção do default literal no `docker-compose.yml`.
+  - Permissões do GitHub Actions (`.github/workflows/build.yml`) restringidas para `contents: read` global e `contents: write` exclusivo no job `release`.
+  - Padronização dos imports diretos `from app.*` → `from backend.app.*` nos harnesses e testes.
+  - `frontend/vite.config.ts` atualizado com `ws: true` no proxy `/api` e `manualChunks` (`vendor-react`, `vendor-monaco`, `vendor-pdfjs`, `vendor-dndkit`, `vendor-icons`).
+  - Limpeza de worktrees e branches locais já mergeadas (`feat/e3-*`, `feat/e4-*`, `swarm-*`, `feat/v1-*`).
 
 ---
 
@@ -81,7 +88,7 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
 
 | Camada | Comando / Pipeline | Resultado Atual |
 | :--- | :--- | :--- |
-| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **118 passed** |
+| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **123 passed** |
 | **Frontend Typecheck** | `npm --prefix frontend run typecheck` | **0 erros** |
 | **Frontend Unit/Component** | `npm --prefix frontend test` | **11 arquivos, 49 passed** |
 | **Frontend Production Build** | `npm --prefix frontend run build` | **OK** (`frontend/dist/`) |
@@ -184,5 +191,4 @@ Decisões estratégicas alinhadas para evolução do Salutem Ficha Studio:
 - **UI de Regras OCR / Regex Customizadas**: expor o motor já pronto em `backend/app/core/custom_regex.py` como nova aba em *Configurações* para cadastro e teste de substituições OCR.
 - **Comparação visual lado a lado**: modo split *PDF Original vs Preview Jasper* no Jasper Studio Light e biblioteca de blocos/templates JRXML reutilizáveis.
 - **Atualização de Actions no CI**: migrar `actions/checkout@v4`, `actions/setup-node@v4`, `actions/setup-java@v4` e `actions/upload-artifact@v4` para versões nativas de Node 24 (`v5`/`v6`).
-- **Code-splitting do bundle frontend**: dividir `monaco` e `pdfjs-dist` via `manualChunks` no `vite.config.ts` para reduzir o chunk principal (`index-*.js`).
-- **Limpeza de branches antigas**: remover branches de feature já mergeadas (`feat/v1-web-studio`, `feat/v1.0.0-release-readiness`, `feat/e3-*`, `feat/e4-*`).
+- **Migração criptográfica do cofre fallback**: evoluir `_EncryptedVault` para `cryptography` (AES-256-GCM / Fernet) antes do armazenamento de API Keys BYOK e credenciais SFTP/JasperServer (`v1.2`/`v1.3`).

@@ -9,7 +9,8 @@ services:
       - studio_data:/data
     environment:
       FICHA_STUDIO_DATA_DIR: /data
-      FICHA_STUDIO_VAULT_KEY: ${FICHA_STUDIO_VAULT_KEY:-change-me-in-production}
+      FICHA_STUDIO_VAULT_KEY: ${FICHA_STUDIO_VAULT_KEY:-}
+      STUDIO_CORS_ORIGINS: ${STUDIO_CORS_ORIGINS:-}
     restart: unless-stopped
 
 volumes:

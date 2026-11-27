@@ -11,13 +11,13 @@ from typing import Any
 
 import httpx
 
-from app.harnesses.base import (
+from backend.app.harnesses.base import (
     STUDIO_MCP_SERVER_NAME,
     BaseSubprocessHarness,
     SubprocessRunner,
     build_studio_mcp_server_spec,
 )
-from app.harnesses.types import (
+from backend.app.harnesses.types import (
     EventType,
     HarnessEvent,
     HarnessKind,

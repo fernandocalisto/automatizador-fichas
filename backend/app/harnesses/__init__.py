@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-from app.harnesses.agy_harness import AgyHarness
-from app.harnesses.base import (
+from backend.app.harnesses.agy_harness import AgyHarness
+from backend.app.harnesses.base import (
     AgentHarness,
     BaseSubprocessHarness,
     SubprocessChunk,
@@ -14,11 +14,11 @@ from app.harnesses.base import (
     default_subprocess_runner,
     load_phase_skill_markdown,
 )
-from app.harnesses.claude_harness import ClaudeCodeHarness
-from app.harnesses.codex_harness import CodexHarness
-from app.harnesses.opencode_harness import OpenCodeHarness
-from app.harnesses.registry import HarnessRegistry, get_default_registry
-from app.harnesses.types import (
+from backend.app.harnesses.claude_harness import ClaudeCodeHarness
+from backend.app.harnesses.codex_harness import CodexHarness
+from backend.app.harnesses.opencode_harness import OpenCodeHarness
+from backend.app.harnesses.registry import HarnessRegistry, get_default_registry
+from backend.app.harnesses.types import (
     EventType,
     HarnessEvent,
     HarnessKind,

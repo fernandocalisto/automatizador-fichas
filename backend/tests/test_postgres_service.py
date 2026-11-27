@@ -722,3 +722,14 @@ def test_inspect_select_query_placeholders_oids_and_sample_atendimento_api(
     pg_service = PostgresService(store=store, connection_factory=driver)
     with pytest.raises(DbProfileValidationError):
         pg_service.inspect_select_query(ro_id, "DELETE FROM public.atendimento WHERE id = 1;")
+
+
+def test_encrypted_vault_rejects_insecure_placeholder_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from backend.app.services.postgres_service import _EncryptedVault
+
+    monkeypatch.setenv("FICHA_STUDIO_VAULT_KEY", "change-me-in-production")
+    vault = _EncryptedVault(lambda: tmp_path / ".vault.json")
+    with pytest.raises(PostgresServiceError, match="placeholder inseguro"):
+        vault.set_secret("profile-1", "super-secret")

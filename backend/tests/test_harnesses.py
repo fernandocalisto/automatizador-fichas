@@ -14,7 +14,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.harnesses import (
+from backend.app.harnesses import (
     AgentHarness,
     AgyHarness,
     ClaudeCodeHarness,

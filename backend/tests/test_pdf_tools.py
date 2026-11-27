@@ -14,7 +14,7 @@ except ImportError:  # pragma: no cover
 
 import pytest
 
-from app.mcp_tools import (
+from backend.app.mcp_tools import (
     SALUTEM_RETRATO_DETAIL_ORIGIN_Y,
     CroppedRegionPath,
     crop_pdf_region_to_png,

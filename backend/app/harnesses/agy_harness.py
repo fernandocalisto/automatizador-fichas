@@ -15,13 +15,13 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
-from app.harnesses.base import (
+from backend.app.harnesses.base import (
     STUDIO_MCP_TOOL_NAMES,
     BaseSubprocessHarness,
     SubprocessRunner,
     build_studio_mcp_server_spec,
 )
-from app.harnesses.types import (
+from backend.app.harnesses.types import (
     EventType,
     HarnessEvent,
     HarnessKind,

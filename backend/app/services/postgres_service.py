@@ -287,6 +287,16 @@ class _EncryptedVault:
     """
 
     _PBKDF2_ITERATIONS = 100_000
+    _INSECURE_PLACEHOLDER_KEYS = frozenset(
+        {
+            "change-me",
+            "change-me-in-production",
+            "changeme",
+            "default",
+            "secret",
+            "password",
+        }
+    )
 
     def __init__(self, vault_path_resolver: Callable[[], Path]) -> None:
         self._resolve_path = vault_path_resolver
@@ -296,8 +306,13 @@ class _EncryptedVault:
         return self._resolve_path()
 
     def _master_secret_bytes(self) -> bytes:
-        env_key = os.environ.get("FICHA_STUDIO_VAULT_KEY")
+        env_key = os.environ.get("FICHA_STUDIO_VAULT_KEY", "").strip()
         if env_key:
+            if env_key.lower() in self._INSECURE_PLACEHOLDER_KEYS:
+                raise PostgresServiceError(
+                    "FICHA_STUDIO_VAULT_KEY usa um valor placeholder inseguro. "
+                    "Defina uma chave secreta forte no ambiente ou deixe-a vazia em desenvolvimento."
+                )
             return env_key.encode("utf-8")
         try:
             os_user = getpass.getuser()

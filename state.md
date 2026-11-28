@@ -1,10 +1,10 @@
 # Estado Atual do Projeto — Salutem Ficha Studio (`v1.1.1`)
 
-> **Última atualização:** 2026-11-27  
+> **Última atualização:** 2026-11-28  
 > **Branch principal:** `main` (`v1.1.1`)  
 > **Release anterior publicada:** [`v1.0.0`](https://github.com/fernandocalisto/automatizador-fichas/releases/tag/v1.0.0)  
-> **Plano detalhado executado:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md) + Redesign UX / `repo:` / SSH `.key` (`v1.1.1`)  
-> **Status geral:** **`v1.1.1` implementada e validada ponta a ponta (Motor Nativo `repo:/...` na JVM, SSH `.key` padrão/por perfil, Tela `Início`, Busca Global `Ctrl+K`, Clientes Master-Detail com 1-click JasperServer/SFTP, Jasper Studio Visual-First e Configurações com sidebar/busca/paginação)**
+> **Plano detalhado executado:** [`implementation_plan_v1.1.md`](./implementation_plan_v1.1.md) + Redesign UX / `repo:` / SSH `.key` + Rodada QA `v1.1.1` + Preview/Fontes JVM/AGY Quente  
+> **Status geral:** **`v1.1.1` estabilizada e validada ponta a ponta em `main` (Motor `repo:/...` + fontes JVM com negrito/itálico reais, SSH `.key`, `Início`, `Ctrl+K`, Clientes Master-Detail, Jasper Studio com Preview ampliado/popover `Ajustes (N)`, Configurações e Pool AGY quente com seletor de Modelo + Effort)**
 
 ---
 
@@ -109,16 +109,27 @@ O **Salutem Ficha Studio** substituiu integralmente a GUI legada em PySide6 por 
   - **Jasper Studio Visual-First** (`Visual (Preview + IA)` como padrão para `free_report`, `Dividido`, `Só Código`), menu `Exportar ▾`, chip `repo:/...`, botão contextual de publicação e preview inicial inteligente para `$P{}` obrigatórios.
   - **Configurações** (`SettingsView`) com sidebar categorizada e busca + filtro de ambiente + paginação (25/página) para grandes catálogos de conexões.
 
+#### Rodada QA `v1.1.1` — Integridade, Navegação, Configurações & Clientes (`65302e3`, `1fd006f`, `bd7b87c`)
+- **Integridade de Projetos & Exportação**: `blank_report` inicializado com `.jrxml` válido + fallback `/jrxml/scaffold`; `export-bundle` sempre regenerando o PDF quando `stale`/hash divergir e totalmente compatível com projetos `JRXML-only`.
+- **Validações & Higiene Backend**: `422` em `base_url` do JasperServer, validação de chave PEM SSH, esquema `http(s)` obrigatório em `system_url`, bloqueio de `SELECT ... INTO` pré-conexão + HTTP `502` coerente e limpeza automática de FKs órfãs ao excluir perfis.
+- **Versão, Branding & Launchers**: `APP_VERSION = "1.1.1"`, `favicon.svg` e launchers PowerShell 5.1 detectando `frontend/dist` desatualizado e dependências `.venv`.
+- **Configurações, Seletores & Navegação**: modal PostgreSQL com `Ambiente`, `Modo de Credenciais` e **Descobrir bancos** (`GET /api/db/profiles/{id}/databases`); `SearchableSelect` em SQL Workbench, Deploy Modals e `ClientSystemFormDialog`; `Ctrl+K` com deep-link filtrado; Guia Rápido abrindo `default_credentials`; eliminação da race 404 do PDF.js; Assistente IA dedicado em `free_report`; escolha de tipo em `Importar JRXML`; ajustes de layout `1280×800` e higiene de hash URL.
+
+#### Preview PDF Ampliado, Negrito/Itálico JVM & Agente AGY Quente (`a05c2d1`, `cad7b5d`, `0ca6eed`)
+- **Fontes reais na JVM (`jasper-daemon.jar`)**: empacotamento de `jasperreports-fonts` + `salutem-fonts.xml` com `DejaVu Sans` (`Regular`/`Bold`/`Oblique`/`BoldOblique`) embutidas no PDF, eliminando o fallback `Helvetica` sem negrito/itálico.
+- **Preview PDF & Anotações Visuais**: `PreviewControlBar` clínico em 1 linha (`Exportar ▾`), zoom `Ajustar à página` / `Largura` (até `220%`) / `200%` + modo `Tela cheia` (`Esc`); popover compacto `Ajustes (N)` substituindo a gaveta inferior, com resolução manual/automática (`POST /jasper/feedback/resolve`) e ocultação automática das caixas após sync de revisão JRXML.
+- **Agente AGY Quente & Controle de Modelo/Effort**: `AgyPersistentSessionPool` + pré-aquecimento via `/agent/warmup`; descoberta `GET /api/harnesses/{id}/models` + seletor de **Modelo + Effort (`--effort`)** e badge do modelo na resposta; PNGs de `uploads/source.pdf` anexados automaticamente na fase `jrxml` e prompts delta enxutos em sessões retomadas.
+
 ---
 
 ## 3. Baseline de Qualidade & Verificação (`main`)
 
 | Camada | Comando / Pipeline | Resultado Atual |
 | :--- | :--- | :--- |
-| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **177 passed** |
+| **Backend (Python + JVM real + MCP)** | `.\.venv\Scripts\pytest.exe` | **205 passed** |
 | **Frontend Typecheck** | `npm --prefix frontend run typecheck` | **0 erros** |
-| **Frontend Unit/Component** | `npm --prefix frontend test` | **15 arquivos, 68 passed** |
-| **Frontend Production Build** | `npm --prefix frontend run build` | **OK** (`frontend/dist/`) |
+| **Frontend Unit/Component** | `npm --prefix frontend test` | **15 arquivos, 88 passed** |
+| **Frontend Production Build** | `npm --prefix frontend run build` | **OK** (`frontend/dist/`, `v1.1.1`) |
 | **CLI Real `agy.exe`** | `AgyHarness` + `--input-format stream-json --output-format stream-json --dangerously-skip-permissions` | **OK** (streaming + MCP `salutem_studio`) |
 | **E2E Navegador** | FastAPI + JVM real (`v1.0.0`, 8 MCP tools, F5 hash, crop PNG + thumbnail, Claro/Escuro) | **OK** (0 erros de console) |
 | **GitHub Actions CI & Release** | [Run #45749319313](https://github.com/fernandocalisto/automatizador-fichas/actions/runs/45749319313) (`v1.0.0`) | **4/4 jobs verdes** + asset `salutem-ficha-studio-v1.0.0.zip` publicado |

@@ -1285,13 +1285,21 @@ def export_salutem_delivery_bundle(
                 except ArtifactNotFoundError:
                     sql_select_content = extract_jrxml_query(clean_jrxml) or None
             else:
-                json_rev = workspace_service.get_latest_artifact(project_id, "json")
-                parsed_json = parse_and_validate_clinical_json(
-                    json_rev.content,
-                    require_clinical_structure=True,
-                    apply_uppercase=True,
-                )
-                sql_insert_content = generate_insert_sql(parsed_json)
+                try:
+                    json_rev = workspace_service.get_latest_artifact(project_id, "json")
+                    parsed_json = parse_and_validate_clinical_json(
+                        json_rev.content,
+                        require_clinical_structure=True,
+                        apply_uppercase=True,
+                    )
+                    sql_insert_content = generate_insert_sql(parsed_json)
+                except ArtifactNotFoundError:
+                    try:
+                        sql_select_content = workspace_service.get_latest_artifact(
+                            project_id, "sql_select"
+                        ).content
+                    except ArtifactNotFoundError:
+                        sql_select_content = extract_jrxml_query(clean_jrxml) or None
     except Exception as exc:
         _raise_http_for_workspace_error(exc)
         raise
@@ -1300,7 +1308,30 @@ def export_salutem_delivery_bundle(
     exports_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = exports_dir / f"preview_{scenario}.pdf"
 
-    if not pdf_path.is_file():
+    current_jrxml_sha256 = hashlib.sha256(
+        validate_jrxml_content(clean_jrxml).encode("utf-8")
+    ).hexdigest()
+
+    needs_regen = not pdf_path.is_file()
+    if not needs_regen:
+        latest_meta_path = exports_dir / "latest_preview.json"
+        if not latest_meta_path.is_file():
+            needs_regen = True
+        else:
+            try:
+                meta = json.loads(latest_meta_path.read_text(encoding="utf-8"))
+                if not isinstance(meta, dict):
+                    needs_regen = True
+                elif bool(meta.get("stale")):
+                    needs_regen = True
+                elif meta.get("scenario") != scenario:
+                    needs_regen = True
+                elif meta.get("jrxml_sha256") != current_jrxml_sha256:
+                    needs_regen = True
+            except Exception:
+                needs_regen = True
+
+    if needs_regen:
         _execute_preview_pipeline(
             project_id=project_id,
             payload=JasperPreviewRequest(

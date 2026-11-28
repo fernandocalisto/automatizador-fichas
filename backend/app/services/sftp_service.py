@@ -35,7 +35,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from backend.app.config import get_data_dir
 from backend.app.db.schemas import CredentialMode, EnvironmentKind, ProjectCreate, ProjectRead
 from backend.app.db.sqlite_store import SQLiteStore, utc_now_iso
-from backend.app.services.default_credentials_service import DefaultCredentialsService
+from backend.app.services.default_credentials_service import (
+    DefaultCredentialsService,
+    validate_ssh_private_key_pem,
+)
 from backend.app.services.secret_vault import VAULT_FILENAME, SecretVaultError, SecretVaultService
 from backend.app.services.workspace_service import WorkspaceService
 
@@ -173,6 +176,11 @@ class SftpProfileCreate(BaseModel):
             return ""
         return str(value).strip()
 
+    @field_validator("private_key")
+    @classmethod
+    def _validate_private_key(cls, value: str | None) -> str | None:
+        return validate_ssh_private_key_pem(value)
+
     @field_validator("linked_db_profile_id")
     @classmethod
     def _strip_optional_link(cls, value: str | None) -> str | None:
@@ -219,6 +227,11 @@ class SftpProfileUpdate(BaseModel):
         if value is None:
             return None
         return value.strip()
+
+    @field_validator("private_key")
+    @classmethod
+    def _validate_private_key(cls, value: str | None) -> str | None:
+        return validate_ssh_private_key_pem(value)
 
     @field_validator("linked_db_profile_id")
     @classmethod
@@ -797,11 +810,12 @@ class SftpService:
         return self._row_to_profile_read(dict(row) if row is not None else existing)
 
     def delete_profile(self, profile_id: str) -> bool:
-        """Delete an SSH/SFTP profile, its vault secrets, and any pending deploy tokens."""
+        """Delete an SSH/SFTP profile, clear references, purge vault secrets and deploy tokens."""
         self._require_profile_row(profile_id)
         self._delete_profile_secrets(profile_id)
         with self.store.connection() as conn:
             conn.execute("DELETE FROM sftp_deploy_tokens WHERE profile_id = ?", (profile_id,))
+            self.store.clear_profile_references(conn, kind="sftp", profile_id=profile_id)
             cursor = conn.execute("DELETE FROM sftp_profiles WHERE id = ?", (profile_id,))
             return cursor.rowcount > 0
 

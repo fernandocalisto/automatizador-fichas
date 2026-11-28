@@ -22,6 +22,7 @@ import shutil
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -123,7 +124,7 @@ class JasperServerProfileNotFoundError(JasperServerError):
     """Raised when a JasperServer profile ID does not exist."""
 
 
-class JasperServerValidationError(JasperServerError):
+class JasperServerValidationError(JasperServerError, ValueError):
     """Raised when profile input, URI, or deployment parameters are invalid."""
 
 
@@ -156,9 +157,10 @@ def _normalize_base_url(raw: str) -> str:
     cleaned = (raw or "").strip()
     if not cleaned:
         raise JasperServerValidationError("base_url não pode ser vazio.")
-    if not (cleaned.startswith("http://") or cleaned.startswith("https://")):
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
         raise JasperServerValidationError(
-            "base_url deve começar com 'http://' ou 'https://'."
+            "base_url deve começar com 'http://' ou 'https://' e conter um host válido."
         )
     cleaned = cleaned.rstrip("/")
     if cleaned.lower().endswith("/rest_v2"):
@@ -948,9 +950,18 @@ class JasperServerService:
         return self._row_to_profile_read(dict(row))
 
     def delete_profile(self, profile_id: str) -> None:
-        """Delete a JasperReports Server profile and remove its vault secret."""
+        """Delete a JasperReports Server profile, clear references, and remove its vault secret."""
         self._require_profile_row(profile_id)
         with self.store.connection() as conn:
+            conn.execute(
+                "DELETE FROM jasperserver_deploy_tokens WHERE profile_id = ?",
+                (profile_id,),
+            )
+            self.store.clear_profile_references(
+                conn,
+                kind="jasperserver",
+                profile_id=profile_id,
+            )
             conn.execute("DELETE FROM jasperserver_profiles WHERE id = ?", (profile_id,))
         self._delete_password(profile_id)
         self._invalidate_session(profile_id)

@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from backend.app.config import get_db_path
 from backend.app.db.schemas import (
@@ -794,3 +794,80 @@ class SQLiteStore:
         with self.connection() as conn:
             cursor = conn.execute(f"DELETE FROM agent_sessions WHERE {where_sql}", params)
             return int(cursor.rowcount)
+
+    # -------------------------------------------------------------------------
+    # Cross-Table Profile Reference Cleanup (ON DELETE SET NULL semantics)
+    # -------------------------------------------------------------------------
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
+    def clear_profile_references(
+        self,
+        conn: sqlite3.Connection | None = None,
+        *,
+        kind: Literal["db", "sftp", "jasperserver"],
+        profile_id: str,
+    ) -> dict[str, int]:
+        """
+        Null out dangling foreign references in `client_systems`, `projects`, and linked
+        connector profiles when deleting a `db_profile`, `sftp_profile`, or
+        `jasperserver_profile`.
+        """
+        if conn is None:
+            with self.connection() as managed_conn:
+                return self.clear_profile_references(
+                    managed_conn,
+                    kind=kind,
+                    profile_id=profile_id,
+                )
+
+        now = utc_now_iso()
+        cleared: dict[str, int] = {}
+
+        if kind == "db":
+            if self._table_exists(conn, "client_systems"):
+                cur = conn.execute(
+                    "UPDATE client_systems SET db_profile_id = NULL, updated_at = ? WHERE db_profile_id = ?",
+                    (now, profile_id),
+                )
+                cleared["client_systems"] = int(cur.rowcount)
+            if self._table_exists(conn, "projects"):
+                cur = conn.execute(
+                    "UPDATE projects SET default_db_profile_id = NULL, updated_at = ? WHERE default_db_profile_id = ?",
+                    (now, profile_id),
+                )
+                cleared["projects"] = int(cur.rowcount)
+            if self._table_exists(conn, "sftp_profiles"):
+                cur = conn.execute(
+                    "UPDATE sftp_profiles SET linked_db_profile_id = NULL, updated_at = ? WHERE linked_db_profile_id = ?",
+                    (now, profile_id),
+                )
+                cleared["sftp_profiles"] = int(cur.rowcount)
+            if self._table_exists(conn, "jasperserver_profiles"):
+                cur = conn.execute(
+                    "UPDATE jasperserver_profiles SET linked_db_profile_id = NULL, updated_at = ? WHERE linked_db_profile_id = ?",
+                    (now, profile_id),
+                )
+                cleared["jasperserver_profiles"] = int(cur.rowcount)
+        elif kind == "sftp":
+            if self._table_exists(conn, "client_systems"):
+                cur = conn.execute(
+                    "UPDATE client_systems SET sftp_profile_id = NULL, updated_at = ? WHERE sftp_profile_id = ?",
+                    (now, profile_id),
+                )
+                cleared["client_systems"] = int(cur.rowcount)
+        elif kind == "jasperserver":
+            if self._table_exists(conn, "client_systems"):
+                cur = conn.execute(
+                    "UPDATE client_systems SET jasperserver_profile_id = NULL, updated_at = ? WHERE jasperserver_profile_id = ?",
+                    (now, profile_id),
+                )
+                cleared["client_systems"] = int(cur.rowcount)
+
+        return cleared

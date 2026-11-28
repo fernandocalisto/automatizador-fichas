@@ -27,6 +27,7 @@ try:
         STANDARD_SALUTEM_FIELDS,
         STANDARD_TAIL_FIELDS,
         get_page_metrics,
+        scaffold_free_report_jrxml,
         scaffold_salutem_jrxml,
     )
 except ModuleNotFoundError:  # pragma: no cover
@@ -53,6 +54,7 @@ except ModuleNotFoundError:  # pragma: no cover
         STANDARD_SALUTEM_FIELDS,
         STANDARD_TAIL_FIELDS,
         get_page_metrics,
+        scaffold_free_report_jrxml,
         scaffold_salutem_jrxml,
     )
 
@@ -75,5 +77,6 @@ __all__ = [
     "make_static_text",
     "make_styled_gap_text",
     "make_text_field",
+    "scaffold_free_report_jrxml",
     "scaffold_salutem_jrxml",
 ]

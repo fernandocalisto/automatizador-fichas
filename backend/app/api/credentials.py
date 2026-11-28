@@ -62,7 +62,7 @@ def update_default_credential(
     """Save or update local default credentials in SQLite settings + SecretVault."""
     try:
         return service.update_default(kind, payload)
-    except SecretVaultError as exc:
+    except (SecretVaultError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 

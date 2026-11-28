@@ -7,7 +7,7 @@ import json
 from dataclasses import asdict
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from backend.app.api.projects import (
@@ -26,7 +26,7 @@ from backend.app.core import (
     update_answer,
     update_question,
 )
-from backend.app.harnesses import get_default_registry
+from backend.app.harnesses import VALID_EFFORT_LEVELS, HarnessKind, get_default_registry
 from backend.app.jrxml import lint_jrxml, scaffold_free_report_jrxml, scaffold_salutem_jrxml
 from backend.app.mcp_tools.pdf_tools import extract_pdf_geometry
 from backend.app.mcp_tools.studio_tools import get_all_mcp_tool_descriptors
@@ -59,14 +59,61 @@ class QuestionMutationPayload(BaseModel):
 
 
 @router.get("/harnesses")
-def list_harnesses() -> list[dict[str, Any]]:
+def list_harnesses(request: Request) -> list[dict[str, Any]]:
     """List all 4 supported AI harnesses (AGY, OpenCode, Claude Code, Codex) and live availability."""
-    registry = get_default_registry()
+    registry = getattr(request.app.state, "harness_registry", None) or get_default_registry()
     statuses = registry.list_statuses()
     return [
         st.model_dump(mode="json") if hasattr(st, "model_dump") else asdict(st)
         for st in statuses
     ]
+
+
+@router.get("/harnesses/{harness_id}/models")
+def list_harness_models(harness_id: str, request: Request) -> dict[str, Any]:
+    """List available models and reasoning effort capabilities for a specific AI harness."""
+    normalized_id = harness_id.strip().lower()
+    registry = getattr(request.app.state, "harness_registry", None) or get_default_registry()
+    try:
+        harness = registry.get(normalized_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    models: list[dict[str, str]] = []
+    list_fn = getattr(harness, "list_models", None)
+    if callable(list_fn):
+        try:
+            raw_models = list_fn()
+            if isinstance(raw_models, list):
+                models = [
+                    {
+                        "id": str(item["id"]),
+                        "label": str(item.get("label") or item["id"]),
+                    }
+                    for item in raw_models
+                    if isinstance(item, dict) and item.get("id")
+                ]
+        except Exception:
+            models = []
+
+    is_agy = getattr(harness, "kind", None) == HarnessKind.AGY or normalized_id == "agy"
+    default_model: str | None = None
+    if is_agy:
+        import os
+
+        env_default = os.environ.get("AGY_DEFAULT_MODEL", "").strip()
+        default_model = env_default or None
+
+    return {
+        "harness_id": normalized_id,
+        "default_model": default_model,
+        "models": models,
+        "supports_effort": bool(is_agy),
+        "effort_levels": list(VALID_EFFORT_LEVELS) if is_agy else [],
+    }
 
 
 @router.get("/mcp-tools")

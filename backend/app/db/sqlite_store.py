@@ -660,6 +660,93 @@ class SQLiteStore:
             data["metadata"] = {}
         return data
 
+    def update_chat_message_metadata(
+        self,
+        project_id: str,
+        message_id: int,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Replace `metadata_json` for a single chat message belonging to `project_id`."""
+        metadata_json = json.dumps(metadata, ensure_ascii=False)
+        with self.connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE chat_messages
+                SET metadata_json = ?
+                WHERE id = ? AND project_id = ?
+                """,
+                (metadata_json, message_id, project_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM chat_messages WHERE id = ? AND project_id = ?",
+                (message_id, project_id),
+            ).fetchone()
+        return self._deserialize_chat_row(row) if row is not None else None
+
+    def resolve_visual_feedback_messages(
+        self,
+        project_id: str,
+        *,
+        message_ids: list[int] | None = None,
+        resolved_by_jrxml_version: int | None = None,
+    ) -> list[int]:
+        """
+        Mark unresolved `visual_region_feedback` chat messages for `project_id` as resolved
+        in SQLite (`metadata["resolved"] = True`), optionally restricted to `message_ids`.
+        Returns the list of message IDs updated.
+        """
+        now = utc_now_iso()
+        id_filter = {int(mid) for mid in message_ids} if message_ids is not None else None
+        resolved_ids: list[int] = []
+
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, metadata_json
+                FROM chat_messages
+                WHERE project_id = ?
+                ORDER BY id ASC
+                """,
+                (project_id,),
+            ).fetchall()
+
+            for row in rows:
+                mid = int(row["id"])
+                if id_filter is not None and mid not in id_filter:
+                    continue
+                raw_meta = row["metadata_json"] or "{}"
+                try:
+                    meta = json.loads(raw_meta)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("type") != "visual_region_feedback":
+                    continue
+                if meta.get("resolved") is True:
+                    continue
+
+                meta["resolved"] = True
+                meta["resolved_at"] = now
+                if resolved_by_jrxml_version is not None:
+                    meta["resolved_by_jrxml_version"] = int(resolved_by_jrxml_version)
+
+                conn.execute(
+                    "UPDATE chat_messages SET metadata_json = ? WHERE id = ?",
+                    (json.dumps(meta, ensure_ascii=False), mid),
+                )
+                resolved_ids.append(mid)
+
+            if resolved_ids:
+                conn.execute(
+                    "UPDATE projects SET updated_at = ? WHERE id = ?",
+                    (now, project_id),
+                )
+
+        return resolved_ids
+
     # -------------------------------------------------------------------------
     # App Settings
     # -------------------------------------------------------------------------

@@ -4,13 +4,19 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import importlib.util
 import inspect
 import json
 import os
 import shutil
-from collections.abc import AsyncIterator, Callable
+import subprocess
+import threading
+import time
+from collections import deque
+from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -18,16 +24,429 @@ from typing import Any
 from backend.app.harnesses.base import (
     STUDIO_MCP_TOOL_NAMES,
     BaseSubprocessHarness,
+    SubprocessChunk,
     SubprocessRunner,
     build_studio_mcp_server_spec,
+    compose_delta_system_prompt,
+    default_subprocess_runner,
 )
 from backend.app.harnesses.types import (
+    VALID_EFFORT_LEVELS,
     EventType,
     HarnessEvent,
     HarnessKind,
     HarnessRunRequest,
     HarnessStatus,
 )
+
+AGY_MODELS_CACHE_TTL_SECONDS: float = 300.0
+AGY_PERSISTENT_IDLE_TTL_SECONDS: float = 600.0
+AGY_EFFORT_LEVELS: tuple[str, ...] = VALID_EFFORT_LEVELS
+
+PoolKey = tuple[str, bool, str, str]
+
+
+def _extract_model_from_payload(
+    obj: dict[str, Any],
+    nested: dict[str, Any] | None = None,
+) -> str | None:
+    """Extrai o identificador de modelo de eventos JSON `init`, `step_update` ou `result`."""
+    candidates: list[Any] = []
+    if isinstance(nested, dict):
+        candidates.extend(
+            [
+                nested.get("resolved_model"),
+                nested.get("model"),
+                nested.get("model_id"),
+                nested.get("modelName"),
+            ]
+        )
+        usage = nested.get("usage")
+        if isinstance(usage, dict):
+            candidates.extend([usage.get("model"), usage.get("model_id")])
+        meta = nested.get("metadata")
+        if isinstance(meta, dict):
+            candidates.extend([meta.get("model"), meta.get("model_id")])
+    candidates.extend(
+        [
+            obj.get("resolved_model"),
+            obj.get("model"),
+            obj.get("model_id"),
+            obj.get("modelName"),
+        ]
+    )
+    for val in candidates:
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+@dataclass
+class AgyWarmSession:
+    """Subprocesso `agy` persistente mantido aquecido entre turnos via NDJSON stdio."""
+
+    key: PoolKey
+    proc: Any
+    lock: asyncio.Lock
+    loop: asyncio.AbstractEventLoop
+    last_used_monotonic: float
+    turn_count: int = 0
+    conversation_id: str | None = None
+    stderr_lines: deque[str] = field(default_factory=lambda: deque(maxlen=200))
+    stderr_task: asyncio.Task[None] | None = None
+
+    def is_alive(self) -> bool:
+        return getattr(self.proc, "returncode", None) is None
+
+
+class AgyPersistentSessionPool:
+    """
+    Pool thread/asyncio-safe de subprocessos `agy --input-format stream-json --output-format stream-json`
+    mantidos aquecidos por `(workspace_dir, gate_authorized, model, effort)`, eliminando a latência
+    de cold-start (~10s) entre turnos consecutivos.
+    """
+
+    def __init__(
+        self,
+        *,
+        idle_ttl_seconds: float = AGY_PERSISTENT_IDLE_TTL_SECONDS,
+        process_factory: Callable[..., Any] | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._idle_ttl_seconds = float(idle_ttl_seconds)
+        self._process_factory = process_factory or asyncio.create_subprocess_exec
+        self._clock = clock or time.monotonic
+        self._guard = threading.Lock()
+        self._sessions: dict[PoolKey, AgyWarmSession] = {}
+
+    @staticmethod
+    def make_key(
+        workspace_dir: Path | str,
+        *,
+        gate_authorized: bool,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> PoolKey:
+        return (
+            str(Path(workspace_dir).resolve()),
+            bool(gate_authorized),
+            (model or "").strip(),
+            (effort or "").strip().lower(),
+        )
+
+    def _is_expired(self, session: AgyWarmSession, now: float) -> bool:
+        return (now - session.last_used_monotonic) > self._idle_ttl_seconds
+
+    @staticmethod
+    def _is_compatible_for_request(
+        session: AgyWarmSession,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        resume_session_id: str | None,
+    ) -> bool:
+        if not session.is_alive() or session.loop is not loop or session.loop.is_closed():
+            return False
+        if resume_session_id:
+            return session.conversation_id == resume_session_id
+        # Sem resume_session_id: só reutiliza se ainda estiver pré-aquecido (turn_count == 0)
+        return session.turn_count == 0 and session.conversation_id is None
+
+    def has_warm_turn_session(
+        self,
+        key: PoolKey,
+        *,
+        resume_session_id: str | None = None,
+    ) -> bool:
+        """Retorna True se existe processo aquecido pronto para turno #2+ compatível."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        now = self._clock()
+        with self._guard:
+            session = self._sessions.get(key)
+        if session is None or not session.is_alive() or self._is_expired(session, now):
+            return False
+        if loop is not None and session.loop is not loop:
+            return False
+        if session.turn_count < 1:
+            return False
+        if resume_session_id and session.conversation_id and session.conversation_id != resume_session_id:
+            return False
+        return True
+
+    def active_count(self) -> int:
+        with self._guard:
+            return sum(1 for s in self._sessions.values() if s.is_alive())
+
+    async def _terminate_session(self, session: AgyWarmSession) -> None:
+        if session.stderr_task is not None and not session.stderr_task.done():
+            session.stderr_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await session.stderr_task
+
+        stdin = getattr(session.proc, "stdin", None)
+        if stdin is not None:
+            with contextlib.suppress(Exception):
+                stdin.close()
+
+        if session.is_alive():
+            with contextlib.suppress(ProcessLookupError, OSError, Exception):
+                session.proc.kill()
+            wait_fn = getattr(session.proc, "wait", None)
+            if callable(wait_fn):
+                with contextlib.suppress(TimeoutError, Exception):
+                    async with asyncio.timeout(2.0):
+                        await wait_fn()
+
+    async def _spawn_session(
+        self,
+        key: PoolKey,
+        cmd: Sequence[str],
+        cwd: Path,
+        *,
+        env: dict[str, str] | None = None,
+        resume_session_id: str | None = None,
+    ) -> AgyWarmSession:
+        merged_env = os.environ.copy()
+        if env:
+            merged_env.update(env)
+
+        cwd_path = Path(cwd).resolve()
+        cwd_path.mkdir(parents=True, exist_ok=True)
+
+        proc = await self._process_factory(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd_path),
+            env=merged_env,
+            limit=4 * 1024 * 1024,
+        )
+        loop = asyncio.get_running_loop()
+        session = AgyWarmSession(
+            key=key,
+            proc=proc,
+            lock=asyncio.Lock(),
+            loop=loop,
+            last_used_monotonic=self._clock(),
+            turn_count=0,
+            conversation_id=resume_session_id,
+        )
+
+        async def _pump_stderr() -> None:
+            reader = getattr(proc, "stderr", None)
+            if reader is None:
+                return
+            try:
+                while True:
+                    raw = await reader.readline()
+                    if not raw:
+                        break
+                    decoded = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if decoded.strip():
+                        session.stderr_lines.append(decoded.strip())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return
+
+        session.stderr_task = asyncio.create_task(_pump_stderr())
+        return session
+
+    async def evict_expired(self) -> int:
+        """Remove e encerra sessões ociosas além do TTL ou já finalizadas."""
+        now = self._clock()
+        stale: list[AgyWarmSession] = []
+        with self._guard:
+            for k in list(self._sessions.keys()):
+                sess = self._sessions[k]
+                if not sess.is_alive() or sess.loop.is_closed() or self._is_expired(sess, now):
+                    stale.append(self._sessions.pop(k))
+        for sess in stale:
+            await self._terminate_session(sess)
+        return len(stale)
+
+    async def _remove_if_same(self, key: PoolKey, session: AgyWarmSession) -> None:
+        with self._guard:
+            if self._sessions.get(key) is session:
+                self._sessions.pop(key, None)
+        await self._terminate_session(session)
+
+    async def warmup(
+        self,
+        key: PoolKey,
+        cmd: Sequence[str],
+        cwd: Path,
+        *,
+        env: dict[str, str] | None = None,
+        resume_session_id: str | None = None,
+    ) -> tuple[AgyWarmSession, bool]:
+        """
+        Garante um processo `agy` aquecido para `key`.
+        Retorna `(session, already_warm)`.
+        """
+        await self.evict_expired()
+        loop = asyncio.get_running_loop()
+        old_to_close: AgyWarmSession | None = None
+
+        with self._guard:
+            existing = self._sessions.get(key)
+            if existing is not None:
+                if self._is_compatible_for_request(
+                    existing, loop=loop, resume_session_id=resume_session_id
+                ):
+                    existing.last_used_monotonic = self._clock()
+                    return existing, True
+                old_to_close = self._sessions.pop(key)
+
+        if old_to_close is not None:
+            await self._terminate_session(old_to_close)
+
+        session = await self._spawn_session(
+            key,
+            cmd,
+            cwd,
+            env=env,
+            resume_session_id=resume_session_id,
+        )
+        with self._guard:
+            replaced = self._sessions.get(key)
+            self._sessions[key] = session
+        if replaced is not None and replaced is not session:
+            await self._terminate_session(replaced)
+        return session, False
+
+    async def run_turn(
+        self,
+        key: PoolKey,
+        cmd: Sequence[str],
+        cwd: Path,
+        stdin_line: bytes,
+        *,
+        env: dict[str, str] | None = None,
+        timeout_seconds: float | None = 300.0,
+        resume_session_id: str | None = None,
+    ) -> AsyncIterator[SubprocessChunk]:
+        """
+        Envia 1 linha NDJSON ao processo `agy` aquecido (sem fechar `stdin`) e faz streaming
+        de stdout até o evento `result` (ou EOF/erro). Recria automaticamente o processo caso
+        esteja morto, expirado, incompatível ou falhe durante o turno.
+        """
+        session, _ = await self.warmup(
+            key,
+            cmd,
+            cwd,
+            env=env,
+            resume_session_id=resume_session_id,
+        )
+
+        unhealthy = False
+        async with session.lock:
+            if not session.is_alive():
+                await self._remove_if_same(key, session)
+                session = await self._spawn_session(
+                    key,
+                    cmd,
+                    cwd,
+                    env=env,
+                    resume_session_id=resume_session_id,
+                )
+                with self._guard:
+                    self._sessions[key] = session
+
+            session.stderr_lines.clear()
+            payload = stdin_line if stdin_line.endswith(b"\n") else stdin_line + b"\n"
+            try:
+                if session.proc.stdin is None or session.proc.stdout is None:
+                    raise RuntimeError("Processo AGY persistente sem pipes stdin/stdout ativos.")
+
+                session.proc.stdin.write(payload)
+                await session.proc.stdin.drain()
+
+                async with asyncio.timeout(timeout_seconds):
+                    while True:
+                        raw_line = await session.proc.stdout.readline()
+                        if not raw_line:
+                            # EOF antes do evento result -> processo encerrou
+                            unhealthy = True
+                            for err_line in list(session.stderr_lines):
+                                yield SubprocessChunk(stream="stderr", line=err_line)
+                            rc = await session.proc.wait()
+                            yield SubprocessChunk(stream="exit", returncode=rc)
+                            break
+
+                        decoded = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                        yield SubprocessChunk(stream="stdout", line=decoded)
+
+                        stripped = decoded.strip()
+                        if stripped.startswith("{") and stripped.endswith("}"):
+                            try:
+                                obj = json.loads(stripped)
+                            except json.JSONDecodeError:
+                                obj = None
+                            if isinstance(obj, dict):
+                                ev_name = obj.get("event")
+                                if ev_name == "init" and obj.get("conversation_id"):
+                                    session.conversation_id = str(obj["conversation_id"])
+                                elif ev_name == "result":
+                                    res = obj.get("result")
+                                    if isinstance(res, dict):
+                                        if res.get("conversation_id"):
+                                            session.conversation_id = str(res["conversation_id"])
+                                        status_val = str(res.get("status") or "SUCCESS").upper()
+                                        if status_val != "SUCCESS":
+                                            unhealthy = True
+                                    break
+                                elif ev_name in ("error", "permission_request", "approval_request"):
+                                    unhealthy = True
+                                    break
+
+                if not unhealthy and session.is_alive():
+                    session.turn_count += 1
+                    session.last_used_monotonic = self._clock()
+                else:
+                    unhealthy = True
+            except BaseException:
+                unhealthy = True
+                await self._remove_if_same(key, session)
+                raise
+
+        if unhealthy:
+            await self._remove_if_same(key, session)
+
+    async def close_workspace(self, workspace_dir: Path | str) -> int:
+        """Encerra todos os processos aquecidos vinculados a um diretório de workspace."""
+        target_ws = str(Path(workspace_dir).resolve())
+        to_close: list[AgyWarmSession] = []
+        with self._guard:
+            for k in list(self._sessions.keys()):
+                if k[0] == target_ws:
+                    to_close.append(self._sessions.pop(k))
+        for sess in to_close:
+            await self._terminate_session(sess)
+        return len(to_close)
+
+    async def shutdown_all(self) -> int:
+        """Encerra de forma limpa todos os processos `agy` persistentes do pool."""
+        with self._guard:
+            to_close = list(self._sessions.values())
+            self._sessions.clear()
+        for sess in to_close:
+            await self._terminate_session(sess)
+        return len(to_close)
+
+
+_DEFAULT_AGY_SESSION_POOL: AgyPersistentSessionPool | None = None
+
+
+def get_agy_session_pool() -> AgyPersistentSessionPool:
+    """Retorna o pool singleton global de sessões persistentes do AGY CLI."""
+    global _DEFAULT_AGY_SESSION_POOL
+    if _DEFAULT_AGY_SESSION_POOL is None:
+        _DEFAULT_AGY_SESSION_POOL = AgyPersistentSessionPool()
+    return _DEFAULT_AGY_SESSION_POOL
 
 
 class AgyHarness(BaseSubprocessHarness):
@@ -52,6 +471,9 @@ class AgyHarness(BaseSubprocessHarness):
         local_appdata_dir: str | Path | None = None,
         default_timeout: float = 300.0,
         dangerously_skip_permissions: bool | None = None,
+        session_pool: AgyPersistentSessionPool | None = None,
+        models_runner: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+        models_cache_ttl: float = AGY_MODELS_CACHE_TTL_SECONDS,
     ) -> None:
         super().__init__(
             runner=runner,
@@ -61,11 +483,166 @@ class AgyHarness(BaseSubprocessHarness):
         self._sdk_spec_finder = sdk_spec_finder or importlib.util.find_spec
         self._sdk_importer = sdk_importer or importlib.import_module
         self._local_appdata_dir = local_appdata_dir
+        self._session_pool = session_pool
+        self._models_runner = models_runner
+        self._models_cache_ttl = float(models_cache_ttl)
+        self._models_cache_lock = threading.Lock()
+        self._models_cache: list[dict[str, str]] | None = None
+        self._models_cache_ts: float = 0.0
         if dangerously_skip_permissions is None:
             env_val = os.environ.get("AGY_SKIP_PERMISSIONS", "1").strip().lower()
             self._dangerously_skip_permissions = env_val not in ("0", "false", "no", "off")
         else:
             self._dangerously_skip_permissions = bool(dangerously_skip_permissions)
+
+    def _get_session_pool(self) -> AgyPersistentSessionPool:
+        return self._session_pool if self._session_pool is not None else get_agy_session_pool()
+
+    def _should_use_persistent_pool(self) -> bool:
+        if self._runner is not default_subprocess_runner:
+            return False
+        env_val = os.environ.get("AGY_PERSISTENT_SESSION", "1").strip().lower()
+        return env_val not in ("0", "false", "no", "off")
+
+    @staticmethod
+    def _parse_models_output(raw_stdout: str) -> list[dict[str, str]]:
+        """Converte a saída stdout de `agy models` (`<id>\\t<label>`) em lista estruturada."""
+        models: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for raw_line in (raw_stdout or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            if "\t" in line:
+                left, right = line.split("\t", 1)
+                model_id = left.strip()
+                label = right.strip() or model_id
+            else:
+                # Ignora mensagens de log/status com espaços sem tabulação
+                if " " in line or line.endswith("..."):
+                    continue
+                model_id = line
+                label = line
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            models.append({"id": model_id, "label": label})
+        return models
+
+    def list_models(self, *, force_refresh: bool = False) -> list[dict[str, str]]:
+        """
+        Lista os modelos disponíveis no `agy` CLI (`agy models`) com cache em memória de 5 minutos
+        e fallback seguro para lista vazia em caso de indisponibilidade ou erro.
+        """
+        now = time.monotonic()
+        if not force_refresh:
+            with self._models_cache_lock:
+                if (
+                    self._models_cache is not None
+                    and (now - self._models_cache_ts) < self._models_cache_ttl
+                ):
+                    return [dict(item) for item in self._models_cache]
+
+        exe = self._find_cli_executable()
+        if not exe:
+            return []
+
+        try:
+            if self._models_runner is not None:
+                completed = self._models_runner([exe, "models"])
+            else:
+                completed = subprocess.run(
+                    [exe, "models"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15.0,
+                    check=False,
+                )
+        except (OSError, subprocess.SubprocessError):
+            return []
+
+        if completed.returncode != 0 and not (completed.stdout or "").strip():
+            return []
+
+        parsed = self._parse_models_output(completed.stdout or "")
+        if completed.returncode == 0 or parsed:
+            with self._models_cache_lock:
+                self._models_cache = list(parsed)
+                self._models_cache_ts = time.monotonic()
+        return [dict(item) for item in parsed]
+
+    def has_warm_session(
+        self,
+        workspace_dir: Path | str,
+        *,
+        gate_authorized: bool,
+        model: str | None = None,
+        effort: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> bool:
+        """Indica se há um processo persistente aquecido no turno #2+ para esta configuração."""
+        if not self._should_use_persistent_pool():
+            return False
+        key = AgyPersistentSessionPool.make_key(
+            workspace_dir,
+            gate_authorized=gate_authorized,
+            model=model,
+            effort=effort,
+        )
+        return self._get_session_pool().has_warm_turn_session(
+            key, resume_session_id=resume_session_id
+        )
+
+    async def warmup(
+        self,
+        workspace_dir: Path,
+        *,
+        phase: str = "jrxml",
+        gate_authorized: bool = False,
+        model: str | None = None,
+        effort: str | None = None,
+        resume_session_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Pré-aquece um subprocesso `agy` persistente para o workspace/configuração informados."""
+        if not self._should_use_persistent_pool():
+            return {"warmed": False, "already_warm": False, "reason": "persistent_session_disabled"}
+        if self.is_sdk_available():
+            return {"warmed": False, "already_warm": False, "reason": "sdk_mode_active"}
+        exe = self._find_cli_executable()
+        if not exe:
+            return {"warmed": False, "already_warm": False, "reason": "agy_cli_not_found"}
+
+        ws_path = Path(workspace_dir).resolve()
+        self.ensure_workspace_mcp_config(ws_path)
+        dummy_req = HarnessRunRequest(
+            workspace_dir=ws_path,
+            phase="extraction" if phase == "extraction" else "jrxml",
+            prompt="warmup",
+            gate_authorized=gate_authorized,
+            model=model,
+            effort=effort,
+            resume_session_id=resume_session_id,
+        )
+        cmd = self.build_cli_command(exe, dummy_req, persistent=True)
+        key = AgyPersistentSessionPool.make_key(
+            ws_path,
+            gate_authorized=gate_authorized,
+            model=dummy_req.model,
+            effort=dummy_req.effort,
+        )
+        _, already_warm = await self._get_session_pool().warmup(
+            key,
+            cmd,
+            ws_path,
+            resume_session_id=resume_session_id,
+        )
+        return {"warmed": True, "already_warm": already_warm}
+
+    async def close_workspace_sessions(self, workspace_dir: Path | str) -> int:
+        """Encerra processos persistentes aquecidos pertencentes a um workspace."""
+        return await self._get_session_pool().close_workspace(workspace_dir)
 
     def is_sdk_available(self) -> bool:
         """Verifica dinamicamente se o pacote `google.antigravity` está instalado."""
@@ -139,6 +716,8 @@ class AgyHarness(BaseSubprocessHarness):
             )
             if request.model and ("model" in params or accepts_var_kw):
                 cfg_kwargs["model"] = request.model
+            if request.effort and ("effort" in params or accepts_var_kw):
+                cfg_kwargs["effort"] = request.effort
             if "cwd" in params:
                 cfg_kwargs["cwd"] = str(request.workspace_dir.resolve())
             elif "workspace_dir" in params:
@@ -149,6 +728,7 @@ class AgyHarness(BaseSubprocessHarness):
         config = config_cls(**cfg_kwargs)
 
         sdk_session_id: str | None = None
+        sdk_resolved_model: str | None = None
         async with asyncio.timeout(request.timeout_seconds):
             async with agent_cls(config) as agent:
                 response = await agent.chat(user_prompt)
@@ -160,6 +740,13 @@ class AgyHarness(BaseSubprocessHarness):
                 )
                 if raw_sid:
                     sdk_session_id = str(raw_sid)
+                raw_sdk_model = (
+                    getattr(response, "model", None)
+                    or getattr(agent, "model", None)
+                    or request.model
+                )
+                if raw_sdk_model:
+                    sdk_resolved_model = str(raw_sdk_model)
 
                 queue: asyncio.Queue[HarnessEvent | BaseException | None] = asyncio.Queue()
 
@@ -249,6 +836,9 @@ class AgyHarness(BaseSubprocessHarness):
         if sdk_session_id:
             sdk_meta["session_id"] = sdk_session_id
             sdk_meta["conversation_id"] = sdk_session_id
+        if sdk_resolved_model:
+            sdk_meta["resolved_model"] = sdk_resolved_model
+            sdk_meta["model"] = sdk_resolved_model
         yield HarnessEvent(
             type=EventType.DONE,
             harness=self.kind,
@@ -315,6 +905,8 @@ class AgyHarness(BaseSubprocessHarness):
         self,
         executable: str,
         request: HarnessRunRequest,
+        *,
+        persistent: bool = False,
     ) -> list[str]:
         """Constrói o comando oficial headless/streaming do `agy` CLI (`--input-format stream-json`)."""
         cmd: list[str] = [
@@ -334,7 +926,9 @@ class AgyHarness(BaseSubprocessHarness):
             cmd.extend(["--conversation", request.resume_session_id])
         if request.model:
             cmd.extend(["--model", request.model])
-        if request.timeout_seconds and request.timeout_seconds > 0:
+        if request.effort:
+            cmd.extend(["--effort", request.effort])
+        if not persistent and request.timeout_seconds and request.timeout_seconds > 0:
             cmd.extend(["--print-timeout", f"{max(1, int(request.timeout_seconds))}s"])
         return cmd
 
@@ -376,6 +970,11 @@ class AgyHarness(BaseSubprocessHarness):
                         conv_id = obj.get("conversation_id")
                         if conv_id:
                             state["conversation_id"] = str(conv_id)
+                        init_model = _extract_model_from_payload(
+                            obj, obj.get("init") if isinstance(obj.get("init"), dict) else None
+                        )
+                        if init_model:
+                            state["model"] = init_model
                         return []
 
                     if event_name == "step_update":
@@ -384,6 +983,9 @@ class AgyHarness(BaseSubprocessHarness):
                             return []
                         if su.get("conversation_id"):
                             state["conversation_id"] = str(su["conversation_id"])
+                        su_model = _extract_model_from_payload(obj, su)
+                        if su_model:
+                            state["model"] = su_model
 
                         step_type = str(su.get("step_type") or "")
                         step_state = str(su.get("state") or "")
@@ -548,11 +1150,17 @@ class AgyHarness(BaseSubprocessHarness):
                         state["saw_result"] = True
                         res = obj.get("result")
                         if not isinstance(res, dict):
+                            res_model_top = _extract_model_from_payload(obj, None)
+                            if res_model_top:
+                                state["model"] = res_model_top
                             return []
                         if res.get("conversation_id"):
                             state["conversation_id"] = str(res["conversation_id"])
                         if isinstance(res.get("usage"), dict):
                             state["usage"] = dict(res["usage"])
+                        res_model = _extract_model_from_payload(obj, res)
+                        if res_model:
+                            state["model"] = res_model
 
                         status_val = str(res.get("status") or "SUCCESS").upper()
                         if status_val != "SUCCESS":
@@ -664,9 +1272,36 @@ class AgyHarness(BaseSubprocessHarness):
     ) -> AsyncIterator[HarnessEvent]:
         """Executa o turno via binário CLI `agy` em modo headless `--input-format stream-json --output-format stream-json`."""
         self.ensure_workspace_mcp_config(request.workspace_dir)
-        cmd = self.build_cli_command(executable, request)
+        use_persistent = self._should_use_persistent_pool()
 
-        combined_prompt = f"{system_prompt}\n\n---\n\n{user_prompt}"
+        effective_system_prompt = system_prompt
+        pool_key: PoolKey | None = None
+        if use_persistent:
+            pool_key = AgyPersistentSessionPool.make_key(
+                request.workspace_dir,
+                gate_authorized=request.gate_authorized,
+                model=request.model,
+                effort=request.effort,
+            )
+            if (
+                request.system_prompt_override is None
+                and self._get_session_pool().has_warm_turn_session(
+                    pool_key, resume_session_id=request.resume_session_id
+                )
+            ):
+                effective_system_prompt = compose_delta_system_prompt(
+                    request.phase,
+                    gate_authorized=request.gate_authorized,
+                    workspace_dir=request.workspace_dir,
+                )
+
+        cmd = self.build_cli_command(executable, request, persistent=use_persistent)
+
+        combined_prompt = (
+            f"{effective_system_prompt}\n\n---\n\n{user_prompt}"
+            if effective_system_prompt.strip()
+            else user_prompt
+        )
         stdin_envelope = (
             json.dumps(
                 {"event": "user", "message": {"content": combined_prompt}},
@@ -678,12 +1313,24 @@ class AgyHarness(BaseSubprocessHarness):
         had_error = False
         parse_state: dict[str, Any] = {}
 
-        async for chunk in self._exec_lines(
-            cmd,
-            cwd=request.workspace_dir,
-            stdin_data=stdin_envelope.encode("utf-8"),
-            timeout_seconds=request.timeout_seconds,
-        ):
+        if use_persistent and pool_key is not None:
+            chunk_stream = self._get_session_pool().run_turn(
+                pool_key,
+                cmd,
+                request.workspace_dir,
+                stdin_envelope.encode("utf-8"),
+                timeout_seconds=request.timeout_seconds,
+                resume_session_id=request.resume_session_id,
+            )
+        else:
+            chunk_stream = self._exec_lines(
+                cmd,
+                cwd=request.workspace_dir,
+                stdin_data=stdin_envelope.encode("utf-8"),
+                timeout_seconds=request.timeout_seconds,
+            )
+
+        async for chunk in chunk_stream:
             if chunk.stream == "stdout":
                 for ev in self._parse_cli_line(chunk.line, state=parse_state):
                     if ev.type == EventType.ERROR:
@@ -739,12 +1386,16 @@ class AgyHarness(BaseSubprocessHarness):
             gate_ev = self._make_gate_event_if_needed(request)
             if gate_ev is not None:
                 yield gate_ev
-            done_meta: dict[str, Any] = {"mode": "cli"}
+            done_meta: dict[str, Any] = {"mode": "cli_persistent" if use_persistent else "cli"}
             if parse_state.get("conversation_id"):
                 done_meta["conversation_id"] = parse_state["conversation_id"]
                 done_meta["session_id"] = parse_state["conversation_id"]
             if parse_state.get("usage"):
                 done_meta["usage"] = parse_state["usage"]
+            resolved_model = parse_state.get("model") or request.model
+            if resolved_model:
+                done_meta["resolved_model"] = resolved_model
+                done_meta["model"] = resolved_model
             yield HarnessEvent(
                 type=EventType.DONE,
                 harness=self.kind,

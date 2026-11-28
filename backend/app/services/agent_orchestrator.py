@@ -34,9 +34,11 @@ from backend.app.harnesses import (
     HarnessRegistry,
     HarnessRunRequest,
     PhaseKind,
+    compose_delta_system_prompt,
     compose_phase_system_prompt,
     get_default_registry,
 )
+from backend.app.mcp_tools.pdf_tools import render_pdf_to_pngs
 from backend.app.mcp_tools.studio_tools import get_all_mcp_tool_descriptors
 from backend.app.services.workspace_service import (
     WorkspaceService,
@@ -285,6 +287,78 @@ def _collect_preview_image_paths(workspace_dir: Path, phase: PhaseKind) -> list[
     return images
 
 
+def _ensure_source_pdf_page_images(workspace_dir: Path, *, dpi: int = 150) -> list[Path]:
+    """
+    Renderiza `uploads/source.pdf` em PNGs (150 DPI) dentro de `exports/source_pages/` uma única vez,
+    com cache baseado em `(mtime_ns, sha256)` de `source.pdf`, para envio multimodal na fase `jrxml`.
+    Degrada graciosamente para `[]` caso o PDF esteja ausente ou ilegível.
+    """
+    source_pdf = (workspace_dir / "uploads" / "source.pdf").resolve()
+    if not source_pdf.is_file():
+        return []
+
+    source_pages_dir = (workspace_dir / "exports" / "source_pages").resolve()
+    cache_meta_path = source_pages_dir / "_cache.json"
+
+    try:
+        stat = source_pdf.stat()
+        pdf_sha256 = _sha256_file(source_pdf)
+    except OSError:
+        return []
+
+    if cache_meta_path.is_file():
+        try:
+            cached = json.loads(cache_meta_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(cached, dict)
+                and cached.get("sha256") == pdf_sha256
+                and cached.get("mtime_ns") == stat.st_mtime_ns
+                and cached.get("dpi") == dpi
+                and isinstance(cached.get("files"), list)
+                and cached["files"]
+            ):
+                cached_paths = [Path(p).resolve() for p in cached["files"]]
+                if all(p.is_file() for p in cached_paths):
+                    return cached_paths[:_MAX_PREVIEW_IMAGES]
+        except Exception:
+            pass
+
+    try:
+        source_pages_dir.mkdir(parents=True, exist_ok=True)
+        for old_png in source_pages_dir.glob("*.png"):
+            old_png.unlink(missing_ok=True)
+        rendered = render_pdf_to_pngs(source_pdf, source_pages_dir, dpi=dpi)
+        resolved = [p.resolve() for p in rendered[:_MAX_PREVIEW_IMAGES]]
+        cache_meta_path.write_text(
+            json.dumps(
+                {
+                    "sha256": pdf_sha256,
+                    "mtime_ns": stat.st_mtime_ns,
+                    "dpi": dpi,
+                    "files": [str(p) for p in resolved],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        return resolved
+    except Exception:
+        return []
+
+
+def _collect_workspace_artifact_files(workspace_dir: Path) -> dict[str, str]:
+    """Retorna mapa `{filename: absolute_path}` dos artefatos atualmente presentes em `artifacts/`."""
+    artifacts_dir = workspace_dir / "artifacts"
+    if not artifacts_dir.is_dir():
+        return {}
+    result: dict[str, str] = {}
+    for entry in sorted(artifacts_dir.iterdir(), key=lambda p: p.name):
+        if entry.is_file():
+            result[entry.name] = str(entry.resolve())
+    return result
+
+
 class AgentOrchestratorService:
     """
     Orquestra turnos de agentes de IA (AGY, OpenCode, Claude Code, Codex) com:
@@ -406,14 +480,30 @@ class AgentOrchestratorService:
         gate_authorized: bool,
         recent_messages: list[ChatMessageRead],
         model: str | None = None,
+        effort: str | None = None,
         timeout_seconds: float = 300.0,
         resume_session_id: str | None = None,
+        is_warm_session: bool = False,
     ) -> HarnessRunRequest:
         workspace_dir = Path(project.workspace_dir)
-        image_paths = _collect_preview_image_paths(workspace_dir, phase)
 
-        gates_context = [g.model_dump(mode="json") for g in project.gates]
-        recent_chat_context = [
+        # Na fase jrxml, anexa PRIMEIRO as páginas renderizadas do source.pdf original (cached em exports/source_pages/)
+        source_pdf_pages: list[Path] = []
+        if phase == "jrxml" and project.has_pdf:
+            source_pdf_pages = _ensure_source_pdf_page_images(workspace_dir)
+
+        preview_images = _collect_preview_image_paths(workspace_dir, phase)
+
+        image_paths: list[Path] = []
+        seen_image_paths: set[Path] = set()
+        for img in (*source_pdf_pages, *preview_images):
+            resolved_img = img.resolve()
+            if resolved_img not in seen_image_paths:
+                image_paths.append(resolved_img)
+                seen_image_paths.add(resolved_img)
+
+        # Inclui APENAS anotações visuais pendentes (não resolvidas) e seus recortes PNG
+        visual_feedbacks = [
             {
                 "id": msg.id,
                 "role": msg.role,
@@ -421,18 +511,12 @@ class AgentOrchestratorService:
                 "created_at": msg.created_at,
                 "metadata": msg.metadata,
             }
-            for msg in recent_messages[-_MAX_RECENT_CHAT_MESSAGES:]
+            for msg in recent_messages
+            if isinstance(msg.metadata, dict)
+            and msg.metadata.get("type") == "visual_region_feedback"
+            and not msg.metadata.get("resolved")
         ]
 
-        visual_feedbacks = [
-            item
-            for item in recent_chat_context
-            if isinstance(item.get("metadata"), dict)
-            and item["metadata"].get("type") == "visual_region_feedback"
-        ]
-
-        # Inclui recortes PNG de feedback visual existentes para inspeção multimodal
-        seen_image_paths = {p.resolve() for p in image_paths}
         for fb in visual_feedbacks:
             crop_raw = fb.get("metadata", {}).get("crop_png_path")
             if isinstance(crop_raw, str) and crop_raw.strip():
@@ -441,63 +525,108 @@ class AgentOrchestratorService:
                     image_paths.append(crop_path.resolve())
                     seen_image_paths.add(crop_path.resolve())
 
-        available_tools = [
-            {
-                "name": descriptor["name"],
-                "description": descriptor.get("description", ""),
-                "inputSchema": descriptor.get("inputSchema", {}),
-            }
-            for descriptor in get_all_mcp_tool_descriptors()
-        ]
-
-        project_context: dict[str, Any] = {
-            "id": project.id,
-            "slug": project.slug,
-            "name": project.name,
-            "description": project.description,
-            "project_kind": project.project_kind,
-            "current_stage": project.current_stage,
-            "entry_mode": project.entry_mode,
-            "preferred_harness": project.preferred_harness,
-            "template_db_id": project.template_db_id,
-            "default_db_profile_id": project.default_db_profile_id,
-            "source_origin": dict(project.source_origin),
-            "has_pdf": project.has_pdf,
-            "latest_artifacts": dict(project.latest_artifacts),
-            "gates": gates_context,
-        }
-        if project.has_pdf:
-            project_context["source_pdf_path"] = str(
-                (workspace_dir / "uploads" / "source.pdf").resolve()
-            )
-
         selected_skill = (
             "manutencao_relatorio" if project.project_kind == "free_report" else None
         )
 
-        extra_context: dict[str, Any] = {
-            "project": project_context,
-            "phase": phase,
-            "gate": {
-                "name": gate_name,
-                "authorized": gate_authorized,
-            },
-            "recent_chat": recent_chat_context,
-            "available_tools": available_tools,
-        }
-        if selected_skill is not None:
-            extra_context["skill_name"] = selected_skill
-        if visual_feedbacks:
-            extra_context["visual_region_feedbacks"] = visual_feedbacks
+        is_continuation = bool(resume_session_id or is_warm_session)
 
-        system_prompt_override: str | None = None
-        if selected_skill is not None:
-            system_prompt_override = compose_phase_system_prompt(
+        if is_continuation:
+            # Turno de continuação (sessão retomada ou processo quente turno #2+):
+            # envia prompt delta enxuto sem repetir SKILL.md de 30KB nem histórico completo
+            extra_context: dict[str, Any] = {
+                "continuation": True,
+                "project_id": project.id,
+                "phase": phase,
+                "gate": {
+                    "name": gate_name,
+                    "authorized": gate_authorized,
+                },
+                "latest_artifacts": dict(project.latest_artifacts),
+            }
+            artifact_files = _collect_workspace_artifact_files(workspace_dir)
+            if artifact_files:
+                extra_context["artifact_files"] = artifact_files
+            if selected_skill is not None:
+                extra_context["skill_name"] = selected_skill
+            if source_pdf_pages:
+                extra_context["source_pdf_pages"] = [str(p) for p in source_pdf_pages]
+            if visual_feedbacks:
+                extra_context["visual_region_feedbacks"] = visual_feedbacks
+
+            system_prompt_override: str | None = compose_delta_system_prompt(
                 phase=phase,
                 gate_authorized=gate_authorized,
                 workspace_dir=workspace_dir,
-                skill_name=selected_skill,
             )
+        else:
+            gates_context = [g.model_dump(mode="json") for g in project.gates]
+            recent_chat_context = [
+                {
+                    "id": msg.id,
+                    "role": msg.role,
+                    "content": msg.content,
+                    "created_at": msg.created_at,
+                    "metadata": msg.metadata,
+                }
+                for msg in recent_messages[-_MAX_RECENT_CHAT_MESSAGES:]
+            ]
+
+            available_tools = [
+                {
+                    "name": descriptor["name"],
+                    "description": descriptor.get("description", ""),
+                    "inputSchema": descriptor.get("inputSchema", {}),
+                }
+                for descriptor in get_all_mcp_tool_descriptors()
+            ]
+
+            project_context: dict[str, Any] = {
+                "id": project.id,
+                "slug": project.slug,
+                "name": project.name,
+                "description": project.description,
+                "project_kind": project.project_kind,
+                "current_stage": project.current_stage,
+                "entry_mode": project.entry_mode,
+                "preferred_harness": project.preferred_harness,
+                "template_db_id": project.template_db_id,
+                "default_db_profile_id": project.default_db_profile_id,
+                "source_origin": dict(project.source_origin),
+                "has_pdf": project.has_pdf,
+                "latest_artifacts": dict(project.latest_artifacts),
+                "gates": gates_context,
+            }
+            if project.has_pdf:
+                project_context["source_pdf_path"] = str(
+                    (workspace_dir / "uploads" / "source.pdf").resolve()
+                )
+
+            extra_context = {
+                "project": project_context,
+                "phase": phase,
+                "gate": {
+                    "name": gate_name,
+                    "authorized": gate_authorized,
+                },
+                "recent_chat": recent_chat_context,
+                "available_tools": available_tools,
+            }
+            if selected_skill is not None:
+                extra_context["skill_name"] = selected_skill
+            if source_pdf_pages:
+                extra_context["source_pdf_pages"] = [str(p) for p in source_pdf_pages]
+            if visual_feedbacks:
+                extra_context["visual_region_feedbacks"] = visual_feedbacks
+
+            system_prompt_override = None
+            if selected_skill is not None:
+                system_prompt_override = compose_phase_system_prompt(
+                    phase=phase,
+                    gate_authorized=gate_authorized,
+                    workspace_dir=workspace_dir,
+                    skill_name=selected_skill,
+                )
 
         return HarnessRunRequest(
             workspace_dir=workspace_dir,
@@ -505,6 +634,7 @@ class AgentOrchestratorService:
             prompt=prompt,
             gate_authorized=gate_authorized,
             model=model,
+            effort=effort,
             image_paths=image_paths,
             extra_context=extra_context,
             timeout_seconds=timeout_seconds,
@@ -617,6 +747,7 @@ class AgentOrchestratorService:
         prompt: str,
         harness_id: str | None = None,
         model: str | None = None,
+        effort: str | None = None,
         explicit_gate_authorized: bool = False,
         timeout_seconds: float = 300.0,
         persist_user_message: bool = True,
@@ -654,6 +785,10 @@ class AgentOrchestratorService:
             user_meta = dict(user_message_metadata or {})
             user_meta.setdefault("gate_authorized", gate_authorized)
             user_meta.setdefault("harness", harness_kind.value)
+            if model:
+                user_meta.setdefault("model", model)
+            if effort:
+                user_meta.setdefault("effort", effort)
             self.workspace_service.add_chat_message(
                 project_id,
                 ChatMessageCreate(
@@ -707,6 +842,17 @@ class AgentOrchestratorService:
             max_attempts = 2 if active_resume_session_id else 1
             for attempt in range(max_attempts):
                 attempt_resume_id = active_resume_session_id if attempt == 0 else None
+                has_warm_fn = getattr(harness, "has_warm_session", None)
+                is_warm_session = bool(
+                    callable(has_warm_fn)
+                    and has_warm_fn(
+                        workspace_dir,
+                        gate_authorized=gate_authorized,
+                        model=model,
+                        effort=effort,
+                        resume_session_id=attempt_resume_id,
+                    )
+                )
                 run_request = self._build_run_request(
                     project,
                     phase=phase,
@@ -715,8 +861,10 @@ class AgentOrchestratorService:
                     gate_authorized=gate_authorized,
                     recent_messages=recent_messages,
                     model=model,
+                    effort=effort,
                     timeout_seconds=timeout_seconds,
                     resume_session_id=attempt_resume_id,
+                    is_warm_session=is_warm_session,
                 )
                 aiter = harness.stream(run_request).__aiter__()
                 retry_fresh = False
@@ -951,6 +1099,13 @@ class AgentOrchestratorService:
                     refreshed_after_sync = self.workspace_service.get_project(project_id)
                     latest_artifacts_map = dict(refreshed_after_sync.latest_artifacts)
                     for sync_meta in synced_artifacts:
+                        if sync_meta.get("artifact_type") == "jrxml":
+                            resolved_fb_ids = self.workspace_service.resolve_visual_feedback_messages(
+                                project_id,
+                                resolved_by_jrxml_version=int(sync_meta["version_num"]),
+                            )
+                            if resolved_fb_ids:
+                                sync_meta["resolved_feedback_ids"] = resolved_fb_ids
                         sync_meta["latest_artifacts"] = latest_artifacts_map
                         sync_event = HarnessEvent(
                             type=EventType.TOOL_RESULT,
@@ -1004,9 +1159,16 @@ class AgentOrchestratorService:
                 elif saw_gate_request:
                     assistant_text = "Análise concluída. Aguardando aprovação para prosseguir ao Gate 2."
 
+            raw_done_meta = dict(buffered_done.metadata) if buffered_done is not None else {}
+            resolved_model = (
+                raw_done_meta.get("resolved_model")
+                or raw_done_meta.get("model")
+                or model
+            )
+
             assistant_metadata: dict[str, Any] = {
                 "harness": harness_kind.value,
-                "model": model,
+                "model": resolved_model,
                 "phase": phase,
                 "gate_name": gate_name,
                 "gate_authorized": gate_authorized,
@@ -1018,6 +1180,8 @@ class AgentOrchestratorService:
                 "cancelled": cancelled,
                 "had_error": had_error,
             }
+            if effort:
+                assistant_metadata["effort"] = effort
 
             saved_assistant_msg: ChatMessageRead | None = None
             if assistant_text or thought_parts or tool_calls_log or synced_artifacts or saw_gate_request:
@@ -1032,7 +1196,7 @@ class AgentOrchestratorService:
                 )
 
             latest_proj_state = self.workspace_service.get_project(project_id)
-            final_done_meta = dict(buffered_done.metadata) if buffered_done is not None else {}
+            final_done_meta = dict(raw_done_meta)
 
             # Persiste sessão externa do harness para continuidade nos próximos turnos
             persisted_session_id: str | None = None
@@ -1064,6 +1228,11 @@ class AgentOrchestratorService:
                     "had_error": had_error,
                 }
             )
+            if resolved_model:
+                final_done_meta["resolved_model"] = resolved_model
+                final_done_meta["model"] = resolved_model
+            if effort:
+                final_done_meta["effort"] = effort
             if persisted_session_id:
                 final_done_meta["session_id"] = persisted_session_id
             if fallback_from_resume:
@@ -1185,17 +1354,103 @@ class AgentOrchestratorService:
 
     def _count_pending_visual_feedback(self, project_id: str) -> int:
         """
-        Conta anotações `visual_region_feedback` da fase `jrxml` criadas após a última
-        resposta do assistente (ou todas, caso o assistente ainda não tenha respondido).
+        Conta anotações `visual_region_feedback` não resolvidas da fase `jrxml` criadas após
+        a última resposta do assistente (ou todas não resolvidas, caso ainda não haja resposta).
         """
         messages = self.workspace_service.list_chat_messages(project_id, phase="jrxml")
         pending = 0
         for msg in reversed(messages):
             if msg.role == "assistant":
                 break
-            if isinstance(msg.metadata, dict) and msg.metadata.get("type") == "visual_region_feedback":
+            if (
+                isinstance(msg.metadata, dict)
+                and msg.metadata.get("type") == "visual_region_feedback"
+                and not msg.metadata.get("resolved")
+            ):
                 pending += 1
         return pending
+
+    async def warmup_agent(
+        self,
+        project_id: str,
+        *,
+        phase: PhaseKind = "jrxml",
+        harness_id: str | None = None,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> dict[str, Any]:
+        """Pré-aquece um processo persistente do harness (ex.: AGY) para o projeto/fase."""
+        project, harness, harness_kind, gate_name = self.validate_turn_request(
+            project_id,
+            phase=phase,
+            harness_id=harness_id,
+        )
+        warmup_fn = getattr(harness, "warmup", None)
+        if not callable(warmup_fn):
+            return {
+                "ok": True,
+                "warmed": False,
+                "already_warm": False,
+                "project_id": project.id,
+                "phase": phase,
+                "harness_id": harness_kind.value,
+                "reason": "warmup_not_supported",
+            }
+
+        current_gate = self._find_gate(project, gate_name)
+        gate_authorized = bool(current_gate is not None and current_gate.status == "approved")
+        saved_session = self.workspace_service.store.get_agent_session(
+            project_id, phase, harness_kind.value
+        )
+        resume_sid = (
+            str(saved_session["external_session_id"]).strip()
+            if saved_session and saved_session.get("external_session_id")
+            else None
+        )
+
+        res = await warmup_fn(
+            Path(project.workspace_dir),
+            phase=phase,
+            gate_authorized=gate_authorized,
+            model=model,
+            effort=effort,
+            resume_session_id=resume_sid,
+        )
+        return {
+            "ok": True,
+            "project_id": project.id,
+            "phase": phase,
+            "harness_id": harness_kind.value,
+            "gate_authorized": gate_authorized,
+            **(res if isinstance(res, dict) else {"warmed": bool(res)}),
+        }
+
+    async def close_warm_sessions(
+        self,
+        project_id: str,
+        *,
+        harness_id: str | None = None,
+    ) -> int:
+        """Encerra processos persistentes aquecidos associados ao workspace do projeto."""
+        project = self.workspace_service.get_project(project_id)
+        workspace_dir = Path(project.workspace_dir)
+        normalized = harness_id.strip().lower() if harness_id else None
+
+        closed = 0
+        target_ids = (
+            [normalized]
+            if normalized
+            else [k.value for k in self.harness_registry.list_ids()]
+        )
+        for hid in target_ids:
+            try:
+                harness = self.harness_registry.get(hid)
+            except KeyError:
+                continue
+            close_fn = getattr(harness, "close_workspace_sessions", None)
+            if callable(close_fn):
+                closed += int(await close_fn(workspace_dir))
+        return closed
 
     def list_sessions(self, project_id: str) -> list[AgentSessionRead]:
         """Retorna todas as sessões persistidas dos harnesses para o projeto."""

@@ -37,6 +37,7 @@ from backend.app.api import (
 )
 from backend.app.config import APP_NAME, APP_VERSION, FRONTEND_DIST_DIR
 from backend.app.db.sqlite_store import SQLiteStore
+from backend.app.harnesses.agy_harness import get_agy_session_pool
 from backend.app.services.agent_orchestrator import AgentOrchestratorService
 from backend.app.services.client_catalog_service import ClientCatalogService
 from backend.app.services.default_credentials_service import DefaultCredentialsService
@@ -340,6 +341,10 @@ def create_app(
         try:
             yield
         finally:
+            try:
+                await get_agy_session_pool().shutdown_all()
+            except Exception:
+                pass
             active_daemon = getattr(app_instance.state, "jasper_daemon", None)
             if active_daemon is not None and hasattr(active_daemon, "stop"):
                 try:

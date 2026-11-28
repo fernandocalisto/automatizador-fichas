@@ -8,13 +8,19 @@ import contextlib
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.requests import HTTPConnection
 
 from backend.app.db.schemas import AgentSessionRead, ChatMessageRead, ChatPhase, GateApprovalRead
-from backend.app.harnesses import EventType, HarnessEvent, PhaseKind, get_default_registry
+from backend.app.harnesses import (
+    VALID_EFFORT_LEVELS,
+    EventType,
+    HarnessEvent,
+    PhaseKind,
+    get_default_registry,
+)
 from backend.app.services.agent_orchestrator import (
     AgentOrchestratorService,
     UnknownHarnessError,
@@ -33,8 +39,28 @@ router = APIRouter(prefix="/api/projects", tags=["agent"])
 # -----------------------------------------------------------------------------
 
 
+def _normalize_optional_model(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _validate_optional_effort(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip().lower()
+    if not cleaned:
+        return None
+    if cleaned not in VALID_EFFORT_LEVELS:
+        raise ValueError(
+            f"Nível de esforço inválido '{value}'. Esperado: {', '.join(VALID_EFFORT_LEVELS)}."
+        )
+    return cleaned
+
+
 class AgentStreamRequest(BaseModel):
-    """Payload de disparo de um turno de agente via SSE."""
+    """Payload de disparo de um turno de agente via SSE ou WebSocket."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -42,8 +68,44 @@ class AgentStreamRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     harness_id: str | None = None
     model: str | None = None
+    effort: str | None = None
     gate_authorized: bool = False
     timeout_seconds: float = Field(default=300.0, gt=0.0, le=3600.0)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _clean_model(cls, value: Any) -> str | None:
+        return _normalize_optional_model(value)
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _clean_effort(cls, value: Any) -> str | None:
+        return _validate_optional_effort(value)
+
+
+AgentRunPayload = AgentStreamRequest
+
+
+class AgentWarmupRequest(BaseModel):
+    """Payload opcional para pré-aquecimento de sessão persistente do agente (ex.: AGY)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    phase: PhaseKind = "jrxml"
+    harness: str | None = None
+    harness_id: str | None = None
+    model: str | None = None
+    effort: str | None = None
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _clean_model(cls, value: Any) -> str | None:
+        return _normalize_optional_model(value)
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _clean_effort(cls, value: Any) -> str | None:
+        return _validate_optional_effort(value)
 
 
 class AuthorizeGateRequest(BaseModel):
@@ -154,6 +216,7 @@ async def stream_project_agent(
             prompt=payload.prompt,
             harness_id=payload.harness_id,
             model=payload.model,
+            effort=payload.effort,
             explicit_gate_authorized=payload.gate_authorized,
             timeout_seconds=payload.timeout_seconds,
         ):
@@ -216,18 +279,43 @@ def list_project_agent_sessions(
         raise
 
 
+@router.post("/{project_id}/agent/warmup")
+async def warmup_project_agent(
+    project_id: str,
+    orchestrator: AgentOrchestratorDep,
+    payload: AgentWarmupRequest = Body(default_factory=AgentWarmupRequest),
+) -> dict[str, Any]:
+    """Pré-aquece o subprocesso persistente do agente (ex.: AGY) em background para eliminar latência inicial."""
+    requested_harness = payload.harness_id or payload.harness
+    try:
+        return await orchestrator.warmup_agent(
+            project_id,
+            phase=payload.phase,
+            harness_id=requested_harness,
+            model=payload.model,
+            effort=payload.effort,
+        )
+    except Exception as exc:
+        _raise_http_for_agent_error(exc)
+        raise
+
+
 @router.delete("/{project_id}/agent/session")
-def reset_project_agent_session(
+async def reset_project_agent_session(
     project_id: str,
     orchestrator: AgentOrchestratorDep,
     phase: ChatPhase | None = Query(default=None),
     harness_id: str | None = Query(default=None),
 ) -> dict[str, Any]:
-    """Remove sessão(ões) persistida(s) para iniciar uma nova conversa limpa no harness."""
+    """Remove sessão(ões) persistida(s) e encerra processos persistentes aquecidos para iniciar conversa limpa."""
     try:
         deleted = orchestrator.reset_session(
             project_id,
             phase=phase,
+            harness_id=harness_id,
+        )
+        closed_warm = await orchestrator.close_warm_sessions(
+            project_id,
             harness_id=harness_id,
         )
         return {
@@ -236,6 +324,7 @@ def reset_project_agent_session(
             "phase": phase,
             "harness_id": harness_id,
             "deleted": deleted,
+            "closed_warm_sessions": closed_warm,
         }
     except Exception as exc:
         _raise_http_for_agent_error(exc)
@@ -315,6 +404,7 @@ async def project_agent_websocket(
                 prompt=req.prompt,
                 harness_id=req.harness_id,
                 model=req.model,
+                effort=req.effort,
                 explicit_gate_authorized=req.gate_authorized,
                 timeout_seconds=req.timeout_seconds,
             ):

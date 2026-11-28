@@ -151,15 +151,46 @@ STATUS DA AUTORIZAÇÃO (`gate_authorized`): `True` (AUTORIZADO PELO USUÁRIO)
 DIRETÓRIO DO WORKSPACE: `{ws_text}`
 
 REGRAS OBRIGATÓRIAS DESTE TURNO:
-1. **GRAVAÇÃO DIRETA EM ARQUIVOS NO WORKSPACE OU VIA MCP:** O usuário JÁ AUTORIZOU a geração final do layout JasperReports. Escreva diretamente no diretório `{ws_text}` o arquivo `.jrxml` completo da ficha (e, quando aplicável, o bloco `detail_<nome>.xml`) e/ou utilize as ferramentas MCP `validate_and_compile_jrxml` e `render_preview_images` (passando `project_id` do contexto), validando 100% da árvore XML antes de concluir (`isBlankWhenNull="true"` em todos os `<textField>`, UUIDs v4 reais e únicos, `Boolean.TRUE.equals($F{{...}})` em CDATA, ordem estrita XSD e `band_height <= 623`).
-2. **PROIBIDO POLUIR O CHAT COM XML LONGO:** **NUNCA** cole o código `.jrxml` / XML completo no chat. Salve diretamente nos arquivos do workspace ou via `validate_and_compile_jrxml`.
-3. **RESPOSTA CONCISA DE ENTREGA:** No chat, confirme os arquivos gravados no workspace, o resultado do checklist de validação automática (XML, UUIDs, fields, limites de banda) e eventuais observações para o preview."""
+1. **INSPEÇÃO VISUAL OBRIGATÓRIA ANTES DE EDITAR:** SEMPRE inspecione visualmente as imagens de `source_pdf_pages` (o PDF original da ficha), o PNG de preview atual (`exports/pages_*/*.png`) e todos os recortes PNG pendentes de `visual_region_feedbacks` ANTES de alterar qualquer coordenada ou tag do `.jrxml`.
+2. **FIDELIDADE VISUAL ESTRITA AO PDF ORIGINAL:** Preserve exatamente a estrutura visual do PDF original — caixas, quadros, bordas, linhas divisórias, alinhamentos, tamanhos de fonte, negritos (`isBold="true"`), espaçamentos e proporções de checkboxes (`<rectangle>`) vs rádios (`<ellipse>`). **NUNCA** invente um layout diferente, simplificado ou genérico no lugar do desenho real do PDF.
+3. **GRAVAÇÃO DIRETA EM ARQUIVOS NO WORKSPACE OU VIA MCP:** O usuário JÁ AUTORIZOU a geração final do layout JasperReports. Escreva diretamente no diretório `{ws_text}` o arquivo `.jrxml` completo da ficha (e, quando aplicável, o bloco `detail_<nome>.xml`) e/ou utilize a ferramenta MCP `validate_and_compile_jrxml` (passando `project_id` do contexto), validando 100% da árvore XML antes de concluir (`isBlankWhenNull="true"` em todos os `<textField>`, UUIDs v4 reais e únicos, `Boolean.TRUE.equals($F{{...}})` em CDATA, ordem estrita XSD e `band_height <= 623`).
+4. **VERIFICAÇÃO OBRIGATÓRIA DE COMPILAÇÃO E PREVIEW VISUAL:** Antes de afirmar que um ajuste visual ou layout foi concluído, execute obrigatoriamente `validate_and_compile_jrxml` E `render_preview_images` e compare visualmente o novo PNG renderizado com `source_pdf_pages` (e com os recortes pendentes) para confirmar que o resultado corresponde fielmente ao esperado.
+5. **PROIBIDO POLUIR O CHAT COM XML LONGO:** **NUNCA** cole o código `.jrxml` / XML completo no chat. Salve diretamente nos arquivos do workspace ou via `validate_and_compile_jrxml`.
+6. **RESPOSTA CONCISA DE ENTREGA:** No chat, confirme os arquivos gravados no workspace, o resultado do checklist de validação automática (XML, UUIDs, fields, limites de banda) e o resultado da conferência visual do preview."""
 
     return (
         f"# Salutem Ficha Studio — Instruções do Agente ({phase.upper()})\n\n"
         f"{gate_instructions}\n\n"
         f"---\n\n"
         f"{resolved_skill.strip()}\n"
+    )
+
+
+def compose_delta_system_prompt(
+    phase: PhaseKind,
+    *,
+    gate_authorized: bool = False,
+    workspace_dir: str | Path | None = None,
+) -> str:
+    """
+    Compõe um lembrete conciso de estado (sem repetir o SKILL.md completo) para turnos
+    de continuação em sessões retomadas (`resume_session_id`) ou processos persistentes quentes.
+    """
+    ws_text = str(Path(workspace_dir).resolve()) if workspace_dir is not None else "(workspace atual)"
+    gate_label = "GATE 2 (AUTORIZADO)" if gate_authorized else "GATE 1 (AGUARDANDO APROVAÇÃO — NÃO GERAR ARQUIVOS FINAIS)"
+    extra_rule = ""
+    if phase == "jrxml" and gate_authorized:
+        extra_rule = (
+            "\n- Inspecione `source_pdf_pages`, preview atual e recortes pendentes antes de editar; "
+            "preserve fielmente caixas/bordas/negritos do PDF original e valide com "
+            "`validate_and_compile_jrxml` + `render_preview_images` antes de concluir."
+        )
+    return (
+        f"# Salutem Ficha Studio — Continuação ({phase.upper()})\n"
+        f"- Gate atual: {gate_label} (`gate_authorized={gate_authorized}`)\n"
+        f"- Workspace: `{ws_text}`\n"
+        f"- Mantenha todas as regras do SKILL carregado no início da sessão; "
+        f"não despeje JSON/XML gigante no chat.{extra_rule}"
     )
 
 

@@ -53,6 +53,7 @@ export interface JasperServerProfilesTabProps {
   dbProfiles?: DbProfileRead[];
   loading?: boolean;
   onRefresh?: () => Promise<void>;
+  initialSearch?: string;
 }
 
 interface JsProfileFormState {
@@ -89,6 +90,7 @@ export function JasperServerProfilesTab({
   dbProfiles = [],
   loading: externalLoading,
   onRefresh,
+  initialSearch,
 }: JasperServerProfilesTabProps) {
   const { pushToast } = useToast();
 
@@ -101,9 +103,16 @@ export function JasperServerProfilesTab({
   const profiles = isControlled ? externalProfiles : internalProfiles;
   const loading = externalLoading ?? internalLoading;
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(initialSearch ?? "");
   const [envFilter, setEnvFilter] = useState<EnvFilter>("ALL");
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    if (initialSearch !== undefined) {
+      setSearchQuery(initialSearch);
+      setEnvFilter("ALL");
+    }
+  }, [initialSearch]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingProfile, setEditingProfile] =

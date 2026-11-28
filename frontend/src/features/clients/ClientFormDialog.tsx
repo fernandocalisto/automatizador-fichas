@@ -1,19 +1,27 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { AlertCircle } from "lucide-react";
 import {
   Button,
   Dialog,
   FieldLabel,
   Input,
+  SearchableSelect,
   Select,
   Textarea,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
+import { jasperServerApi } from "@/features/jasperserver/jasperServerApi";
+import { sftpApi } from "@/features/sftp/sftpApi";
+import { api } from "@/lib/api";
 import type {
   ClientSystemRead,
   ClientSystemType,
   ClientUnitRead,
+  DbProfileRead,
   EnvironmentKind,
+  JasperServerProfileRead,
+  SftpProfileRead,
 } from "@/types/studio";
 import { clientsApi } from "./clientsApi";
 
@@ -273,6 +281,12 @@ export function ClientSystemFormDialog({
   const [dbProfileId, setDbProfileId] = useState("");
   const [sftpProfileId, setSftpProfileId] = useState("");
   const [jasperProfileId, setJasperProfileId] = useState("");
+  const [dbProfiles, setDbProfiles] = useState<DbProfileRead[]>([]);
+  const [sftpProfiles, setSftpProfiles] = useState<SftpProfileRead[]>([]);
+  const [jasperProfiles, setJasperProfiles] = useState<
+    JasperServerProfileRead[]
+  >([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -301,6 +315,89 @@ export function ClientSystemFormDialog({
       setJasperProfileId("");
     }
   }, [open, editingSystem]);
+
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    setLoadingProfiles(true);
+    Promise.allSettled([
+      api.listDbProfiles(),
+      sftpApi.listProfiles(),
+      jasperServerApi.listProfiles(),
+    ])
+      .then(([dbRes, sftpRes, jsRes]) => {
+        if (!active) return;
+        if (dbRes.status === "fulfilled" && Array.isArray(dbRes.value)) {
+          setDbProfiles(dbRes.value);
+        }
+        if (sftpRes.status === "fulfilled" && Array.isArray(sftpRes.value)) {
+          setSftpProfiles(sftpRes.value);
+        }
+        if (jsRes.status === "fulfilled" && Array.isArray(jsRes.value)) {
+          setJasperProfiles(jsRes.value);
+        }
+      })
+      .finally(() => {
+        if (active) setLoadingProfiles(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [open]);
+
+  const dbOptions = useMemo<SearchableSelectOption[]>(() => {
+    const opts: SearchableSelectOption[] = dbProfiles.map((p) => ({
+      value: p.id,
+      label: p.name,
+      sublabel: `${p.host}:${p.port}/${p.dbname || "(padrão)"}`,
+      badge: p.environment,
+      keywords: `${p.host} ${p.dbname} ${p.user} ${p.environment ?? ""}`,
+    }));
+    if (dbProfileId && !opts.some((o) => o.value === dbProfileId)) {
+      opts.unshift({
+        value: dbProfileId,
+        label: dbProfileId,
+        sublabel: "Perfil vinculado",
+      });
+    }
+    return opts;
+  }, [dbProfiles, dbProfileId]);
+
+  const sftpOptions = useMemo<SearchableSelectOption[]>(() => {
+    const opts: SearchableSelectOption[] = sftpProfiles.map((p) => ({
+      value: p.id,
+      label: p.name,
+      sublabel: `${p.username ? `${p.username}@` : ""}${p.host}:${p.port}`,
+      badge: p.environment,
+      keywords: `${p.host} ${p.username} ${p.remote_base_dir} ${p.environment}`,
+    }));
+    if (sftpProfileId && !opts.some((o) => o.value === sftpProfileId)) {
+      opts.unshift({
+        value: sftpProfileId,
+        label: sftpProfileId,
+        sublabel: "Perfil vinculado",
+      });
+    }
+    return opts;
+  }, [sftpProfiles, sftpProfileId]);
+
+  const jasperOptions = useMemo<SearchableSelectOption[]>(() => {
+    const opts: SearchableSelectOption[] = jasperProfiles.map((p) => ({
+      value: p.id,
+      label: p.name,
+      sublabel: p.base_url,
+      badge: p.environment,
+      keywords: `${p.base_url} ${p.organization} ${p.username} ${p.environment}`,
+    }));
+    if (jasperProfileId && !opts.some((o) => o.value === jasperProfileId)) {
+      opts.unshift({
+        value: jasperProfileId,
+        label: jasperProfileId,
+        sublabel: "Perfil vinculado",
+      });
+    }
+    return opts;
+  }, [jasperProfiles, jasperProfileId]);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -449,32 +546,62 @@ export function ClientSystemFormDialog({
           />
         </div>
 
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="space-y-3">
           <div>
-            <FieldLabel htmlFor="sys-db-id">ID Perfil PostgreSQL</FieldLabel>
-            <Input
+            <FieldLabel htmlFor="sys-db-id">Perfil PostgreSQL</FieldLabel>
+            <SearchableSelect
               id="sys-db-id"
-              placeholder="Opcional"
+              ariaLabel="Perfil PostgreSQL"
               value={dbProfileId}
-              onChange={(e) => setDbProfileId(e.target.value)}
+              onChange={setDbProfileId}
+              options={dbOptions}
+              allowClear
+              clearLabel="Nenhum perfil PostgreSQL"
+              placeholder={
+                loadingProfiles
+                  ? "Carregando perfis PostgreSQL..."
+                  : "Selecionar perfil PostgreSQL (opcional)..."
+              }
+              searchPlaceholder="Buscar banco por nome, host ou dbname..."
+              emptyLabel="Nenhum perfil PostgreSQL cadastrado."
             />
           </div>
           <div>
-            <FieldLabel htmlFor="sys-sftp-id">ID Perfil SFTP</FieldLabel>
-            <Input
+            <FieldLabel htmlFor="sys-sftp-id">Perfil SFTP</FieldLabel>
+            <SearchableSelect
               id="sys-sftp-id"
-              placeholder="Opcional"
+              ariaLabel="Perfil SFTP"
               value={sftpProfileId}
-              onChange={(e) => setSftpProfileId(e.target.value)}
+              onChange={setSftpProfileId}
+              options={sftpOptions}
+              allowClear
+              clearLabel="Nenhum perfil SFTP"
+              placeholder={
+                loadingProfiles
+                  ? "Carregando servidores SFTP..."
+                  : "Selecionar servidor SFTP (opcional)..."
+              }
+              searchPlaceholder="Buscar SFTP por nome, host ou usuário..."
+              emptyLabel="Nenhum servidor SFTP cadastrado."
             />
           </div>
           <div>
-            <FieldLabel htmlFor="sys-js-id">ID Perfil JasperServer</FieldLabel>
-            <Input
+            <FieldLabel htmlFor="sys-js-id">Perfil JasperServer</FieldLabel>
+            <SearchableSelect
               id="sys-js-id"
-              placeholder="Opcional"
+              ariaLabel="Perfil JasperServer"
               value={jasperProfileId}
-              onChange={(e) => setJasperProfileId(e.target.value)}
+              onChange={setJasperProfileId}
+              options={jasperOptions}
+              allowClear
+              clearLabel="Nenhum perfil JasperServer"
+              placeholder={
+                loadingProfiles
+                  ? "Carregando servidores JasperServer..."
+                  : "Selecionar JasperServer (opcional)..."
+              }
+              searchPlaceholder="Buscar JasperServer por nome ou URL..."
+              emptyLabel="Nenhum perfil JasperServer cadastrado."
             />
           </div>
         </div>

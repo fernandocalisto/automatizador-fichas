@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Badge, Button, Card } from "@/components/ui";
 import { clientsApi } from "@/features/clients/clientsApi";
+import type { SettingsTabId } from "@/types/feature-props";
 import type {
   ClientUnitRead,
   EntryMode,
@@ -27,7 +28,10 @@ const GUIDE_DISMISSED_STORAGE_KEY = "salutem:home-guide-dismissed";
 export interface HomeViewProps {
   projects: ProjectRead[];
   onSelectProject: (project: ProjectRead, nextSection?: StudioSection) => void;
-  onNavigateSection: (section: StudioSection) => void;
+  onNavigateSection: (
+    section: StudioSection,
+    settingsTab?: SettingsTabId,
+  ) => void;
   onOpenCreateDialog: (mode: EntryMode) => void;
   onOpenClientById: (clientId: string) => void;
   onOpenCommandPalette: () => void;
@@ -189,7 +193,9 @@ export function HomeView({
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => onNavigateSection("settings")}
+                  onClick={() =>
+                    onNavigateSection("settings", "default_credentials")
+                  }
                   icon={<KeyRound className="h-3.5 w-3.5" />}
                 >
                   1. Credenciais Padrão

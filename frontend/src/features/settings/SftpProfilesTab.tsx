@@ -60,6 +60,7 @@ export interface SftpProfilesTabProps {
   dbProfiles?: DbProfileRead[];
   loading?: boolean;
   onRefresh?: () => Promise<void>;
+  initialSearch?: string;
 }
 
 interface SftpFormState {
@@ -127,6 +128,7 @@ export function SftpProfilesTab({
   dbProfiles = [],
   loading: externalLoading,
   onRefresh: externalOnRefresh,
+  initialSearch,
 }: SftpProfilesTabProps) {
   const { pushToast } = useToast();
 
@@ -140,9 +142,16 @@ export function SftpProfilesTab({
   const profiles = externalProfiles ?? internalProfiles;
   const loading = externalLoading ?? internalLoading;
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState(initialSearch ?? "");
   const [envFilter, setEnvFilter] = useState<EnvFilter>("ALL");
   const [page, setPage] = useState(1);
+
+  useEffect(() => {
+    if (initialSearch !== undefined) {
+      setSearchQuery(initialSearch);
+      setEnvFilter("ALL");
+    }
+  }, [initialSearch]);
 
   const loadProfiles = useCallback(async () => {
     if (externalOnRefresh) {

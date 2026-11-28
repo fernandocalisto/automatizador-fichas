@@ -9,6 +9,7 @@ import type {
   CommitInsertResult,
   DbConnectionTestResult,
   DbProfileCreatePayload,
+  DbProfileDatabasesResult,
   DbProfileRead,
   DbProfileUpdatePayload,
   DryRunInsertResult,
@@ -253,6 +254,10 @@ export const api = {
     requestJson<DbConnectionTestResult>(
       `/api/db/profiles/${encodeURIComponent(profileId)}/test`,
       { method: "POST" },
+    ),
+  listDbProfileDatabases: (profileId: string) =>
+    requestJson<DbProfileDatabasesResult>(
+      `/api/db/profiles/${encodeURIComponent(profileId)}/databases`,
     ),
   getSampleAtendimento: (profileId: string) =>
     requestJson<{ profile_id: string; sample_atendimento_id: number | null }>(

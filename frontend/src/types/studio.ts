@@ -355,6 +355,11 @@ export interface DbConnectionTestResult {
   error: string | null;
 }
 
+export interface DbProfileDatabasesResult {
+  profile_id: string;
+  databases: string[];
+}
+
 export interface DryRunInsertResult {
   ok: boolean;
   project_id: string;

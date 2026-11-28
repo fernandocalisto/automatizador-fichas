@@ -504,7 +504,7 @@ export function ClientsView({
   return (
     <div className="flex h-full overflow-hidden bg-canvas">
       {/* LEFT PANE: Client Master List */}
-      <aside className="flex w-80 xl:w-96 shrink-0 flex-col overflow-hidden border-r border-border bg-surface">
+      <aside className="flex w-72 lg:w-80 2xl:w-96 shrink-0 flex-col overflow-hidden border-r border-border bg-surface">
         {/* Left Header */}
         <div className="shrink-0 space-y-2.5 border-b border-border p-3.5">
           <div className="flex items-center justify-between gap-2">
@@ -948,7 +948,7 @@ export function ClientsView({
               <div
                 role="tablist"
                 aria-label="Seções do cliente"
-                className="mt-3 flex items-center gap-1 overflow-x-auto"
+                className="mt-3 flex items-center gap-0.5 sm:gap-1 overflow-x-auto"
               >
                 <button
                   type="button"
@@ -956,13 +956,13 @@ export function ClientsView({
                   aria-selected={activeTab === "jasperserver"}
                   onClick={() => setActiveTab("jasperserver")}
                   className={cn(
-                    "inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors cursor-pointer",
+                    "inline-flex shrink-0 items-center gap-1.5 border-b-2 px-2.5 py-2 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer",
                     activeTab === "jasperserver"
                       ? "border-accent text-accent"
                       : "border-transparent text-ink-secondary hover:text-ink",
                   )}
                 >
-                  <Layers className="h-3.5 w-3.5" />
+                  <Layers className="h-3.5 w-3.5 shrink-0" />
                   <span>Relatórios (JasperServer)</span>
                   <Badge
                     tone={jasperSystems.length > 0 ? "accent" : "neutral"}
@@ -978,13 +978,13 @@ export function ClientsView({
                   aria-selected={activeTab === "sftp"}
                   onClick={() => setActiveTab("sftp")}
                   className={cn(
-                    "inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors cursor-pointer",
+                    "inline-flex shrink-0 items-center gap-1.5 border-b-2 px-2.5 py-2 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer",
                     activeTab === "sftp"
                       ? "border-accent text-accent"
                       : "border-transparent text-ink-secondary hover:text-ink",
                   )}
                 >
-                  <Server className="h-3.5 w-3.5" />
+                  <Server className="h-3.5 w-3.5 shrink-0" />
                   <span>Fichas (SFTP)</span>
                   <Badge
                     tone={sftpSystems.length > 0 ? "blueprint" : "neutral"}
@@ -1000,13 +1000,13 @@ export function ClientsView({
                   aria-selected={activeTab === "systems"}
                   onClick={() => setActiveTab("systems")}
                   className={cn(
-                    "inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium transition-colors cursor-pointer",
+                    "inline-flex shrink-0 items-center gap-1.5 border-b-2 px-2.5 py-2 text-xs font-medium whitespace-nowrap transition-colors cursor-pointer",
                     activeTab === "systems"
                       ? "border-accent text-accent"
                       : "border-transparent text-ink-secondary hover:text-ink",
                   )}
                 >
-                  <Database className="h-3.5 w-3.5" />
+                  <Database className="h-3.5 w-3.5 shrink-0" />
                   <span>Conexões & Sistemas</span>
                   <Badge
                     tone="neutral"
@@ -1537,7 +1537,9 @@ export function ClientsView({
                                     }
                                     icon={<FilePlus2 className="h-3 w-3" />}
                                   >
-                                    Novo Relatório Livre neste Banco
+                                    {sys.db_profile_id
+                                      ? "Novo Relatório Livre neste Banco"
+                                      : "Novo Relatório Livre"}
                                   </Button>
                                 )}
 

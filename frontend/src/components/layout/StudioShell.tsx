@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   ArrowLeft,
   Building2,
@@ -128,6 +128,15 @@ export function StudioShell({
 
   const isFreeReport = activeProject?.project_kind === "free_report";
   const projectTabs = isFreeReport ? FREE_REPORT_NAV : CLINICAL_FORM_NAV;
+  const projectNavRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!isProjectMode) return;
+    const activeTabEl = projectNavRef.current?.querySelector<HTMLElement>(
+      '[aria-current="page"]',
+    );
+    activeTabEl?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  }, [activeSection, activeProject?.id, isProjectMode]);
 
   const handleBackToHome = () => {
     if (onExitProject) {
@@ -143,7 +152,7 @@ export function StudioShell({
         {isProjectMode && activeProject ? (
           <>
             {/* Project Mode: Left (Back + Project Name + Origin Badge) */}
-            <div className="flex min-w-0 items-center gap-2">
+            <div className="flex min-w-0 items-center gap-1.5">
               <Button
                 variant="ghost"
                 size="xs"
@@ -156,17 +165,17 @@ export function StudioShell({
 
               <div className="h-4 w-px shrink-0 bg-border" />
 
-              <div className="flex min-w-0 items-center gap-2">
+              <div className="flex min-w-0 items-center gap-1.5">
                 <span
                   title={activeProject.name}
-                  className="max-w-[160px] truncate text-xs font-semibold text-ink sm:max-w-[220px] xl:max-w-[280px]"
+                  className="max-w-[130px] truncate text-xs font-semibold text-ink sm:max-w-[160px] lg:max-w-[180px] 2xl:max-w-[260px]"
                 >
                   {activeProject.name}
                 </span>
 
                 <Badge
                   tone={isFreeReport ? "blueprint" : "accent"}
-                  className="hidden sm:inline-flex shrink-0 text-[10px] py-0"
+                  className="hidden lg:inline-flex shrink-0 text-[10px] py-0"
                 >
                   {isFreeReport ? "Relatório" : "Ficha Clínica"}
                 </Badge>
@@ -175,7 +184,7 @@ export function StudioShell({
                   activeProject.template_db_id !== undefined && (
                     <Badge
                       tone="neutral"
-                      className="hidden md:inline-flex shrink-0 tabular-nums text-[10px] py-0"
+                      className="hidden xl:inline-flex shrink-0 tabular-nums text-[10px] py-0"
                     >
                       ID #{activeProject.template_db_id}
                     </Badge>
@@ -185,8 +194,9 @@ export function StudioShell({
 
             {/* Project Mode: Center (Context-only tabs) */}
             <nav
+              ref={projectNavRef}
               aria-label="Etapas do Projeto"
-              className="flex min-w-0 items-center gap-1 overflow-x-auto"
+              className="flex min-w-0 items-center gap-0.5 overflow-x-auto"
             >
               {projectTabs.map((item) => {
                 const active = activeSection === item.id;
@@ -197,7 +207,7 @@ export function StudioShell({
                     aria-current={active ? "page" : undefined}
                     onClick={() => onNavigate(item.id)}
                     className={cn(
-                      "inline-flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap cursor-pointer",
+                      "inline-flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-[11px] xl:text-xs font-medium transition-colors whitespace-nowrap cursor-pointer",
                       active
                         ? "bg-accent-soft text-accent border border-accent/25"
                         : "text-ink-secondary hover:bg-surface-subtle hover:text-ink border border-transparent",
@@ -211,7 +221,7 @@ export function StudioShell({
             </nav>
 
             {/* Project Mode: Right (AI Assistant + Settings + Theme) */}
-            <div className="flex shrink-0 items-center gap-1.5">
+            <div className="flex shrink-0 items-center gap-1">
               {onOpenCommandPalette && (
                 <Button
                   variant="ghost"
@@ -247,8 +257,9 @@ export function StudioShell({
                 onClick={() => onNavigate("settings")}
                 icon={<Settings className="h-3.5 w-3.5" />}
                 aria-label="Configurações"
+                title="Configurações"
               >
-                <span className="hidden xl:inline">Configurações</span>
+                <span className="hidden 2xl:inline">Configurações</span>
               </Button>
 
               <Button
@@ -339,7 +350,7 @@ export function StudioShell({
                 type="button"
                 onClick={() => onOpenCommandPalette?.()}
                 aria-label="Buscar clientes, bancos, relatórios (Ctrl+K)"
-                className="hidden md:inline-flex h-8 w-56 lg:w-72 items-center justify-between gap-2 rounded-md border border-border bg-surface-subtle/70 px-2.5 text-xs text-ink-muted transition-colors hover:border-border-strong hover:bg-surface hover:text-ink cursor-pointer"
+                className="hidden md:inline-flex h-8 w-48 lg:w-56 xl:w-68 items-center justify-between gap-2 rounded-md border border-border bg-surface-subtle/70 px-2.5 text-xs text-ink-muted transition-colors hover:border-border-strong hover:bg-surface hover:text-ink cursor-pointer"
               >
                 <span className="inline-flex items-center gap-1.5 truncate">
                   <Search className="h-3.5 w-3.5 shrink-0" />
@@ -363,7 +374,7 @@ export function StudioShell({
                 <Search className="h-4 w-4" />
               </Button>
 
-              <div className="hidden xl:flex items-center gap-1 border-l border-border pl-2">
+              <div className="hidden lg:flex items-center gap-1 border-l border-border pl-2">
                 <Badge
                   tone={health?.status === "ok" ? "success" : "warning"}
                   dot

@@ -49,4 +49,6 @@ export type SettingsTabId =
 export interface SettingsViewProps {
   onClose?: () => void;
   initialTab?: SettingsTabId;
+  initialSearch?: string;
+  onTabChange?: (tab: SettingsTabId) => void;
 }

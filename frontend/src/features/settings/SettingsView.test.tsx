@@ -2,10 +2,14 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ToastProvider } from "@/components/ui";
+import { jasperServerApi } from "@/features/jasperserver/jasperServerApi";
+import { sftpApi } from "@/features/sftp/sftpApi";
 import { api } from "@/lib/api";
 import type {
   DbProfileRead,
   HarnessStatus,
+  JasperServerProfileRead,
+  SftpProfileRead,
   SkillInfo,
   SubreportInfo,
 } from "@/types/studio";
@@ -87,8 +91,65 @@ const SAMPLE_SKILLS: SkillInfo[] = [
   },
 ];
 
+const SAMPLE_SFTP_PROFILES: SftpProfileRead[] = [
+  {
+    id: "sftp-1",
+    name: "SFTP Ambulatorial HML",
+    host: "10.0.0.21",
+    port: 22,
+    username: "salutem",
+    auth_type: "private_key",
+    credential_mode: "default",
+    remote_base_dir: "/opt/salutem",
+    environment: "HML",
+    read_only: false,
+    linked_db_profile_id: "pg-1",
+    has_secret: true,
+    created_at: "2026-03-01T10:00:00Z",
+    updated_at: "2026-03-01T10:00:00Z",
+  },
+  {
+    id: "sftp-2",
+    name: "SFTP Hospitalar PRD",
+    host: "10.0.0.22",
+    port: 22,
+    username: "salutem",
+    auth_type: "private_key",
+    credential_mode: "default",
+    remote_base_dir: "/opt/salutem",
+    environment: "PRD",
+    read_only: true,
+    linked_db_profile_id: null,
+    has_secret: true,
+    created_at: "2026-03-01T10:00:00Z",
+    updated_at: "2026-03-01T10:00:00Z",
+  },
+];
+
+const SAMPLE_JASPER_PROFILES: JasperServerProfileRead[] = [
+  {
+    id: "js-1",
+    name: "JasperServer Central",
+    base_url: "https://jasper.salutem.local/jasperserver",
+    organization: "org1",
+    username: "jasperadmin",
+    credential_mode: "default",
+    default_folder_uri: "/reports",
+    environment: "HML",
+    read_only: false,
+    linked_db_profile_id: "pg-1",
+    has_password: true,
+    created_at: "2026-03-01T10:00:00Z",
+    updated_at: "2026-03-01T10:00:00Z",
+  },
+];
+
 function mockBaseSettingsApis() {
   vi.spyOn(api, "listDbProfiles").mockResolvedValue(SAMPLE_PROFILES);
+  vi.spyOn(sftpApi, "listProfiles").mockResolvedValue(SAMPLE_SFTP_PROFILES);
+  vi.spyOn(jasperServerApi, "listProfiles").mockResolvedValue(
+    SAMPLE_JASPER_PROFILES,
+  );
   vi.spyOn(api, "listSubreports").mockResolvedValue(SAMPLE_SUBREPORTS);
   vi.spyOn(api, "listHarnesses").mockResolvedValue(SAMPLE_HARNESSES);
   vi.spyOn(api, "listSkills").mockResolvedValue(SAMPLE_SKILLS);
@@ -324,7 +385,7 @@ describe("SettingsView", () => {
 
     // Harnesses & Skills tab
     await user.click(
-      screen.getByRole("tab", { name: /Assistentes IA \(Harnesses\)/i }),
+      screen.getByRole("tab", { name: /Harnesses & Skills IA/i }),
     );
     await waitFor(() => {
       expect(screen.getByText("Antigravity (AGY)")).toBeInTheDocument();
@@ -386,6 +447,10 @@ describe("SettingsView", () => {
     }));
 
     vi.spyOn(api, "listDbProfiles").mockResolvedValue(manyProfiles);
+    vi.spyOn(sftpApi, "listProfiles").mockResolvedValue(SAMPLE_SFTP_PROFILES);
+    vi.spyOn(jasperServerApi, "listProfiles").mockResolvedValue(
+      SAMPLE_JASPER_PROFILES,
+    );
     vi.spyOn(api, "listSubreports").mockResolvedValue(SAMPLE_SUBREPORTS);
     vi.spyOn(api, "listHarnesses").mockResolvedValue(SAMPLE_HARNESSES);
     vi.spyOn(api, "listSkills").mockResolvedValue(SAMPLE_SKILLS);
@@ -433,5 +498,156 @@ describe("SettingsView", () => {
       expect(screen.getByText("Unidade HML 28")).toBeInTheDocument();
       expect(screen.queryByText("Hospital PRD Central")).not.toBeInTheDocument();
     });
+  });
+
+  it("exposes environment (PRD auto read_only), default credential mode, database discovery, sidebar counts, and initialSearch/onTabChange", async () => {
+    const user = userEvent.setup();
+    mockBaseSettingsApis();
+
+    const createSpy = vi.spyOn(api, "createDbProfile").mockResolvedValue({
+      ...SAMPLE_PROFILES[0],
+      id: "pg-prd-default",
+      name: "Hospital PRD Padrão",
+      environment: "PRD",
+      credential_mode: "default",
+      dbname: "",
+      user: "",
+      read_only: true,
+    });
+    const discoverSpy = vi
+      .spyOn(api, "listDbProfileDatabases")
+      .mockResolvedValue({
+        profile_id: "pg-1",
+        databases: ["salutem_amb", "salutem_hosp", "salutem_prod"],
+      });
+    const updateSpy = vi.spyOn(api, "updateDbProfile").mockResolvedValue({
+      ...SAMPLE_PROFILES[0],
+      dbname: "salutem_hosp",
+    });
+    const onTabChange = vi.fn();
+
+    render(
+      <ToastProvider>
+        <SettingsView
+          initialTab="db_profiles"
+          initialSearch="Produção"
+          onTabChange={onTabChange}
+        />
+      </ToastProvider>,
+    );
+
+    // Sidebar badges for SFTP (2) and JasperServer (1) and PG (1)
+    await waitFor(() => {
+      expect(
+        within(
+          screen.getByRole("tab", { name: /Servidores SFTP/i }),
+        ).getByText("2"),
+      ).toBeInTheDocument();
+      expect(
+        within(
+          screen.getByRole("tab", { name: /JasperReports Server/i }),
+        ).getByText("1"),
+      ).toBeInTheDocument();
+    });
+
+    // initialSearch pre-fills the search input
+    expect(screen.getByLabelText(/Buscar perfis PostgreSQL/i)).toHaveValue(
+      "Produção",
+    );
+
+    // Discover databases on profile card and apply one
+    await user.click(screen.getByRole("button", { name: /Descobrir bancos/i }));
+    await waitFor(() => {
+      expect(discoverSpy).toHaveBeenCalledWith("pg-1");
+      expect(
+        screen.getByRole("button", { name: "salutem_hosp" }),
+      ).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "salutem_hosp" }));
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith("pg-1", {
+        dbname: "salutem_hosp",
+      });
+    });
+
+    // Open Edit modal -> discover databases inside modal and apply to dbname input
+    await user.click(screen.getByRole("button", { name: /^Editar$/i }));
+    const editDialog = screen.getByRole("dialog", {
+      name: /Editar perfil — Produção Salutem/i,
+    });
+    await user.click(
+      within(editDialog).getByRole("button", { name: /Descobrir bancos/i }),
+    );
+    await waitFor(() => {
+      expect(
+        within(editDialog).getByRole("button", { name: "salutem_amb" }),
+      ).toBeInTheDocument();
+    });
+    await user.click(
+      within(editDialog).getByRole("button", { name: "salutem_amb" }),
+    );
+    expect(
+      within(editDialog).getByLabelText(/Banco de dados/i),
+    ).toHaveValue("salutem_amb");
+    await user.click(
+      within(editDialog).getByRole("button", { name: /Cancelar/i }),
+    );
+
+    // Open Create modal -> switch to default credentials + PRD auto-enables read_only
+    await user.click(
+      screen.getByRole("button", { name: /Novo perfil PostgreSQL/i }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Novo perfil PostgreSQL",
+    });
+
+    // Toggle read_only off first, then switch environment to PRD -> must auto-enable read_only
+    const roSwitch = within(dialog).getByRole("switch", {
+      name: /Somente leitura/i,
+    });
+    await user.click(roSwitch);
+    expect(roSwitch).toHaveAttribute("aria-checked", "false");
+
+    await user.selectOptions(within(dialog).getByLabelText(/Ambiente/i), "PRD");
+    expect(roSwitch).toHaveAttribute("aria-checked", "true");
+
+    // Switch credential_mode to default -> password disappears, dbname/user optional
+    await user.selectOptions(
+      within(dialog).getByLabelText(/Modo de Credenciais/i),
+      "default",
+    );
+    expect(
+      within(dialog).queryByLabelText(/^Senha$/i),
+    ).not.toBeInTheDocument();
+    expect(
+      within(dialog).getByText(/Senha herdada automaticamente/i),
+    ).toBeInTheDocument();
+
+    await user.type(
+      within(dialog).getByLabelText(/Nome do perfil/i),
+      "Hospital PRD Padrão",
+    );
+    await user.clear(within(dialog).getByLabelText(/Banco de dados/i));
+    await user.clear(within(dialog).getByLabelText(/Usuário/i));
+    await user.click(
+      within(dialog).getByRole("button", { name: /^Criar perfil$/i }),
+    );
+
+    await waitFor(() => {
+      expect(createSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "Hospital PRD Padrão",
+          environment: "PRD",
+          credential_mode: "default",
+          dbname: "",
+          user: "",
+          read_only: true,
+        }),
+      );
+    });
+
+    // Verify onTabChange callback fires when switching tabs
+    await user.click(screen.getByRole("tab", { name: /Servidores SFTP/i }));
+    expect(onTabChange).toHaveBeenCalledWith("sftp_profiles");
   });
 });

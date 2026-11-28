@@ -32,6 +32,7 @@ import type {
   AgentSessionRead,
   ChatPhase,
   GateApprovalRead,
+  HarnessModelOption,
   HarnessStatus,
   ProjectRead,
   StudioSection,
@@ -96,6 +97,43 @@ const FREE_REPORT_QUICK_PROMPTS: string[] = [
   "Ajustar layout, colunas e alinhamento do relatório",
   "Corrigir campos nulos e quebras de página",
 ];
+
+const MODEL_STORAGE_PREFIX = "salutem:agent-model:";
+const EFFORT_STORAGE_PREFIX = "salutem:agent-effort:";
+const DEFAULT_EFFORT_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+
+const EFFORT_LABELS: Record<string, string> = {
+  low: "Baixo (low)",
+  medium: "Médio (medium)",
+  high: "Alto (high)",
+  xhigh: "Extra alto (xhigh)",
+  max: "Máximo (max)",
+};
+
+function loadStoredHarnessPref(prefix: string, harnessId: string): string {
+  try {
+    return window.localStorage.getItem(`${prefix}${harnessId}`) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveStoredHarnessPref(
+  prefix: string,
+  harnessId: string,
+  value: string,
+): void {
+  try {
+    const key = `${prefix}${harnessId}`;
+    if (value) {
+      window.localStorage.setItem(key, value);
+    } else {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage write errors
+  }
+}
 
 function defaultPhaseForProject(project: ProjectRead): ChatPhase {
   if (project.project_kind === "free_report") {
@@ -258,6 +296,24 @@ export function AgentChatPanel({
   const [selectedHarness, setSelectedHarness] = useState<string>(
     project.preferred_harness || "agy",
   );
+  const [availableModels, setAvailableModels] = useState<HarnessModelOption[]>(
+    [],
+  );
+  const [effortLevels, setEffortLevels] = useState<string[]>([
+    ...DEFAULT_EFFORT_LEVELS,
+  ]);
+  const [selectedModel, setSelectedModel] = useState<string>(() =>
+    loadStoredHarnessPref(
+      MODEL_STORAGE_PREFIX,
+      project.preferred_harness || "agy",
+    ),
+  );
+  const [selectedEffort, setSelectedEffort] = useState<string>(() =>
+    loadStoredHarnessPref(
+      EFFORT_STORAGE_PREFIX,
+      project.preferred_harness || "agy",
+    ),
+  );
   const [gates, setGates] = useState<GateApprovalRead[]>(project.gates ?? []);
   const [sessions, setSessions] = useState<AgentSessionRead[]>([]);
   const [resettingSession, setResettingSession] = useState(false);
@@ -277,6 +333,7 @@ export function AgentChatPanel({
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const timelineEndRef = useRef<HTMLDivElement | null>(null);
   const userSelectedHarnessRef = useRef(false);
+  const lastWarmupKeyRef = useRef<string | null>(null);
 
   // Sincroniza fase quando `initialPhase` ou tipo de projeto muda
   useEffect(() => {
@@ -357,6 +414,55 @@ export function AgentChatPanel({
       abortControllerRef.current = null;
     };
   }, [project.id, phase, loadChatAndStatus]);
+
+  // Carrega modelos disponíveis e restaura preferências persistidas ao trocar de harness
+  useEffect(() => {
+    let cancelled = false;
+    setSelectedModel(loadStoredHarnessPref(MODEL_STORAGE_PREFIX, selectedHarness));
+    setSelectedEffort(
+      loadStoredHarnessPref(EFFORT_STORAGE_PREFIX, selectedHarness),
+    );
+    setAvailableModels([]);
+    setEffortLevels([...DEFAULT_EFFORT_LEVELS]);
+
+    void api
+      .listHarnessModels(selectedHarness)
+      .then((res) => {
+        if (cancelled) return;
+        setAvailableModels(Array.isArray(res?.models) ? res.models : []);
+        if (Array.isArray(res?.effort_levels) && res.effort_levels.length > 0) {
+          setEffortLevels(res.effort_levels);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAvailableModels([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedHarness]);
+
+  // Pré-aquecimento silencioso do processo persistente AGY ao abrir o painel/drawer
+  useEffect(() => {
+    if (selectedHarness !== "agy") return;
+    const warmupKey = `${project.id}|${phase}|${selectedHarness}|${selectedModel}|${selectedEffort}`;
+    if (lastWarmupKeyRef.current === warmupKey) return;
+    lastWarmupKeyRef.current = warmupKey;
+
+    void api
+      .warmupAgent(project.id, {
+        phase,
+        harness: selectedHarness,
+        ...(selectedModel ? { model: selectedModel } : {}),
+        ...(selectedEffort ? { effort: selectedEffort } : {}),
+      })
+      .catch(() => {
+        // Pré-aquecimento é best-effort e silencioso
+      });
+  }, [project.id, phase, selectedHarness, selectedModel, selectedEffort]);
 
   // Auto-scroll suave ao receber novas mensagens ou deltas
   useEffect(() => {
@@ -461,6 +567,7 @@ export function AgentChatPanel({
         content: "",
         createdAt: nowIso,
         harness: selectedHarness,
+        model: selectedModel || null,
         thoughts: "",
         toolCalls: [],
         syncedArtifacts: [],
@@ -493,11 +600,20 @@ export function AgentChatPanel({
             prompt: trimmed,
             harness_id: selectedHarness,
             gate_authorized: effectiveGateAuthorized,
+            ...(selectedModel ? { model: selectedModel } : {}),
+            ...(selectedEffort ? { effort: selectedEffort } : {}),
           },
           {
             signal: controller.signal,
             onEvent: (event) => {
               const meta = event.metadata ?? {};
+              const eventModel =
+                typeof meta.resolved_model === "string" &&
+                meta.resolved_model.trim()
+                  ? meta.resolved_model.trim()
+                  : typeof meta.model === "string" && meta.model.trim()
+                    ? meta.model.trim()
+                    : null;
               const isArtifactSynced =
                 meta.artifact_synced === true ||
                 (event.type as string) === "artifact_synced";
@@ -520,6 +636,7 @@ export function AgentChatPanel({
                 updateAssistant((prev) => ({
                   ...prev,
                   harness: event.harness || prev.harness,
+                  model: eventModel || prev.model,
                   syncedArtifacts: upsertSyncedArtifact(prev.syncedArtifacts, {
                     artifact_type: artifactType,
                     version_num: versionNum,
@@ -539,6 +656,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     thoughts: (prev.thoughts ?? "") + (event.content ?? ""),
                   }));
                   break;
@@ -547,6 +665,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     content: prev.content + (event.content ?? ""),
                   }));
                   break;
@@ -555,6 +674,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     toolCalls: applyToolCallEvent(prev.toolCalls, event),
                   }));
                   break;
@@ -563,6 +683,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     toolCalls: applyToolResultEvent(prev.toolCalls, event),
                   }));
                   break;
@@ -571,6 +692,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     gateRequested: true,
                     gateRequestMessage: event.content || undefined,
                   }));
@@ -584,6 +706,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     error: event.content || "Erro durante execução do agente.",
                   }));
                   break;
@@ -592,6 +715,7 @@ export function AgentChatPanel({
                   updateAssistant((prev) => ({
                     ...prev,
                     harness: event.harness || prev.harness,
+                    model: eventModel || prev.model,
                     streaming: false,
                   }));
                   const doneSessionId =
@@ -691,7 +815,9 @@ export function AgentChatPanel({
       project.id,
       project.latest_artifacts,
       pushToast,
+      selectedEffort,
       selectedHarness,
+      selectedModel,
       streaming,
       triggerProjectSync,
     ],
@@ -938,6 +1064,77 @@ export function AgentChatPanel({
           >
             {isGateApproved ? "Gate 2 — Autorizado" : "Gate 1 — Aguardando"}
           </Badge>
+        </div>
+
+        {/* Sub-barra compacta de Modelo e Raciocínio (Effort) */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            <label
+              htmlFor="agent-model-select"
+              className="shrink-0 text-[10px] font-medium text-ink-muted"
+            >
+              Modelo
+            </label>
+            <select
+              id="agent-model-select"
+              aria-label="Modelo do agente"
+              value={selectedModel}
+              disabled={streaming}
+              onChange={(e) => {
+                const next = e.target.value;
+                setSelectedModel(next);
+                saveStoredHarnessPref(
+                  MODEL_STORAGE_PREFIX,
+                  selectedHarness,
+                  next,
+                );
+              }}
+              className="h-6 min-w-0 flex-1 rounded border border-border bg-surface-subtle px-1.5 text-[11px] text-ink focus:border-accent focus:outline-none cursor-pointer disabled:opacity-50"
+            >
+              <option value="">Padrão do CLI</option>
+              {selectedModel &&
+                !availableModels.some((m) => m.id === selectedModel) && (
+                  <option value={selectedModel}>{selectedModel}</option>
+                )}
+              {availableModels.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label || m.id}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <label
+              htmlFor="agent-effort-select"
+              className="shrink-0 text-[10px] font-medium text-ink-muted"
+            >
+              Raciocínio
+            </label>
+            <select
+              id="agent-effort-select"
+              aria-label="Raciocínio (Effort)"
+              value={selectedEffort}
+              disabled={streaming}
+              onChange={(e) => {
+                const next = e.target.value;
+                setSelectedEffort(next);
+                saveStoredHarnessPref(
+                  EFFORT_STORAGE_PREFIX,
+                  selectedHarness,
+                  next,
+                );
+              }}
+              className="h-6 rounded border border-border bg-surface-subtle px-1.5 text-[11px] text-ink focus:border-accent focus:outline-none cursor-pointer disabled:opacity-50"
+            >
+              <option value="">Padrão</option>
+              {effortLevels.map((lvl) => (
+                <option key={lvl} value={lvl}>
+                  {EFFORT_LABELS[lvl] ?? lvl}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         {/* Indicador de sessão contínua + botão Nova sessão */}

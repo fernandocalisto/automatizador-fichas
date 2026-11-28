@@ -352,6 +352,16 @@ export function MessageBubble({
   const hasThoughts = Boolean(message.thoughts && message.thoughts.length > 0);
   const toolCalls = message.toolCalls ?? [];
   const syncedArtifacts = message.syncedArtifacts ?? [];
+  const effectiveModel =
+    (typeof message.model === "string" && message.model.trim()
+      ? message.model.trim()
+      : null) ||
+    (typeof message.metadata?.model === "string" && message.metadata.model.trim()
+      ? message.metadata.model.trim()
+      : typeof message.metadata?.resolved_model === "string" &&
+          message.metadata.resolved_model.trim()
+        ? message.metadata.resolved_model.trim()
+        : null);
 
   return (
     <div
@@ -365,13 +375,23 @@ export function MessageBubble({
     >
       {/* Header do assistente */}
       <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          <span className="flex h-5 w-5 items-center justify-center rounded bg-accent-soft text-accent">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-accent-soft text-accent">
             <Bot className="h-3.5 w-3.5" />
           </span>
           <span className="font-semibold text-ink">
             {getHarnessLabel(message.harness)}
           </span>
+          {effectiveModel && (
+            <Badge
+              data-testid="assistant-model-badge"
+              tone="neutral"
+              className="max-w-[180px] truncate py-0 font-mono text-[10px]"
+              title={`Modelo: ${effectiveModel}`}
+            >
+              {effectiveModel}
+            </Badge>
+          )}
           {message.streaming && (
             <Badge tone="accent" className="py-0 text-[10px]">
               <Loader2 className="h-2.5 w-2.5 animate-spin" />
@@ -380,7 +400,7 @@ export function MessageBubble({
           )}
         </div>
         {timeLabel && (
-          <span className="text-[10px] text-ink-muted tabular-nums">
+          <span className="shrink-0 text-[10px] text-ink-muted tabular-nums">
             {timeLabel}
           </span>
         )}

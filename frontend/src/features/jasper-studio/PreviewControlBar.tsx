@@ -271,11 +271,83 @@ export function PreviewControlBar({
     return null;
   }, [sourceOrigin]);
 
+  const renderExportDropdown = () => (
+    <div ref={exportMenuRef} className="relative">
+      <Button
+        variant="outline"
+        size="xs"
+        aria-haspopup="menu"
+        aria-expanded={exportOpen}
+        icon={<Download className="h-3.5 w-3.5" />}
+        onClick={() => setExportOpen((prev) => !prev)}
+      >
+        <span>Exportar</span>
+        <ChevronDown className="h-3 w-3 text-ink-muted" />
+      </Button>
+
+      {exportOpen && (
+        <div
+          role="menu"
+          aria-label="Opções de exportação"
+          className="absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-lg border border-border-strong bg-surface-elevated p-1 shadow-xl"
+        >
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!hasJrxml}
+            onClick={() => {
+              setExportOpen(false);
+              onDownloadJrxml();
+            }}
+            className={cn(
+              "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs text-ink transition-colors hover:bg-surface-subtle cursor-pointer",
+              !hasJrxml && "pointer-events-none opacity-50",
+            )}
+          >
+            <Download className="h-3.5 w-3.5 text-ink-muted" />
+            <span>Baixar .jrxml</span>
+          </button>
+
+          <a
+            role="menuitem"
+            href={pdfUrl}
+            target="_blank"
+            rel="noreferrer"
+            aria-disabled={!previewResult}
+            onClick={() => setExportOpen(false)}
+            className={cn(
+              "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs text-ink transition-colors hover:bg-surface-subtle",
+              !previewResult && "pointer-events-none opacity-50",
+            )}
+          >
+            <ExternalLink className="h-3.5 w-3.5 text-ink-muted" />
+            <span>Abrir .pdf</span>
+          </a>
+
+          <a
+            role="menuitem"
+            href={exportBundleUrl}
+            download={`${projectSlug}_entrega_salutem.zip`}
+            aria-disabled={!hasJrxml}
+            onClick={() => setExportOpen(false)}
+            className={cn(
+              "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium text-accent transition-colors hover:bg-accent-soft/60",
+              !hasJrxml && "pointer-events-none opacity-50",
+            )}
+          >
+            <Archive className="h-3.5 w-3.5" />
+            <span>Pacote .zip</span>
+          </a>
+        </div>
+      )}
+    </div>
+  );
+
   if (isFreeReport) {
     return (
       <div
         data-testid="preview-control-bar-free-report"
-        className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-surface px-3 py-2"
+        className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-surface px-3 py-1.5"
       >
         {/* Barra única contextual para Relatório Livre */}
         <div className="flex flex-wrap items-center justify-between gap-2">
@@ -375,76 +447,7 @@ export function PreviewControlBar({
               </Button>
             )}
 
-            {/* Menu Exportar ▾ */}
-            <div ref={exportMenuRef} className="relative">
-              <Button
-                variant="outline"
-                size="xs"
-                aria-haspopup="menu"
-                aria-expanded={exportOpen}
-                icon={<Download className="h-3.5 w-3.5" />}
-                onClick={() => setExportOpen((prev) => !prev)}
-              >
-                <span>Exportar</span>
-                <ChevronDown className="h-3 w-3 text-ink-muted" />
-              </Button>
-
-              {exportOpen && (
-                <div
-                  role="menu"
-                  aria-label="Opções de exportação"
-                  className="absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-lg border border-border-strong bg-surface-elevated p-1 shadow-xl"
-                >
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={!hasJrxml}
-                    onClick={() => {
-                      setExportOpen(false);
-                      onDownloadJrxml();
-                    }}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs text-ink transition-colors hover:bg-surface-subtle cursor-pointer",
-                      !hasJrxml && "pointer-events-none opacity-50",
-                    )}
-                  >
-                    <Download className="h-3.5 w-3.5 text-ink-muted" />
-                    <span>Baixar .jrxml</span>
-                  </button>
-
-                  <a
-                    role="menuitem"
-                    href={pdfUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    aria-disabled={!previewResult}
-                    onClick={() => setExportOpen(false)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs text-ink transition-colors hover:bg-surface-subtle",
-                      !previewResult && "pointer-events-none opacity-50",
-                    )}
-                  >
-                    <ExternalLink className="h-3.5 w-3.5 text-ink-muted" />
-                    <span>Abrir .pdf</span>
-                  </a>
-
-                  <a
-                    role="menuitem"
-                    href={exportBundleUrl}
-                    download={`${projectSlug}_entrega_salutem.zip`}
-                    aria-disabled={!hasJrxml}
-                    onClick={() => setExportOpen(false)}
-                    className={cn(
-                      "flex w-full items-center gap-2 rounded px-2.5 py-1.5 text-left text-xs font-medium text-accent transition-colors hover:bg-accent-soft/60",
-                      !hasJrxml && "pointer-events-none opacity-50",
-                    )}
-                  >
-                    <Archive className="h-3.5 w-3.5" />
-                    <span>Pacote .zip</span>
-                  </a>
-                </div>
-              )}
-            </div>
+            {renderExportDropdown()}
 
             {headerExtraActions}
           </div>
@@ -464,13 +467,16 @@ export function PreviewControlBar({
     );
   }
 
-  // Modo completo para Ficha Clínica (preserva todos os controles e testes existentes)
+  // Barra única compacta para Ficha Clínica (maximiza área útil do PDF)
   return (
-    <div className="flex shrink-0 flex-col gap-2 border-b border-border bg-surface px-3 py-2">
-      {/* Linha 1: Cenários fictícios + Modo + Switcher de Layout + Botão Atualizar preview */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Seletor de cenários fictícios */}
+    <div
+      data-testid="preview-control-bar-clinical"
+      className="flex shrink-0 flex-col gap-1.5 border-b border-border bg-surface px-3 py-1.5"
+    >
+      {/* Linha única principal: Cenários compactos + Modo + Layout + Status + Ações + Exportar */}
+      <div className="flex flex-wrap items-center justify-between gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/* Seletor compacto de cenários fictícios */}
           <div
             role="group"
             aria-label="Cenário fictício de preview"
@@ -482,17 +488,18 @@ export function PreviewControlBar({
                 <button
                   key={opt.id}
                   type="button"
-                  title={opt.description}
+                  aria-label={opt.label}
+                  title={`${opt.label} — ${opt.description}`}
                   aria-pressed={active}
                   onClick={() => onChangeScenario(opt.id)}
                   className={cn(
-                    "rounded px-2 py-1 text-xs font-medium transition-colors cursor-pointer",
+                    "rounded px-2 py-0.5 text-xs font-medium transition-colors cursor-pointer",
                     active
                       ? "bg-surface text-ink shadow-xs"
                       : "text-ink-muted hover:text-ink",
                   )}
                 >
-                  {opt.label}
+                  {opt.shortLabel}
                 </button>
               );
             })}
@@ -503,7 +510,7 @@ export function PreviewControlBar({
             aria-label="Modo de preview"
             value={mode}
             onChange={(e) => onChangeMode(e.target.value as PreviewMode)}
-            className="h-8 w-44 text-xs"
+            className="h-7 w-40 text-xs"
           >
             {PREVIEW_MODE_OPTIONS.map((opt) => (
               <option key={opt.id} value={opt.id}>
@@ -518,9 +525,57 @@ export function PreviewControlBar({
               onChangeLayoutMode={onChangeLayoutMode}
             />
           )}
+
+          {/* Badges compactos de status do preview */}
+          {previewResult && (
+            <>
+              {previewResult.single_page_ok ? (
+                <Badge tone="success" dot>
+                  <CheckCircle2 className="h-3 w-3" />1 página OK
+                </Badge>
+              ) : (
+                <Badge tone="danger" dot>
+                  <AlertTriangle className="h-3 w-3" />
+                  Estouro de página ({previewResult.page_count} páginas)
+                </Badge>
+              )}
+
+              <Badge
+                tone={
+                  previewResult.effective_mode === "db_hybrid" ||
+                  previewResult.effective_mode === "db_live"
+                    ? "blueprint"
+                    : "neutral"
+                }
+              >
+                Modo:{" "}
+                {previewResult.effective_mode === "db_live"
+                  ? "Live (Banco Real)"
+                  : previewResult.effective_mode === "db_hybrid"
+                    ? "Banco Híbrido (CTE)"
+                    : "Offline (Mock)"}
+              </Badge>
+
+              {previewResult.fallback_reason && (
+                <Badge
+                  tone="warning"
+                  title={previewResult.fallback_reason}
+                  className="max-w-xs truncate text-left"
+                >
+                  Fallback: {previewResult.fallback_reason}
+                </Badge>
+              )}
+            </>
+          )}
+
+          <RepoResourcesChip
+            repoStatus={repoStatus}
+            syncingRepo={syncingRepo}
+            onSyncRepoResources={onSyncRepoResources}
+          />
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           {layoutMode === "visual" && onOpenAgentChat && (
             <Button
               variant="blueprint"
@@ -541,12 +596,14 @@ export function PreviewControlBar({
           >
             Atualizar preview
           </Button>
+          {renderExportDropdown()}
+          {headerExtraActions}
         </div>
       </div>
 
-      {/* Linha condicional para Banco Híbrido (CTE) ou Live (Banco Real) */}
+      {/* Linha condicional compacta para Banco Híbrido (CTE) ou Live (Banco Real) */}
       {(mode === "db_hybrid" || mode === "db_live") && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-blueprint/25 bg-blueprint-soft/45 px-2.5 py-1.5">
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-blueprint/25 bg-blueprint-soft/45 px-2.5 py-1">
           <div className="flex items-center gap-1.5 text-xs font-medium text-blueprint">
             <Database className="h-3.5 w-3.5" />
             <span>PostgreSQL:</span>
@@ -588,100 +645,6 @@ export function PreviewControlBar({
           )}
         </div>
       )}
-
-      {/* Linha 2: Badges de resultado + Exportação Final */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {previewResult && (
-            <>
-              {previewResult.single_page_ok ? (
-                <Badge tone="success" dot>
-                  <CheckCircle2 className="h-3 w-3" />1 página OK
-                </Badge>
-              ) : (
-                <Badge tone="danger" dot>
-                  <AlertTriangle className="h-3 w-3" />
-                  Estouro de página ({previewResult.page_count} páginas)
-                </Badge>
-              )}
-
-              <Badge
-                tone={
-                  previewResult.effective_mode === "db_hybrid" ||
-                  previewResult.effective_mode === "db_live"
-                    ? "blueprint"
-                    : "neutral"
-                }
-              >
-                Modo:{" "}
-                {previewResult.effective_mode === "db_live"
-                  ? "Live (Banco Real)"
-                  : previewResult.effective_mode === "db_hybrid"
-                    ? "Banco Híbrido (CTE)"
-                    : "Offline (Mock)"}
-              </Badge>
-
-              {previewResult.fallback_reason && (
-                <Badge
-                  tone="warning"
-                  title={previewResult.fallback_reason}
-                  className="max-w-full whitespace-normal break-words text-left leading-snug"
-                >
-                  Fallback: {previewResult.fallback_reason}
-                </Badge>
-              )}
-            </>
-          )}
-
-          <RepoResourcesChip
-            repoStatus={repoStatus}
-            syncingRepo={syncingRepo}
-            onSyncRepoResources={onSyncRepoResources}
-          />
-        </div>
-
-        {/* Barra de Exportação Final */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Button
-            variant="outline"
-            size="xs"
-            disabled={!hasJrxml}
-            icon={<Download className="h-3.5 w-3.5" />}
-            onClick={onDownloadJrxml}
-          >
-            Baixar .jrxml
-          </Button>
-
-          <a
-            href={pdfUrl}
-            target="_blank"
-            rel="noreferrer"
-            aria-disabled={!previewResult}
-            className={cn(
-              "inline-flex h-7 items-center gap-1 rounded border border-border bg-surface px-2 text-xs font-medium text-ink transition-colors hover:border-border-strong hover:bg-surface-subtle/60",
-              !previewResult && "pointer-events-none opacity-50",
-            )}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            Abrir .pdf
-          </a>
-
-          <a
-            href={exportBundleUrl}
-            download={`${projectSlug}_entrega_salutem.zip`}
-            aria-disabled={!hasJrxml}
-            className={cn(
-              "inline-flex h-7 items-center gap-1.5 rounded border border-accent bg-accent px-2.5 text-xs font-semibold text-accent-ink shadow-xs transition-colors hover:bg-accent-hover",
-              !hasJrxml && "pointer-events-none opacity-50",
-            )}
-          >
-            <Archive className="h-3.5 w-3.5" />
-            Baixar pacote de entrega (.zip)
-          </a>
-
-          {headerExtraActions}
-        </div>
-      </div>
 
       {/* Erro de geração de preview */}
       {previewError && (

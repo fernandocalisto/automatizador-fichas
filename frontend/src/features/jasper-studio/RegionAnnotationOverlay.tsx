@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { Crosshair, Send, X } from "lucide-react";
 import { Badge, Button, FieldLabel, Textarea } from "@/components/ui";
 import { cn } from "@/lib/cn";
@@ -29,6 +29,7 @@ export interface RegionAnnotationOverlayProps {
   annotations: VisualRegionAnnotation[];
   submitting: boolean;
   onSubmitAnnotation: (payload: RegionAnnotationSubmitPayload) => Promise<void>;
+  onRequestExitSelection?: () => void;
 }
 
 interface PendingSelection {
@@ -45,6 +46,7 @@ export function RegionAnnotationOverlay({
   annotations,
   submitting,
   onSubmitAnnotation,
+  onRequestExitSelection,
 }: RegionAnnotationOverlayProps) {
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(
@@ -58,6 +60,42 @@ export function RegionAnnotationOverlay({
   const [validationError, setValidationError] = useState<string | null>(null);
 
   const pageDims = getPageDimensions(orientation);
+
+  // Limpa drag/popover se o modo de seleção for desativado externamente
+  useEffect(() => {
+    if (!active) {
+      setDragStart(null);
+      setDragCurrent(null);
+      setPending(null);
+      setNoteText("");
+      setValidationError(null);
+    }
+  }, [active]);
+
+  // Tecla Escape cancela drag/popover ativo ou sai do modo de seleção
+  useEffect(() => {
+    if (!active && !pending && !dragStart) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (dragStart || pending) {
+        event.preventDefault();
+        event.stopPropagation();
+        setDragStart(null);
+        setDragCurrent(null);
+        setPending(null);
+        setNoteText("");
+        setValidationError(null);
+        return;
+      }
+      if (active) {
+        event.preventDefault();
+        event.stopPropagation();
+        onRequestExitSelection?.();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [active, dragStart, onRequestExitSelection, pending]);
 
   const clientToNormalized = useCallback(
     (clientX: number, clientY: number): { x: number; y: number } => {
@@ -143,6 +181,7 @@ export function RegionAnnotationOverlay({
     });
     setPending(null);
     setNoteText("");
+    onRequestExitSelection?.();
   };
 
   const activeBox: NormalizedRect | null =
@@ -176,27 +215,41 @@ export function RegionAnnotationOverlay({
           : "pointer-events-none",
       )}
     >
-      {/* Marcadores já enviados nesta página */}
+      {/* Marcadores visíveis nesta página */}
       {pageAnnotations.map((ann, idx) => {
         const leftPct = (ann.pdfRect.x0 / pageDims.width) * 100;
         const topPct = (ann.pdfRect.y0 / pageDims.height) * 100;
         const widthPct = (ann.pdfRect.width / pageDims.width) * 100;
         const heightPct = (ann.pdfRect.height / pageDims.height) * 100;
+        const isResolved = ann.resolved === true;
 
         return (
           <div
             key={ann.id}
-            title={`#${idx + 1}: ${ann.content}`}
+            data-testid="region-annotation-box"
+            data-resolved={isResolved ? "true" : "false"}
+            title={`#${idx + 1}${isResolved ? " (Resolvido)" : ""}: ${ann.content}`}
             style={{
               left: `${leftPct}%`,
               top: `${topPct}%`,
               width: `${widthPct}%`,
               height: `${heightPct}%`,
             }}
-            className="pointer-events-none absolute border-2 border-blueprint bg-blueprint/12"
+            className={cn(
+              "pointer-events-none absolute border-2",
+              isResolved
+                ? "border-dashed border-ink-muted/60 bg-ink-muted/10"
+                : "border-blueprint bg-blueprint/12",
+            )}
           >
-            <span className="absolute -top-5 left-0 rounded bg-blueprint px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white shadow-xs">
+            <span
+              className={cn(
+                "absolute -top-5 left-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white shadow-xs",
+                isResolved ? "bg-ink-muted" : "bg-blueprint",
+              )}
+            >
               #{idx + 1}
+              {isResolved ? " ✓" : ""}
             </span>
           </div>
         );
@@ -206,7 +259,9 @@ export function RegionAnnotationOverlay({
       {active && !pending && !dragStart && (
         <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5 rounded-md border border-accent/40 bg-surface/95 px-2.5 py-1 text-[11px] font-medium text-accent shadow-sm">
           <Crosshair className="h-3.5 w-3.5" />
-          <span>Arraste um retângulo sobre a área que deseja ajustar</span>
+          <span>
+            Arraste um retângulo sobre a área que deseja ajustar (Esc para sair)
+          </span>
         </div>
       )}
 

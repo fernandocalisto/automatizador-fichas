@@ -266,6 +266,42 @@ export interface HarnessStatus {
   supports_mcp: boolean;
 }
 
+export type AgentEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
+export interface HarnessModelOption {
+  id: string;
+  label: string;
+}
+
+export interface HarnessModelsResponse {
+  harness_id: string;
+  default_model: string | null;
+  models: HarnessModelOption[];
+  supports_effort: boolean;
+  effort_levels: string[];
+}
+
+export interface AgentWarmupPayload {
+  phase?: ChatPhase;
+  harness?: string;
+  model?: string;
+  effort?: string;
+}
+
+export interface AgentWarmupResponse {
+  ok?: boolean;
+  warmed?: boolean;
+  harness?: string;
+  [key: string]: unknown;
+}
+
+export interface ResolveVisualFeedbackResponse {
+  ok: boolean;
+  project_id?: string;
+  resolved_count?: number;
+  [key: string]: unknown;
+}
+
 export interface ClinicalWarningItem {
   code?: string;
   severity?: string;

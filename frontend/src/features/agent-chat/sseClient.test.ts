@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api";
 import {
   createSseParser,
+  normalizePersistedChatMessage,
   streamAgentTurn,
   type AgentStreamEvent,
 } from "./sseClient";
@@ -227,5 +228,53 @@ describe("streamAgentTurn", () => {
 
     expect(received).toHaveLength(1);
     expect(received[0].content).toBe("Parte 1");
+  });
+
+  it("envia model e effort opcionais no payload de /agent/stream e normaliza metadata.model persistido", async () => {
+    const sseStream = encodeChunks([
+      'event: done\ndata: {"type":"done","content":"","metadata":{"resolved_model":"gemini-2.5-pro"}}\n\n',
+    ]);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(sseStream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+
+    const received: AgentStreamEvent[] = [];
+    await streamAgentTurn(
+      "proj-model",
+      {
+        phase: "jrxml",
+        prompt: "Ajustar margens",
+        harness_id: "agy",
+        model: "gemini-2.5-pro",
+        effort: "xhigh",
+      },
+      { onEvent: (ev) => received.push(ev) },
+    );
+
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(JSON.parse(String(init?.body ?? "{}"))).toEqual({
+      phase: "jrxml",
+      prompt: "Ajustar margens",
+      harness_id: "agy",
+      model: "gemini-2.5-pro",
+      effort: "xhigh",
+    });
+    expect(received[0]?.metadata?.resolved_model).toBe("gemini-2.5-pro");
+
+    const normalized = normalizePersistedChatMessage({
+      id: 99,
+      project_id: "proj-model",
+      phase: "jrxml",
+      role: "assistant",
+      content: "Margens atualizadas.",
+      metadata: { harness: "agy", model: "gemini-2.5-pro" },
+      metadata_json: "{}",
+      created_at: "2026-11-26T10:00:00Z",
+    });
+    expect(normalized.model).toBe("gemini-2.5-pro");
   });
 });

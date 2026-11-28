@@ -244,4 +244,33 @@ describe("ProjectOverviewView", () => {
       expect(onProjectUpdated).toHaveBeenCalledWith(updated);
     });
   });
+
+  it("enforces horizontal overflow containment and iframe isolation for 1280x800 split layout", async () => {
+    const listRevsSpy = vi.spyOn(api, "listRevisions").mockResolvedValue([]);
+    render(
+      <ToastProvider>
+        <ProjectOverviewView
+          project={makeProject()}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    await waitFor(() => {
+      expect(listRevsSpy).toHaveBeenCalledTimes(1);
+    });
+
+    const leftPane = screen.getByTestId("project-overview-left-pane");
+    const rightPane = screen.getByTestId("project-overview-right-pane");
+    expect(leftPane.className).toContain("min-w-0");
+    expect(leftPane.className).toContain("overflow-x-hidden");
+    expect(rightPane.className).toContain("isolate");
+    expect(rightPane.className).toContain("overflow-hidden");
+
+    const stepper = screen.getByRole("list", {
+      name: /Progresso das etapas do projeto/i,
+    });
+    expect(stepper.className).not.toContain("lg:grid-cols-6");
+  });
 });

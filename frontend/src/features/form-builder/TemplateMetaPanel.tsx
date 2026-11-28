@@ -101,12 +101,15 @@ export function TemplateMetaPanel({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div>
-              <FieldLabel htmlFor="tpl-orientacao">Orientação</FieldLabel>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
+            <div className="min-w-0 md:col-span-5">
+              <FieldLabel htmlFor="tpl-orientacao" className="whitespace-nowrap">
+                Orientação
+              </FieldLabel>
               <Select
                 id="tpl-orientacao"
                 value={orientacao}
+                className="text-xs whitespace-nowrap"
                 onChange={(e) =>
                   update({
                     orientacao: e.target.value as ClinicalOrientation,
@@ -121,13 +124,14 @@ export function TemplateMetaPanel({
               </Select>
             </div>
 
-            <div>
-              <FieldLabel htmlFor="tpl-assinatura">
+            <div className="min-w-0 md:col-span-4">
+              <FieldLabel htmlFor="tpl-assinatura" className="whitespace-nowrap">
                 Posição da assinatura
               </FieldLabel>
               <Select
                 id="tpl-assinatura"
                 value={posicaoAssinatura}
+                className="text-xs whitespace-nowrap"
                 onChange={(e) =>
                   update({
                     posicao_assinatura: e.target.value as SignaturePosition,
@@ -142,8 +146,8 @@ export function TemplateMetaPanel({
               </Select>
             </div>
 
-            <div>
-              <FieldLabel htmlFor="tpl-paginas">
+            <div className="min-w-0 md:col-span-3">
+              <FieldLabel htmlFor="tpl-paginas" className="whitespace-nowrap">
                 Quantidade de páginas
               </FieldLabel>
               <Input

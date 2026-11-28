@@ -33,7 +33,12 @@ import { JasperServerImportTab } from "@/features/jasperserver";
 import { SftpImportTab } from "@/features/sftp";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/cn";
-import type { DbProfileRead, EntryMode, ProjectRead } from "@/types/studio";
+import type {
+  DbProfileRead,
+  EntryMode,
+  ProjectKind,
+  ProjectRead,
+} from "@/types/studio";
 import { formatBytes, HARNESS_OPTIONS } from "./projectMeta";
 
 export interface CreateProjectDialogProps {
@@ -104,6 +109,8 @@ export function CreateProjectDialog({
   const [dragActive, setDragActive] = useState(false);
   const [initialJson, setInitialJson] = useState("");
   const [initialJrxml, setInitialJrxml] = useState("");
+  const [jrxmlProjectKind, setJrxmlProjectKind] =
+    useState<ProjectKind>("free_report");
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -116,6 +123,7 @@ export function CreateProjectDialog({
     setEntryMode(initialEntryMode ?? "pdf");
     setName(initialName ?? "");
     setDefaultDbProfileId(initialDbProfileId ?? "");
+    setJrxmlProjectKind("free_report");
     setErrorMsg(null);
 
     let active = true;
@@ -144,6 +152,7 @@ export function CreateProjectDialog({
     setDragActive(false);
     setInitialJson("");
     setInitialJrxml("");
+    setJrxmlProjectKind("free_report");
     setErrorMsg(null);
   };
 
@@ -239,6 +248,8 @@ export function CreateProjectDialog({
       };
       if (entryMode === "blank_report") {
         payload.project_kind = "free_report";
+      } else if (entryMode === "jrxml") {
+        payload.project_kind = jrxmlProjectKind;
       }
       if (defaultDbProfileId) {
         payload.default_db_profile_id = defaultDbProfileId;
@@ -562,43 +573,99 @@ export function CreateProjectDialog({
             )}
 
             {entryMode === "jrxml" && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <FieldLabel htmlFor="project-initial-jrxml" className="mb-0">
-                    Conteúdo JRXML inicial *
-                  </FieldLabel>
-                  <div>
-                    <input
-                      ref={jrxmlFileRef}
-                      type="file"
-                      accept=".jrxml,.xml,application/xml,text/xml"
-                      aria-label="Carregar arquivo JRXML"
-                      className="hidden"
-                      onChange={(e) =>
-                        void handleLoadTextFile(
-                          e.target.files?.[0] ?? null,
-                          "jrxml",
-                        )
-                      }
-                    />
-                    <Button
-                      variant="outline"
-                      size="xs"
-                      icon={<Upload className="h-3 w-3" />}
-                      onClick={() => jrxmlFileRef.current?.click()}
+              <div className="space-y-3">
+                <div>
+                  <FieldLabel>Tipo de projeto</FieldLabel>
+                  <div
+                    role="radiogroup"
+                    aria-label="Tipo de projeto"
+                    className="grid grid-cols-1 gap-2 sm:grid-cols-2"
+                  >
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={jrxmlProjectKind === "free_report"}
+                      onClick={() => setJrxmlProjectKind("free_report")}
+                      className={cn(
+                        "flex flex-col items-start rounded-lg border px-3 py-2 text-left transition-colors cursor-pointer",
+                        jrxmlProjectKind === "free_report"
+                          ? "border-accent bg-accent-soft/50 text-ink"
+                          : "border-border bg-surface hover:border-border-strong text-ink-secondary",
+                      )}
                     >
-                      Carregar .jrxml
-                    </Button>
+                      <span className="text-xs font-semibold text-ink">
+                        Relatório Livre
+                      </span>
+                      <span className="mt-0.5 text-[11px] text-ink-muted">
+                        Abre direto no Jasper Studio e SQL Workbench (sem Form
+                        Builder).
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      role="radio"
+                      aria-checked={jrxmlProjectKind === "clinical_form"}
+                      onClick={() => setJrxmlProjectKind("clinical_form")}
+                      className={cn(
+                        "flex flex-col items-start rounded-lg border px-3 py-2 text-left transition-colors cursor-pointer",
+                        jrxmlProjectKind === "clinical_form"
+                          ? "border-accent bg-accent-soft/50 text-ink"
+                          : "border-border bg-surface hover:border-border-strong text-ink-secondary",
+                      )}
+                    >
+                      <span className="text-xs font-semibold text-ink">
+                        Ficha Clínica
+                      </span>
+                      <span className="mt-0.5 text-[11px] text-ink-muted">
+                        Pipeline clínico completo Salutem (Etapas 1 a 4 com JSON
+                        e INSERT).
+                      </span>
+                    </button>
                   </div>
                 </div>
-                <Textarea
-                  id="project-initial-jrxml"
-                  rows={8}
-                  className="font-mono text-xs leading-relaxed"
-                  placeholder='<?xml version="1.0" encoding="UTF-8"?><jasperReport ...>'
-                  value={initialJrxml}
-                  onChange={(e) => setInitialJrxml(e.target.value)}
-                />
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <FieldLabel
+                      htmlFor="project-initial-jrxml"
+                      className="mb-0"
+                    >
+                      Conteúdo JRXML inicial *
+                    </FieldLabel>
+                    <div>
+                      <input
+                        ref={jrxmlFileRef}
+                        type="file"
+                        accept=".jrxml,.xml,application/xml,text/xml"
+                        aria-label="Carregar arquivo JRXML"
+                        className="hidden"
+                        onChange={(e) =>
+                          void handleLoadTextFile(
+                            e.target.files?.[0] ?? null,
+                            "jrxml",
+                          )
+                        }
+                      />
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        icon={<Upload className="h-3 w-3" />}
+                        onClick={() => jrxmlFileRef.current?.click()}
+                      >
+                        Carregar .jrxml
+                      </Button>
+                    </div>
+                  </div>
+                  <Textarea
+                    id="project-initial-jrxml"
+                    rows={8}
+                    className="font-mono text-xs leading-relaxed"
+                    placeholder='<?xml version="1.0" encoding="UTF-8"?><jasperReport ...>'
+                    value={initialJrxml}
+                    onChange={(e) => setInitialJrxml(e.target.value)}
+                  />
+                </div>
               </div>
             )}
 

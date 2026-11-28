@@ -246,7 +246,11 @@ export function PreviewControlBar({
     db_profile_id: effectiveProfileId,
   });
 
-  const pdfUrl = api.getPreviewPdfUrl(projectId, scenario, cacheBuster);
+  const pdfUrl = api.getPreviewPdfUrl(
+    projectId,
+    previewResult?.scenario ?? scenario,
+    cacheBuster,
+  );
 
   const dbProfileOptions = useMemo<SearchableSelectOption[]>(
     () =>
@@ -341,7 +345,7 @@ export function PreviewControlBar({
               <Badge
                 tone="warning"
                 title={previewResult.fallback_reason}
-                className="max-w-xs truncate"
+                className="max-w-full whitespace-normal break-words text-left leading-snug"
               >
                 Fallback: {previewResult.fallback_reason}
               </Badge>
@@ -621,7 +625,7 @@ export function PreviewControlBar({
                 <Badge
                   tone="warning"
                   title={previewResult.fallback_reason}
-                  className="max-w-xs truncate"
+                  className="max-w-full whitespace-normal break-words text-left leading-snug"
                 >
                   Fallback: {previewResult.fallback_reason}
                 </Badge>

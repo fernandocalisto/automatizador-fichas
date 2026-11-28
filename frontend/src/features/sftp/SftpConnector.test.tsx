@@ -263,11 +263,15 @@ describe("SftpDeployModal", () => {
     });
     expect(validateBtn).toBeDisabled();
 
-    // Switch to writable HML profile -> button enables
-    await user.selectOptions(
-      screen.getByLabelText("Servidor SFTP de destino"),
-      "sftp-hml-1",
+    // Switch to writable HML profile via SearchableSelect -> button enables
+    await user.click(
+      screen.getByRole("button", { name: "Servidor SFTP de destino" }),
     );
+    await user.type(
+      screen.getByPlaceholderText(/Buscar servidor por nome, host ou ambiente/i),
+      "10.0.0.200",
+    );
+    await user.click(screen.getByRole("option", { name: /Unidade HML/i }));
     expect(validateBtn).not.toBeDisabled();
 
     // Step 1 -> Prepare

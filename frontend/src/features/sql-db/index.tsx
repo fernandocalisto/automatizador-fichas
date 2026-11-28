@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -15,9 +15,10 @@ import {
   Badge,
   Button,
   CodeEditor,
-  Select,
+  SearchableSelect,
   SplitPane,
   useToast,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import type { SqlDbViewProps } from "@/types/feature-props";
@@ -311,8 +312,35 @@ export function SqlDbView({
         setDryRunState(null);
         setInvalidationReason("profile_changed");
       }
+      // Persiste a seleção no projeto para que F5 mantenha o banco escolhido
+      void api
+        .updateProject(project.id, {
+          default_db_profile_id: nextProfileId || null,
+        })
+        .then((updated) => {
+          if (updated && updated.id) {
+            onProjectUpdated(updated);
+          }
+        })
+        .catch(() => {
+          // Falha transitória de persistência não bloqueia a operação local
+        });
     },
-    [dryRunState],
+    [dryRunState, onProjectUpdated, project.id],
+  );
+
+  const dbProfileOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      profiles.map((prof) => ({
+        value: prof.id,
+        label: prof.name,
+        sublabel: `${prof.host}/${prof.dbname || "postgres"}`,
+        badge:
+          prof.environment ??
+          (prof.read_only ? "RO" : prof.is_default ? "Padrão" : undefined),
+        keywords: `${prof.name} ${prof.host} ${prof.dbname} ${prof.environment ?? ""} ${prof.read_only ? "somente leitura" : ""}`,
+      })),
+    [profiles],
   );
 
   const handleRegenerateSql = useCallback(async () => {
@@ -701,12 +729,14 @@ export function SqlDbView({
         className="flex h-full w-full flex-col overflow-hidden bg-canvas"
       >
         {/* Top Workbench Toolbar */}
-        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface px-3 py-2">
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-border bg-surface px-2.5 py-1.5">
+          <div className="flex min-w-0 items-center gap-1.5">
             <Button
               size="xs"
               variant={schemaExplorerOpen ? "secondary" : "outline"}
               onClick={() => setSchemaExplorerOpen((prev) => !prev)}
+              title="Alternar painel Schema Explorer"
+              className="shrink-0 whitespace-nowrap"
               icon={
                 schemaExplorerOpen ? (
                   <PanelLeftClose className="h-3.5 w-3.5" />
@@ -715,33 +745,34 @@ export function SqlDbView({
                 )
               }
             >
-              Schema Explorer
+              Schema
             </Button>
 
             <div className="flex items-center gap-1.5">
-              <Database className="h-3.5 w-3.5 text-blueprint" />
-              <Select
-                aria-label="Perfil PostgreSQL do Workbench"
+              <Database className="h-3.5 w-3.5 shrink-0 text-blueprint" />
+              <SearchableSelect
+                ariaLabel="Perfil PostgreSQL do Workbench"
                 value={selectedProfileId}
-                onChange={(e) => handleSelectProfileId(e.target.value)}
-                className="h-7 w-56 text-xs"
-              >
-                {profiles.length === 0 ? (
-                  <option value="">Nenhum perfil cadastrado</option>
-                ) : (
-                  profiles.map((prof) => (
-                    <option key={prof.id} value={prof.id}>
-                      {prof.name} ({prof.host}/{prof.dbname || "postgres"})
-                    </option>
-                  ))
-                )}
-              </Select>
+                onChange={handleSelectProfileId}
+                options={dbProfileOptions}
+                placeholder={
+                  profiles.length === 0
+                    ? "Nenhum perfil cadastrado"
+                    : "Selecionar banco PostgreSQL..."
+                }
+                searchPlaceholder="Buscar por nome, host, banco ou ambiente..."
+                emptyLabel="Nenhum perfil encontrado."
+                disabled={loadingProfiles || profiles.length === 0}
+                size="sm"
+                className="w-48 xl:w-56"
+              />
               <Button
                 size="xs"
                 variant="outline"
                 loading={testingConnection}
                 disabled={!selectedProfileId}
                 onClick={handleTestConnection}
+                className="shrink-0 whitespace-nowrap"
                 icon={<PlugZap className="h-3.5 w-3.5 text-blueprint" />}
               >
                 Testar
@@ -749,23 +780,29 @@ export function SqlDbView({
             </div>
 
             {connectionTestResult && (
-              <Badge tone={connectionTestResult.ok ? "success" : "danger"} dot>
+              <Badge
+                tone={connectionTestResult.ok ? "success" : "danger"}
+                dot
+                className="shrink-0"
+              >
                 {connectionTestResult.ok
                   ? `OK · ${connectionTestResult.latency_ms} ms`
-                  : "Falha na conexão"}
+                  : "Falha"}
               </Badge>
             )}
           </div>
 
-          <div className="flex flex-wrap items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1.5">
             <Button
               size="xs"
               variant="outline"
               loading={syncingQuery}
               onClick={() => void handleSyncQuery("jrxml_to_sql")}
+              title="Extrair query <queryString> do JRXML"
+              className="whitespace-nowrap"
               icon={<ArrowDownToLine className="h-3.5 w-3.5" />}
             >
-              Extrair do JRXML
+              Extrair JRXML
             </Button>
 
             <Button
@@ -774,9 +811,11 @@ export function SqlDbView({
               loading={syncingQuery}
               disabled={!selectDraft.trim()}
               onClick={() => void handleSyncQuery("sql_to_jrxml")}
+              title="Aplicar query na tag <queryString> do JRXML"
+              className="whitespace-nowrap"
               icon={<ArrowUpFromLine className="h-3.5 w-3.5" />}
             >
-              Aplicar no JRXML
+              Aplicar JRXML
             </Button>
 
             <Button
@@ -785,9 +824,11 @@ export function SqlDbView({
               loading={validating}
               disabled={!selectDraft.trim()}
               onClick={handleValidateSql}
+              title="Validar sintaxe SQL"
+              className="whitespace-nowrap"
               icon={<ShieldCheck className="h-3.5 w-3.5 text-blueprint" />}
             >
-              Validar sintaxe
+              Validar
             </Button>
 
             <Button
@@ -796,9 +837,11 @@ export function SqlDbView({
               loading={saving}
               disabled={!selectDraft.trim() || !selectDirty}
               onClick={handleSaveRevision}
+              title="Salvar revisão SQL"
+              className="whitespace-nowrap"
               icon={<Save className="h-3.5 w-3.5" />}
             >
-              Salvar revisão
+              Salvar
             </Button>
 
             <Button
@@ -807,15 +850,18 @@ export function SqlDbView({
               loading={runningPreviewSelect}
               disabled={!selectedProfileId || !selectDraft.trim()}
               onClick={() => void handleRunPreviewSelect()}
+              title="Executar Preview SQL (READ ONLY · LIMIT 50)"
+              className="whitespace-nowrap"
               icon={<Play className="h-3.5 w-3.5" />}
             >
-              Executar Preview (READ ONLY · LIMIT 50)
+              Preview (LIMIT 50)
             </Button>
 
             <Button
               size="xs"
               variant="ghost"
               onClick={() => onNavigateSection("jasper_studio")}
+              className="shrink-0 whitespace-nowrap"
               icon={<ArrowRight className="h-3.5 w-3.5" />}
             >
               Jasper Studio

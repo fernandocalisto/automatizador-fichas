@@ -14,6 +14,7 @@ import type {
 import { JasperStudioView } from "./index";
 import {
   convertNormalizedRectToPdfAndDetail,
+  createBlankJrxmlTemplate,
   detectJrxmlOrientation,
 } from "./utils";
 
@@ -200,6 +201,26 @@ describe("JasperStudio utils", () => {
       width: 200,
       height: 150,
     });
+  });
+
+  it("generates lint-compliant blank JRXML with unique UUIDv4 attributes and SQL queryString", () => {
+    const xml = createBlankJrxmlTemplate("PAISAGEM", "relatorio_produtividade");
+    expect(xml).toContain('orientation="Landscape"');
+    expect(xml).toContain('pageWidth="842" pageHeight="595"');
+    expect(xml).toContain('<queryString language="SQL">');
+
+    const uuidMatches = Array.from(
+      xml.matchAll(/\buuid="([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})"/gi),
+    ).map((m) => m[1]);
+    expect(uuidMatches).toHaveLength(3);
+    expect(new Set(uuidMatches).size).toBe(3);
+
+    expect(xml).toMatch(/<jasperReport[\s\S]*?\buuid="[0-9a-f-]{36}"/);
+    const reportElementTags = xml.match(/<reportElement[^>]*>/g) ?? [];
+    expect(reportElementTags).toHaveLength(2);
+    for (const tag of reportElementTags) {
+      expect(tag).toMatch(/\buuid="[0-9a-f-]{36}"/);
+    }
   });
 });
 
@@ -997,5 +1018,193 @@ describe("JasperStudioView", () => {
     expect(
       within(menu).getByRole("menuitem", { name: /Pacote \.zip/i }),
     ).toHaveAttribute("download", `${freeProject.slug}_entrega_salutem.zip`);
+  });
+
+  it("prevents premature 404 PDF/PNG fetch on scenario switch before POST /jasper/preview resolves", async () => {
+    vi.spyOn(api, "getArtifact").mockResolvedValue(makeArtifactRevision());
+
+    let resolveStress!: (res: JasperPreviewResponse) => void;
+    const stressPromise = new Promise<JasperPreviewResponse>((resolve) => {
+      resolveStress = resolve;
+    });
+
+    vi.spyOn(api, "generatePreview").mockImplementation(async (_id, payload) => {
+      if (payload?.scenario === "stress") {
+        return stressPromise;
+      }
+      return makePreviewResponse({ scenario: payload?.scenario ?? "full" });
+    });
+
+    const user = userEvent.setup();
+    renderView();
+
+    await waitFor(() => {
+      expect(screen.getByText(/1 página OK/i)).toBeInTheDocument();
+    });
+
+    // Alterna para PNG para inspecionar a URL efetiva requisitada pelo canvas
+    await user.click(screen.getByRole("button", { name: /^PNG$/i }));
+    const imgBefore = await screen.findByRole("img", {
+      name: /Preview PNG da página 1 \(full\)/i,
+    });
+    expect(imgBefore).toHaveAttribute(
+      "src",
+      expect.stringContaining("scenario=full"),
+    );
+
+    // Clica em "Estresse de texto" -> enquanto o POST não retorna, NÃO deve requisitar scenario=stress!
+    await user.click(
+      screen.getByRole("button", { name: /Estresse de texto/i }),
+    );
+    expect(screen.getByText(/Renderizando preview/i)).toBeInTheDocument();
+    const imgWhileLoading = screen.getByRole("img");
+    expect(imgWhileLoading).toHaveAttribute(
+      "src",
+      expect.stringContaining("scenario=full"),
+    );
+    expect(imgWhileLoading.getAttribute("src")).not.toContain("scenario=stress");
+
+    // Quando o POST resolve, o preview atualiza para scenario=stress
+    resolveStress(
+      makePreviewResponse({
+        scenario: "stress",
+        page_count: 2,
+        single_page_ok: false,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("img")).toHaveAttribute(
+        "src",
+        expect.stringContaining("scenario=stress"),
+      );
+    });
+  });
+
+  it("never dead-ends when free_report has no JRXML: allows creating blank JRXML and uploading .jrxml", async () => {
+    const freeBlankProject: ProjectRead = {
+      ...MOCK_PROJECT,
+      id: "proj-free-empty",
+      slug: "relatorio_novo",
+      name: "Relatório Novo",
+      project_kind: "free_report",
+      entry_mode: "blank_report",
+      latest_artifacts: {},
+    };
+
+    vi.spyOn(api, "getArtifact").mockRejectedValue(
+      new ApiError(404, "No jrxml yet"),
+    );
+    const saveSpy = vi
+      .spyOn(api, "saveArtifact")
+      .mockImplementation(async (_id, _type, payload) => ({
+        artifact: makeArtifactRevision(payload.content, 1),
+        generated_sql_insert: null,
+        generated_sql_select: null,
+      }));
+    vi.spyOn(api, "generatePreview").mockResolvedValue(
+      makePreviewResponse({ project_id: freeBlankProject.id }),
+    );
+
+    const onProjectUpdated = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <JasperStudioView
+          project={freeBlankProject}
+          onProjectUpdated={onProjectUpdated}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    // Em modo visual sem JRXML, oferece Criar JRXML em branco e Enviar arquivo .jrxml
+    const createBlankBtn = await screen.findByRole("button", {
+      name: /Criar JRXML em branco/i,
+    });
+    expect(
+      screen.getByRole("button", { name: /Enviar arquivo \.jrxml/i }),
+    ).toBeInTheDocument();
+
+    // Troca para Só Código -> também não fica preso, oferece Criar JRXML em branco e upload
+    await user.click(screen.getByRole("button", { name: /Só Código/i }));
+    const codeCreateBtn = await screen.findByRole("button", {
+      name: /Criar JRXML em branco/i,
+    });
+    await user.click(codeCreateBtn);
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        freeBlankProject.id,
+        "jrxml",
+        expect.objectContaining({
+          content: expect.stringContaining("<jasperReport"),
+          created_by: "user",
+        }),
+      );
+    });
+
+    const editor = await screen.findByLabelText("Editor XML JRXML");
+    expect(editor).toBeInTheDocument();
+    expect(onProjectUpdated).toHaveBeenCalled();
+
+    // Botão Salvar revisão fica desabilitado quando !dirty e habilita após editar
+    const saveBtn = screen.getByRole("button", { name: /Salvar revisão/i });
+    expect(saveBtn).toBeDisabled();
+
+    fireEvent.change(editor, {
+      target: { value: SAMPLE_PORTRAIT_JRXML + "\n<!-- edit -->" },
+    });
+    expect(saveBtn).toBeEnabled();
+    expect(createBlankBtn).not.toBeInTheDocument();
+  });
+
+  it("persists default_db_profile_id via api.updateProject when changing DB profile", async () => {
+    const freeProject: ProjectRead = {
+      ...MOCK_PROJECT,
+      id: "proj-free-persist-db",
+      slug: "rel_db",
+      name: "Relatório DB",
+      project_kind: "free_report",
+      entry_mode: "blank_report",
+      default_db_profile_id: "prof-homolog",
+    };
+
+    vi.spyOn(api, "getArtifact").mockResolvedValue(makeArtifactRevision());
+    vi.spyOn(api, "generatePreview").mockResolvedValue(
+      makePreviewResponse({ project_id: freeProject.id }),
+    );
+    const updatedProj: ProjectRead = {
+      ...freeProject,
+      default_db_profile_id: "prof-dev",
+    };
+    const updateSpy = vi
+      .spyOn(api, "updateProject")
+      .mockResolvedValue(updatedProj);
+    const onProjectUpdated = vi.fn();
+
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <JasperStudioView
+          project={freeProject}
+          onProjectUpdated={onProjectUpdated}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    const dbTrigger = await screen.findByRole("button", {
+      name: /Perfil PostgreSQL/i,
+    });
+    await user.click(dbTrigger);
+    await user.click(screen.getByRole("option", { name: /Local Dev/i }));
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith(freeProject.id, {
+        default_db_profile_id: "prof-dev",
+      });
+      expect(onProjectUpdated).toHaveBeenCalledWith(updatedProj);
+    });
   });
 });

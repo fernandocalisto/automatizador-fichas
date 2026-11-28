@@ -38,6 +38,7 @@ export interface PdfPreviewCanvasProps {
   orientation: ClinicalOrientation;
   previewResult: JasperPreviewResponse | null;
   previewLoading: boolean;
+  suppressFetch?: boolean;
   cacheBuster: number;
   annotations: VisualRegionAnnotation[];
   submittingAnnotation: boolean;
@@ -55,6 +56,7 @@ export function PdfPreviewCanvas({
   orientation,
   previewResult,
   previewLoading,
+  suppressFetch = false,
   cacheBuster,
   annotations,
   submittingAnnotation,
@@ -76,6 +78,12 @@ export function PdfPreviewCanvas({
   const [renderingPage, setRenderingPage] = useState<boolean>(false);
   const [annotationsExpanded, setAnnotationsExpanded] = useState<boolean>(true);
 
+  // Nunca usar o cenário recém-clicado antes do POST /jasper/preview retornar o PDF dele
+  const effectiveScenario = previewResult?.scenario ?? scenario;
+  const isWaitingScenarioPreview =
+    suppressFetch ||
+    (previewLoading && previewResult?.scenario !== scenario);
+
   const pageDims = getPageDimensions(orientation);
   const totalPages = Math.max(
     1,
@@ -90,7 +98,7 @@ export function PdfPreviewCanvas({
     setCurrentPage(1);
     setPdfNumPages(null);
     setPdfRenderError(null);
-  }, [projectId, scenario, cacheBuster]);
+  }, [projectId, effectiveScenario, cacheBuster]);
 
   useEffect(() => {
     const el = viewportRef.current;
@@ -115,18 +123,25 @@ export function PdfPreviewCanvas({
   }, [zoom, containerWidth, pageDims.width]);
 
   const pdfUrl = useMemo(
-    () => api.getPreviewPdfUrl(projectId, scenario, cacheBuster),
-    [projectId, scenario, cacheBuster],
+    () => api.getPreviewPdfUrl(projectId, effectiveScenario, cacheBuster),
+    [projectId, effectiveScenario, cacheBuster],
   );
 
   const pngUrl = useMemo(
-    () => api.getPreviewPageUrl(projectId, currentPage, scenario, cacheBuster),
-    [projectId, currentPage, scenario, cacheBuster],
+    () =>
+      api.getPreviewPageUrl(
+        projectId,
+        currentPage,
+        effectiveScenario,
+        cacheBuster,
+      ),
+    [projectId, currentPage, effectiveScenario, cacheBuster],
   );
 
   // Renderização PDF.js no navegador real (ignorada com fallback limpo em jsdom)
   useEffect(() => {
     if (!previewResult || rendererMode !== "pdfjs") return;
+    if (isWaitingScenarioPreview) return;
     if (isJsdomRuntime()) return;
 
     let cancelled = false;
@@ -224,7 +239,14 @@ export function PdfPreviewCanvas({
       activeRenderTask?.cancel?.();
       void loadingTask?.destroy?.();
     };
-  }, [previewResult, rendererMode, pdfUrl, currentPage, effectiveScale]);
+  }, [
+    previewResult,
+    rendererMode,
+    pdfUrl,
+    currentPage,
+    effectiveScale,
+    isWaitingScenarioPreview,
+  ]);
 
   const handleStepZoom = (direction: -1 | 1) => {
     const currentNum = zoom === "fit-width" ? effectiveScale : zoom;
@@ -424,7 +446,7 @@ export function PdfPreviewCanvas({
               {rendererMode === "png" ? (
                 <img
                   src={pngUrl}
-                  alt={`Preview PNG da página ${currentPage} (${scenario})`}
+                  alt={`Preview PNG da página ${currentPage} (${effectiveScenario})`}
                   className="h-full w-full select-none object-contain"
                   draggable={false}
                 />
@@ -439,7 +461,7 @@ export function PdfPreviewCanvas({
                   {isJsdomRuntime() && (
                     <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center p-4 text-center text-xs text-ink-muted">
                       <span className="font-semibold text-ink">
-                        Preview PDF.js ({scenario})
+                        Preview PDF.js ({effectiveScenario})
                       </span>
                       <span className="mt-1 font-mono text-[11px]">
                         Página {currentPage} de {totalPages} · {pageDims.width}×
@@ -461,7 +483,7 @@ export function PdfPreviewCanvas({
               <RegionAnnotationOverlay
                 active={selectionMode}
                 page={currentPage}
-                scenario={scenario}
+                scenario={effectiveScenario}
                 orientation={orientation}
                 annotations={annotations}
                 submitting={submittingAnnotation}

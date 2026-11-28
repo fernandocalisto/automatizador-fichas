@@ -27,8 +27,9 @@ import {
   Dialog,
   FieldLabel,
   Input,
-  Select,
+  SearchableSelect,
   Switch,
+  type SearchableSelectOption,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
 import type {
@@ -138,6 +139,22 @@ export function DbGovernancePane({
     [profiles, selectedProfileId],
   );
 
+  const profileOptions = useMemo<SearchableSelectOption[]>(
+    () =>
+      profiles.map((prof) => ({
+        value: prof.id,
+        label: `${prof.name}${prof.is_default ? " ★" : ""}`,
+        sublabel: `${prof.host}:${prof.port}/${prof.dbname}`,
+        badge: prof.read_only
+          ? prof.environment
+            ? `${prof.environment} · RO`
+            : "Somente Leitura"
+          : prof.environment,
+        keywords: `${prof.name} ${prof.host} ${prof.dbname} ${prof.user} ${prof.environment ?? ""} ${prof.read_only ? "somente leitura" : ""}`,
+      })),
+    [profiles],
+  );
+
   const isReadOnlyProfile = selectedProfile?.read_only === true;
   const isDryRunValid = Boolean(dryRunResult?.ok && dryRunResult.dry_run_token);
   const canCommit =
@@ -235,19 +252,16 @@ export function DbGovernancePane({
                   <FieldLabel htmlFor="sql-db-profile-select">
                     Conexão alvo
                   </FieldLabel>
-                  <Select
+                  <SearchableSelect
                     id="sql-db-profile-select"
+                    ariaLabel="Conexão alvo"
                     value={selectedProfileId}
-                    onChange={(e) => onSelectProfileId(e.target.value)}
-                  >
-                    {profiles.map((prof) => (
-                      <option key={prof.id} value={prof.id}>
-                        {prof.name}
-                        {prof.read_only ? " (Somente Leitura)" : ""}
-                        {prof.is_default ? " ★" : ""}
-                      </option>
-                    ))}
-                  </Select>
+                    onChange={onSelectProfileId}
+                    options={profileOptions}
+                    placeholder="Selecionar conexão PostgreSQL..."
+                    searchPlaceholder="Buscar por nome, host, banco ou ambiente..."
+                    emptyLabel="Nenhuma conexão encontrada."
+                  />
                 </div>
 
                 <Button

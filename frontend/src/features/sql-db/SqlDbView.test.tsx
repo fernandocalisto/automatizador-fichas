@@ -320,12 +320,14 @@ describe("SqlDbView", () => {
     // Strictly disabled before Dry-Run
     expect(commitBtn).toBeDisabled();
 
-    // Switch to read-only profile
-    await user.selectOptions(
-      screen.getByLabelText(/Conexão alvo/i),
-      PROFILE_RO.id,
+    // Switch to read-only profile via SearchableSelect
+    await user.click(screen.getByRole("button", { name: /Conexão alvo/i }));
+    await user.click(
+      screen.getByRole("option", { name: /Produção \(Somente Leitura\)/i }),
     );
-    expect(screen.getByText("Somente Leitura")).toBeInTheDocument();
+    expect(screen.getAllByText(/Somente Leitura/i).length).toBeGreaterThanOrEqual(
+      1,
+    );
     expect(screen.getByText(/Trava Somente Leitura ativa/i)).toBeInTheDocument();
 
     // Test connection works
@@ -632,10 +634,10 @@ describe("SqlDbView", () => {
     );
     expect(await screen.findByTestId("dry-run-approved-card")).toBeInTheDocument();
 
-    // Switch profile -> immediately invalidates token
-    await user.selectOptions(
-      screen.getByLabelText(/Conexão alvo/i),
-      PROFILE_RO.id,
+    // Switch profile via SearchableSelect -> immediately invalidates token
+    await user.click(screen.getByRole("button", { name: /Conexão alvo/i }));
+    await user.click(
+      screen.getByRole("option", { name: /Produção \(Somente Leitura\)/i }),
     );
     expect(screen.queryByTestId("dry-run-approved-card")).not.toBeInTheDocument();
     expect(
@@ -656,5 +658,55 @@ describe("SqlDbView", () => {
       });
     });
     expect(await screen.findByText("paciente_nome")).toBeInTheDocument();
+  });
+
+  it("uses SearchableSelect in free_report SQL Workbench and persists default_db_profile_id on change", async () => {
+    const freeProject = makeProject({
+      id: "proj-free-sql",
+      project_kind: "free_report",
+      entry_mode: "blank_report",
+      default_db_profile_id: PROFILE_RW.id,
+    });
+    vi.spyOn(api, "getArtifact").mockImplementation(async (_id, type) => {
+      if (type === "sql_select") return SAMPLE_SELECT_ARTIFACT;
+      throw new ApiError(404, "Not found");
+    });
+    vi.spyOn(api, "listDbProfiles").mockResolvedValue([PROFILE_RW, PROFILE_RO]);
+
+    const updatedProj: ProjectRead = {
+      ...freeProject,
+      default_db_profile_id: PROFILE_RO.id,
+    };
+    const updateSpy = vi
+      .spyOn(api, "updateProject")
+      .mockResolvedValue(updatedProj);
+    const onProjectUpdated = vi.fn();
+
+    const user = userEvent.setup();
+    renderSqlDbView({ project: freeProject, onProjectUpdated });
+
+    expect(
+      await screen.findByTestId("free-report-sql-workbench"),
+    ).toBeInTheDocument();
+
+    // SearchableSelect for DB profile in free_report workbench
+    const trigger = screen.getByRole("button", {
+      name: /Perfil PostgreSQL do Workbench/i,
+    });
+    await user.click(trigger);
+    await user.type(
+      screen.getByPlaceholderText(/Buscar por nome, host, banco ou ambiente/i),
+      "salutem_prod",
+    );
+    await user.click(
+      screen.getByRole("option", { name: /Produção \(Somente Leitura\)/i }),
+    );
+
+    await waitFor(() => {
+      expect(updateSpy).toHaveBeenCalledWith(freeProject.id, {
+        default_db_profile_id: PROFILE_RO.id,
+      });
+      expect(onProjectUpdated).toHaveBeenCalledWith(updatedProj);
+    });
   });
 });

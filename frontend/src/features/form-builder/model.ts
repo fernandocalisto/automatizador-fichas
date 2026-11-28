@@ -213,12 +213,17 @@ export function formatClinicalFormJson(data: ClinicalFormJson): string {
 export interface ClinicalJsonParseResult {
   data: ClinicalFormJson | null;
   error: string | null;
+  schemaWarnings: ClinicalWarningItem[];
 }
 
 export function parseClinicalFormJson(rawText: string): ClinicalJsonParseResult {
   const trimmed = rawText.trim();
   if (!trimmed) {
-    return { data: null, error: "O conteúdo JSON está vazio." };
+    return {
+      data: null,
+      error: "O conteúdo JSON está vazio.",
+      schemaWarnings: [],
+    };
   }
 
   let parsed: unknown;
@@ -226,13 +231,18 @@ export function parseClinicalFormJson(rawText: string): ClinicalJsonParseResult 
     parsed = JSON.parse(trimmed);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return { data: null, error: `Erro de sintaxe JSON: ${msg}` };
+    return {
+      data: null,
+      error: `Erro de sintaxe JSON: ${msg}`,
+      schemaWarnings: [],
+    };
   }
 
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return {
       data: null,
       error: "O elemento raiz do JSON deve ser um objeto ({...}).",
+      schemaWarnings: [],
     };
   }
 
@@ -245,6 +255,7 @@ export function parseClinicalFormJson(rawText: string): ClinicalJsonParseResult 
     return {
       data: null,
       error: "Estrutura inválida: a chave 'template' (objeto) é obrigatória.",
+      schemaWarnings: [],
     };
   }
 
@@ -252,21 +263,78 @@ export function parseClinicalFormJson(rawText: string): ClinicalJsonParseResult 
     return {
       data: null,
       error: "Estrutura inválida: a chave 'perguntas' (lista) é obrigatória.",
+      schemaWarnings: [],
     };
+  }
+
+  const schemaWarnings: ClinicalWarningItem[] = [];
+  const templateObj = obj.template as Record<string, unknown>;
+  if (typeof templateObj.nome !== "string" || !templateObj.nome.trim()) {
+    schemaWarnings.push({
+      code: "SCHEMA_MISSING_TEMPLATE_NAME",
+      severity: "warning",
+      path: "template.nome",
+      message: "Campo 'template.nome' está ausente ou vazio.",
+    });
   }
 
   const normalizedPerguntas: ClinicalQuestion[] = obj.perguntas.map(
     (item, idx) => {
       if (item === null || typeof item !== "object" || Array.isArray(item)) {
+        schemaWarnings.push({
+          code: "SCHEMA_INVALID_QUESTION",
+          severity: "warning",
+          path: `perguntas[${idx}]`,
+          message: `Pergunta #${idx + 1} não é um objeto válido no esquema Salutem ({ texto/nome, respostas }).`,
+        });
         return createDefaultQuestion({ ordenacao: idx + 1 });
       }
       const q = item as Record<string, unknown>;
-      const rawRespostas = Array.isArray(q.respostas) ? q.respostas : [];
+      const isTitle = Boolean(q.titulo);
+      const hasNome = typeof q.nome === "string" && q.nome.trim().length > 0;
+      const hasTexto = typeof q.texto === "string" && q.texto.trim().length > 0;
+
+      if (!hasNome && !hasTexto) {
+        schemaWarnings.push({
+          code: "SCHEMA_MISSING_QUESTION_TEXT",
+          severity: "warning",
+          path: `perguntas[${idx}]`,
+          message: `Pergunta #${idx + 1} sem campo de texto ('nome' ou 'texto') esperado pelo esquema Salutem { texto, respostas }.`,
+        });
+      }
+
+      const hasRespostasArray = Array.isArray(q.respostas);
+      if (!isTitle && !hasRespostasArray) {
+        schemaWarnings.push({
+          code: "SCHEMA_MISSING_RESPOSTAS",
+          severity: "warning",
+          path: `perguntas[${idx}].respostas`,
+          message: `Pergunta #${idx + 1} sem lista 'respostas' esperada pelo esquema Salutem { texto, respostas }.`,
+        });
+      }
+
+      const rawRespostas = hasRespostasArray ? (q.respostas as unknown[]) : [];
       const respostas: ClinicalAnswer[] = rawRespostas.map((ans, rIdx) => {
         if (ans === null || typeof ans !== "object" || Array.isArray(ans)) {
+          schemaWarnings.push({
+            code: "SCHEMA_INVALID_ANSWER",
+            severity: "warning",
+            path: `perguntas[${idx}].respostas[${rIdx}]`,
+            message: `Resposta #${rIdx + 1} da pergunta #${idx + 1} não é um objeto válido ({ label, tipo_campo }).`,
+          });
           return createDefaultAnswer(rIdx + 1);
         }
         const a = ans as Record<string, unknown>;
+        const missingLabel = typeof a.label !== "string" || !a.label.trim();
+        const missingTipo = typeof a.tipo_campo !== "string" || !a.tipo_campo.trim();
+        if (missingLabel && missingTipo) {
+          schemaWarnings.push({
+            code: "SCHEMA_MISSING_ANSWER_FIELDS",
+            severity: "warning",
+            path: `perguntas[${idx}].respostas[${rIdx}]`,
+            message: `Resposta #${rIdx + 1} da pergunta #${idx + 1} sem 'label' e 'tipo_campo' esperados pelo esquema Salutem.`,
+          });
+        }
         return {
           ...a,
           label: typeof a.label === "string" ? a.label : "",
@@ -278,15 +346,19 @@ export function parseClinicalFormJson(rawText: string): ClinicalJsonParseResult 
       });
       return {
         ...q,
-        nome: typeof q.nome === "string" ? q.nome : "",
-        titulo: Boolean(q.titulo),
+        nome:
+          typeof q.nome === "string"
+            ? q.nome
+            : typeof q.texto === "string"
+              ? q.texto
+              : "",
+        titulo: isTitle,
         ordenacao: typeof q.ordenacao === "number" ? q.ordenacao : idx + 1,
         respostas,
       } as ClinicalQuestion;
     },
   );
 
-  const templateObj = obj.template as Record<string, unknown>;
   const normalized: ClinicalFormJson = {
     ...obj,
     template: {
@@ -296,7 +368,7 @@ export function parseClinicalFormJson(rawText: string): ClinicalJsonParseResult 
     perguntas: normalizedPerguntas,
   };
 
-  return { data: normalized, error: null };
+  return { data: normalized, error: null, schemaWarnings };
 }
 
 export function reorderArray<T>(

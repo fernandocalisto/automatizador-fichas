@@ -6,6 +6,7 @@ import {
   type ChangeEvent,
 } from "react";
 import {
+  AlertTriangle,
   ArrowRight,
   FileJson,
   FilePlus2,
@@ -64,7 +65,27 @@ export function FormBuilderView({
   const [versionNum, setVersionNum] = useState<number | null>(null);
 
   const [warnings, setWarnings] = useState<ClinicalWarningItem[]>([]);
+  const [schemaWarnings, setSchemaWarnings] = useState<ClinicalWarningItem[]>([]);
   const [loadingWarnings, setLoadingWarnings] = useState(false);
+  const lastSchemaWarnSigRef = useRef<string>("");
+
+  const reportSchemaWarnings = useCallback(
+    (nextWarnings: ClinicalWarningItem[], notifyToast: boolean) => {
+      setSchemaWarnings(nextWarnings);
+      const sig = nextWarnings
+        .map((w) => `${w.code ?? ""}:${w.path ?? ""}`)
+        .join("|");
+      if (notifyToast && nextWarnings.length > 0 && sig !== lastSchemaWarnSigRef.current) {
+        pushToast({
+          tone: "warning",
+          title: "Estrutura JSON Salutem incompatível",
+          description: `${nextWarnings.length} campo(s) esperado(s) ausente(s): ${nextWarnings[0].message}`,
+        });
+      }
+      lastSchemaWarnSigRef.current = sig;
+    },
+    [pushToast],
+  );
 
   const [autoRegenerateSql, setAutoRegenerateSql] = useState(true);
   const [applyUppercase, setApplyUppercase] = useState(true);
@@ -88,6 +109,8 @@ export function FormBuilderView({
     setIsDirty(false);
     setJsonError(null);
     setWarnings([]);
+    setSchemaWarnings([]);
+    lastSchemaWarnSigRef.current = "";
 
     try {
       const artifact = await api.getArtifact(project.id, "json");
@@ -100,9 +123,11 @@ export function FormBuilderView({
       if (parsed.data) {
         setFormModel(renumberClinicalForm(parsed.data));
         setJsonError(null);
+        reportSchemaWarnings(parsed.schemaWarnings, true);
       } else {
         setFormModel(null);
         setJsonError(parsed.error);
+        reportSchemaWarnings([], false);
       }
 
       void fetchWarnings(project.id);
@@ -124,7 +149,7 @@ export function FormBuilderView({
       initialLoadedRef.current = true;
       setLoading(false);
     }
-  }, [project.id, fetchWarnings]);
+  }, [project.id, fetchWarnings, reportSchemaWarnings]);
 
   useEffect(() => {
     initialLoadedRef.current = false;
@@ -156,9 +181,11 @@ export function FormBuilderView({
         if (parsed.data) {
           setFormModel(renumberClinicalForm(parsed.data));
           setJsonError(null);
+          reportSchemaWarnings(parsed.schemaWarnings, false);
         } else {
           setFormModel(null);
           setJsonError(parsed.error);
+          reportSchemaWarnings([], false);
         }
         void fetchWarnings(project.id);
       })
@@ -169,7 +196,13 @@ export function FormBuilderView({
     return () => {
       cancelled = true;
     };
-  }, [project.id, latestJsonVersion, artifactSyncTick, fetchWarnings]);
+  }, [
+    project.id,
+    latestJsonVersion,
+    artifactSyncTick,
+    fetchWarnings,
+    reportSchemaWarnings,
+  ]);
 
   const applyModelUpdate = useCallback((next: ClinicalFormJson) => {
     const normalized = renumberClinicalForm(next);
@@ -201,18 +234,23 @@ export function FormBuilderView({
     [formModel, applyModelUpdate],
   );
 
-  const handleJsonTextChange = useCallback((nextText: string) => {
-    setJsonText(nextText);
-    setIsDirty(true);
+  const handleJsonTextChange = useCallback(
+    (nextText: string) => {
+      setJsonText(nextText);
+      setIsDirty(true);
 
-    const parsed = parseClinicalFormJson(nextText);
-    if (parsed.data) {
-      setFormModel(parsed.data);
-      setJsonError(null);
-    } else {
-      setJsonError(parsed.error);
-    }
-  }, []);
+      const parsed = parseClinicalFormJson(nextText);
+      if (parsed.data) {
+        setFormModel(parsed.data);
+        setJsonError(null);
+        reportSchemaWarnings(parsed.schemaWarnings, true);
+      } else {
+        setJsonError(parsed.error);
+        reportSchemaWarnings([], false);
+      }
+    },
+    [reportSchemaWarnings],
+  );
 
   const handleFormatJson = useCallback(() => {
     const parsed = parseClinicalFormJson(jsonText);
@@ -248,12 +286,13 @@ export function FormBuilderView({
     const blank = createBlankClinicalForm(project.name);
     applyModelUpdate(blank);
     setWarnings([]);
+    reportSchemaWarnings([], false);
     pushToast({
       tone: "info",
       title: "Ficha em branco criada",
       description: "Edite os campos e clique em Salvar revisão.",
     });
-  }, [project.name, applyModelUpdate, pushToast]);
+  }, [project.name, applyModelUpdate, pushToast, reportSchemaWarnings]);
 
   const handleTriggerFileImport = () => {
     fileInputRef.current?.click();
@@ -276,11 +315,20 @@ export function FormBuilderView({
         return;
       }
       applyModelUpdate(parsed.data);
-      pushToast({
-        tone: "success",
-        title: `Arquivo "${file.name}" importado`,
-        description: "Revise os campos e salve a revisão no projeto.",
-      });
+      reportSchemaWarnings(parsed.schemaWarnings, false);
+      if (parsed.schemaWarnings.length > 0) {
+        pushToast({
+          tone: "warning",
+          title: `Arquivo "${file.name}" importado com avisos de esquema`,
+          description: parsed.schemaWarnings[0].message,
+        });
+      } else {
+        pushToast({
+          tone: "success",
+          title: `Arquivo "${file.name}" importado`,
+          description: "Revise os campos e salve a revisão no projeto.",
+        });
+      }
     } catch (err) {
       pushToast({
         tone: "error",
@@ -456,6 +504,42 @@ export function FormBuilderView({
       {/* Clinical Warnings Collapsible Banner */}
       {hasContent && (
         <WarningsBanner warnings={warnings} loading={loadingWarnings} />
+      )}
+
+      {/* Schema Mismatch Validation Banner */}
+      {hasContent && schemaWarnings.length > 0 && (
+        <div
+          data-testid="json-schema-warning-banner"
+          role="alert"
+          className="border-b border-warning/40 bg-warning-soft/80 px-4 py-2 text-xs text-ink"
+        >
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+            <div className="min-w-0 flex-1 space-y-1">
+              <p className="font-semibold text-warning">
+                Aviso de estrutura JSON Salutem ({schemaWarnings.length}{" "}
+                {schemaWarnings.length === 1 ? "inconsistência" : "inconsistências"})
+              </p>
+              <ul className="space-y-0.5 text-ink-secondary">
+                {schemaWarnings.slice(0, 5).map((item, idx) => (
+                  <li key={`${item.code ?? "schema"}-${item.path ?? idx}-${idx}`}>
+                    {item.path && (
+                      <code className="mr-1.5 rounded bg-warning/15 px-1 py-0.5 font-mono text-[10px] text-warning">
+                        {item.path}
+                      </code>
+                    )}
+                    <span>{item.message}</span>
+                  </li>
+                ))}
+                {schemaWarnings.length > 5 && (
+                  <li className="text-[11px] text-ink-muted">
+                    +{schemaWarnings.length - 5} outro(s) aviso(s) de estrutura.
+                  </li>
+                )}
+              </ul>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Main Body */}

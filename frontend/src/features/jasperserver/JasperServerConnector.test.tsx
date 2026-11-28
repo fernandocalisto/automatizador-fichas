@@ -268,14 +268,19 @@ describe("JasperServerDeployModal", () => {
     expect(screen.getByLabelText(/URI da Report Unit/i)).toHaveValue(
       "/reports/resumo_alta",
     );
-    expect(screen.getByLabelText(/Perfil JasperReports Server/i)).toHaveValue(
-      "js-hml-1",
-    );
+    const profileTrigger = screen.getByRole("button", {
+      name: /Perfil JasperReports Server/i,
+    });
+    expect(profileTrigger).toHaveTextContent("Jasper HML Hospitalar");
 
-    // Switching to read-only PRD profile must block prepare button
-    await user.selectOptions(
-      screen.getByLabelText(/Perfil JasperReports Server/i),
-      "js-prd-1",
+    // Switching to read-only PRD profile via SearchableSelect must block prepare button
+    await user.click(profileTrigger);
+    await user.type(
+      screen.getByPlaceholderText(/Buscar perfil por nome, URL ou ambiente/i),
+      "PRD",
+    );
+    await user.click(
+      screen.getByRole("option", { name: /Jasper PRD Hospitalar/i }),
     );
     expect(
       screen.getByText(/Perfil em modo Somente Leitura/i),
@@ -285,9 +290,9 @@ describe("JasperServerDeployModal", () => {
     ).toBeDisabled();
 
     // Switch back to writable HML profile -> Step 1 prepare
-    await user.selectOptions(
-      screen.getByLabelText(/Perfil JasperReports Server/i),
-      "js-hml-1",
+    await user.click(profileTrigger);
+    await user.click(
+      screen.getByRole("option", { name: /Jasper HML Hospitalar/i }),
     );
     const prepareBtn = screen.getByRole("button", {
       name: /Pré-validar e gerar diff/i,
@@ -366,9 +371,11 @@ describe("JasperServerDeployModal", () => {
       </ToastProvider>,
     );
 
-    await user.selectOptions(
-      screen.getByLabelText(/Perfil JasperReports Server/i),
-      "js-hml-1",
+    await user.click(
+      screen.getByRole("button", { name: /Perfil JasperReports Server/i }),
+    );
+    await user.click(
+      screen.getByRole("option", { name: /Jasper HML Hospitalar/i }),
     );
 
     await waitFor(() => {

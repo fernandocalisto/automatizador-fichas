@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 import {
   FileCode2,
+  FilePlus2,
   Hammer,
   Save,
   ShieldCheck,
   Sparkles,
+  Upload,
 } from "lucide-react";
 import {
   Badge,
@@ -27,6 +29,7 @@ import { detectJrxmlOrientation, getPageDimensions } from "./utils";
 export interface JrxmlEditorPaneProps {
   loading: boolean;
   hasJrxml: boolean;
+  isFreeReport?: boolean;
   jrxmlContent: string;
   versionNum: number | null;
   dirty: boolean;
@@ -38,6 +41,8 @@ export interface JrxmlEditorPaneProps {
   onToggleLiveReload: (enabled: boolean) => void;
   onChangeJrxml: (next: string) => void;
   onScaffold: (orientation: ClinicalOrientation) => Promise<void>;
+  onCreateBlank?: (orientation: ClinicalOrientation) => Promise<void>;
+  onUploadJrxml?: (file: File) => Promise<void>;
   onLint: () => Promise<void>;
   onCompile: () => Promise<void>;
   onSave: () => Promise<void>;
@@ -53,6 +58,7 @@ export interface JrxmlEditorPaneProps {
 export function JrxmlEditorPane({
   loading,
   hasJrxml,
+  isFreeReport = false,
   jrxmlContent,
   versionNum,
   dirty,
@@ -64,6 +70,8 @@ export function JrxmlEditorPane({
   onToggleLiveReload,
   onChangeJrxml,
   onScaffold,
+  onCreateBlank,
+  onUploadJrxml,
   onLint,
   onCompile,
   onSave,
@@ -80,6 +88,15 @@ export function JrxmlEditorPane({
   const [scaffoldDialogOpen, setScaffoldDialogOpen] = useState(false);
   const [dialogOrientation, setDialogOrientation] =
     useState<ClinicalOrientation>("RETRATO");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file && onUploadJrxml) {
+      void onUploadJrxml(file);
+    }
+  };
 
   const detectedOrientation = detectJrxmlOrientation(jrxmlContent);
   const pageDims = getPageDimensions(detectedOrientation);
@@ -105,10 +122,22 @@ export function JrxmlEditorPane({
   if (!hasJrxml) {
     return (
       <div className="flex h-full flex-col justify-center bg-canvas/50 p-6">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".jrxml,.xml,application/xml,text/xml"
+          aria-label="Enviar arquivo .jrxml"
+          className="hidden"
+          onChange={handleFileChange}
+        />
         <EmptyState
           icon={<FileCode2 className="h-5 w-5 text-accent" />}
           title="Nenhum arquivo .jrxml encontrado neste projeto"
-          description="Gere o scaffold oficial do Salutem com cabeçalho, dados do paciente, rodapé e banda <detail> já configurados para A4."
+          description={
+            isFreeReport
+              ? "Crie um template .jrxml em branco para abrir o editor XML imediatamente ou envie um arquivo .jrxml existente do seu computador."
+              : "Gere o scaffold oficial do Salutem com cabeçalho, dados do paciente e banda <detail>, crie um .jrxml em branco ou envie um arquivo existente."
+          }
           action={
             <div className="flex flex-col items-center gap-3">
               <div className="w-56 text-left">
@@ -128,15 +157,67 @@ export function JrxmlEditorPane({
                 </Select>
               </div>
 
-              <Button
-                variant="primary"
-                size="md"
-                loading={scaffolding}
-                icon={<Sparkles className="h-4 w-4" />}
-                onClick={() => void onScaffold(emptyOrientation)}
-              >
-                Gerar scaffold base (.jrxml)
-              </Button>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                {isFreeReport && onCreateBlank && (
+                  <Button
+                    variant="primary"
+                    size="md"
+                    loading={saving}
+                    icon={<FilePlus2 className="h-4 w-4" />}
+                    onClick={() => void onCreateBlank(emptyOrientation)}
+                  >
+                    Criar JRXML em branco
+                  </Button>
+                )}
+
+                {!isFreeReport && (
+                  <Button
+                    variant="primary"
+                    size="md"
+                    loading={scaffolding}
+                    icon={<Sparkles className="h-4 w-4" />}
+                    onClick={() => void onScaffold(emptyOrientation)}
+                  >
+                    Gerar scaffold base (.jrxml)
+                  </Button>
+                )}
+
+                {!isFreeReport && onCreateBlank && (
+                  <Button
+                    variant="outline"
+                    size="md"
+                    loading={saving}
+                    icon={<FilePlus2 className="h-4 w-4" />}
+                    onClick={() => void onCreateBlank(emptyOrientation)}
+                  >
+                    Criar JRXML em branco
+                  </Button>
+                )}
+
+                {onUploadJrxml && (
+                  <Button
+                    variant="outline"
+                    size="md"
+                    loading={saving}
+                    icon={<Upload className="h-4 w-4" />}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Enviar arquivo .jrxml
+                  </Button>
+                )}
+
+                {isFreeReport && (
+                  <Button
+                    variant="outline"
+                    size="md"
+                    loading={scaffolding}
+                    icon={<Sparkles className="h-4 w-4" />}
+                    onClick={() => void onScaffold(emptyOrientation)}
+                  >
+                    Gerar scaffold base (.jrxml)
+                  </Button>
+                )}
+              </div>
             </div>
           }
         />
@@ -207,6 +288,7 @@ export function JrxmlEditorPane({
             variant="primary"
             size="xs"
             loading={saving}
+            disabled={!dirty || saving}
             icon={<Save className="h-3.5 w-3.5" />}
             onClick={() => void onSave()}
           >

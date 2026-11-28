@@ -9,7 +9,6 @@ import {
 } from "react";
 import {
   Code2,
-  Crosshair,
   FilePlus2,
   FileText,
   Play,
@@ -274,11 +273,13 @@ export function JasperStudioView({
   // Anotações visuais enviadas na sessão
   const [annotations, setAnnotations] = useState<VisualRegionAnnotation[]>([]);
   const [submittingAnnotation, setSubmittingAnnotation] = useState(false);
+  const [resolvingAnnotations, setResolvingAnnotations] = useState(false);
 
   // Refs para debounce e prevenção de race conditions
   const liveReloadTimerRef = useRef<number | null>(null);
   const userEditedRef = useRef(false);
   const previewReqSeqRef = useRef(0);
+  const prevArtifactSyncTickRef = useRef(artifactSyncTick);
   const jrxmlRef = useRef(jrxmlContent);
   jrxmlRef.current = jrxmlContent;
 
@@ -693,6 +694,37 @@ export function JasperStudioView({
     reportParamValues,
     runPreview,
   ]);
+
+  // Re-sincroniza/resolve anotações visuais automaticamente quando o agente aplica uma nova revisão JRXML
+  useEffect(() => {
+    if (artifactSyncTick === prevArtifactSyncTickRef.current) return;
+    prevArtifactSyncTickRef.current = artifactSyncTick;
+
+    // Marca localmente como resolvidas imediatamente para limpar o PDF
+    setAnnotations((prev) =>
+      prev.map((ann) => (ann.resolved ? ann : { ...ann, resolved: true })),
+    );
+
+    let cancelled = false;
+    api
+      .listChat(project.id, "jrxml")
+      .then((chatMsgs) => {
+        if (cancelled) return;
+        const parsed = chatMsgs
+          .map(chatMessageToAnnotation)
+          .filter((item): item is VisualRegionAnnotation => item !== null);
+        if (parsed.length > 0) {
+          setAnnotations(parsed);
+        }
+      })
+      .catch(() => {
+        // Mantém estado local já marcado como resolvido
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [artifactSyncTick, project.id]);
 
   // Live-reload debounced (~900ms) após edições no editor
   useEffect(() => {
@@ -1235,6 +1267,40 @@ export function JasperStudioView({
     [project.id, pushToast, scenario],
   );
 
+  const handleResolveAnnotations = useCallback(
+    async (messageIds?: number[]) => {
+      setResolvingAnnotations(true);
+      try {
+        await api.resolveVisualFeedback(project.id, messageIds);
+        const idSet =
+          messageIds && messageIds.length > 0 ? new Set(messageIds) : null;
+        setAnnotations((prev) =>
+          prev.map((ann) => {
+            if (!idSet || (typeof ann.id === "number" && idSet.has(ann.id))) {
+              return { ...ann, resolved: true };
+            }
+            return ann;
+          }),
+        );
+        pushToast({
+          tone: "success",
+          title: idSet
+            ? "Ajuste marcado como resolvido"
+            : "Ajustes pendentes resolvidos",
+        });
+      } catch (err) {
+        pushToast({
+          tone: "error",
+          title: "Falha ao resolver ajustes visuais",
+          description: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setResolvingAnnotations(false);
+      }
+    },
+    [project.id, pushToast],
+  );
+
   const handleDownloadJrxml = useCallback(() => {
     if (!jrxmlContent.trim()) return;
     triggerTextDownload(`${project.slug}.jrxml`, jrxmlContent);
@@ -1319,31 +1385,6 @@ export function JasperStudioView({
         onOpenAgentChat={openJrxmlChat}
         headerExtraActions={headerExtraActions}
       />
-
-      {layoutMode === "visual" && hasJrxml && (
-        <div
-          data-testid="visual-mode-tip-bar"
-          className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-blueprint-soft/35 px-3 py-1.5 text-xs text-ink-secondary"
-        >
-          <div className="flex items-center gap-1.5">
-            <Crosshair className="h-3.5 w-3.5 shrink-0 text-blueprint" />
-            <span>
-              Dica: clique em{" "}
-              <strong className="text-ink">Selecionar área para ajuste</strong>{" "}
-              no PDF para marcar exatamente onde quer alterar, ou peça direto à
-              IA.
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => handleChangeLayoutMode("split")}
-            className="inline-flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-accent cursor-pointer"
-          >
-            <Code2 className="h-3 w-3" />
-            Ver XML
-          </button>
-        </div>
-      )}
 
       <ReportParamsBar
         parameters={reportParameters}
@@ -1471,7 +1512,9 @@ export function JasperStudioView({
           cacheBuster={cacheBuster}
           annotations={annotations}
           submittingAnnotation={submittingAnnotation}
+          resolvingAnnotations={resolvingAnnotations}
           onSubmitAnnotation={handleSubmitAnnotation}
+          onResolveAnnotations={handleResolveAnnotations}
           onGeneratePreview={() => void runPreview()}
           onOpenAgentChat={openJrxmlChat}
         />

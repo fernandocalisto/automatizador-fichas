@@ -26,6 +26,8 @@ export interface VisualRegionFeedbackMetadata {
   pdf_rect: PdfRect;
   detail_coords: DetailCoords;
   scenario: ScenarioType;
+  resolved?: boolean;
+  resolved_by_jrxml_version?: number;
 }
 
 export interface VisualRegionAnnotation {
@@ -36,9 +38,10 @@ export interface VisualRegionAnnotation {
   scenario: ScenarioType;
   pdfRect: PdfRect;
   detailCoords: DetailCoords;
+  resolved?: boolean;
 }
 
-export type ZoomPreset = 0.75 | 1 | 1.25 | 1.5 | "fit-width";
+export type ZoomPreset = 0.75 | 1 | 1.25 | 1.5 | 2 | "fit-width" | "fit-page";
 export type PreviewRendererMode = "pdfjs" | "png";
 export type JasperLayoutMode = "visual" | "split" | "code";
 
@@ -125,11 +128,13 @@ export const PREVIEW_MODE_OPTIONS: {
 ];
 
 export const ZOOM_PRESETS: { value: ZoomPreset; label: string }[] = [
+  { value: "fit-page", label: "Ajustar à página" },
+  { value: "fit-width", label: "Ajustar à largura" },
   { value: 0.75, label: "75%" },
   { value: 1, label: "100%" },
   { value: 1.25, label: "125%" },
   { value: 1.5, label: "150%" },
-  { value: "fit-width", label: "Ajustar à largura" },
+  { value: 2, label: "200%" },
 ];
 
 export function isVisualRegionChatMessage(
@@ -159,6 +164,7 @@ export function chatMessageToAnnotation(
     createdAt: msg.created_at,
     page: Number(meta.page ?? 1),
     scenario: (meta.scenario as ScenarioType) || "full",
+    resolved: meta.resolved === true,
     pdfRect: {
       x0,
       y0,

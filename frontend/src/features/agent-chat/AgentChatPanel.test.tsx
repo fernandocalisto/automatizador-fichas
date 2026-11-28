@@ -121,10 +121,12 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 describe("AgentChatPanel & AgentChatDrawer", () => {
   beforeEach(() => {
+    window.localStorage.clear();
     vi.restoreAllMocks();
   });
 
   afterEach(() => {
+    window.localStorage.clear();
     vi.restoreAllMocks();
   });
 
@@ -589,9 +591,13 @@ describe("AgentChatPanel & AgentChatDrawer", () => {
 
   it("renderiza AgentChatDrawer acoplado à direita sem cobrir o header e fecha via botão ou Escape", async () => {
     vi.spyOn(api, "listChat").mockResolvedValue([]);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse(DEFAULT_AGENT_STATUS),
-    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/agent/status")) {
+        return jsonResponse(DEFAULT_AGENT_STATUS);
+      }
+      return jsonResponse({}, 404);
+    });
 
     const onClose = vi.fn();
     const user = userEvent.setup();
@@ -664,22 +670,26 @@ describe("AgentChatPanel & AgentChatDrawer", () => {
         return [];
       });
 
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse({
-        ...DEFAULT_AGENT_STATUS,
-        gates: [
-          ...BASE_PROJECT.gates.slice(0, 1),
-          {
-            project_id: BASE_PROJECT.id,
-            gate_name: "gate3_jrxml",
-            status: "approved",
-            decided_by: "user",
-            notes: "",
-            updated_at: "2026-11-25T15:00:00Z",
-          },
-        ],
-      }),
-    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/agent/status")) {
+        return jsonResponse({
+          ...DEFAULT_AGENT_STATUS,
+          gates: [
+            ...BASE_PROJECT.gates.slice(0, 1),
+            {
+              project_id: BASE_PROJECT.id,
+              gate_name: "gate3_jrxml",
+              status: "approved",
+              decided_by: "user",
+              notes: "",
+              updated_at: "2026-11-25T15:00:00Z",
+            },
+          ],
+        });
+      }
+      return jsonResponse({}, 404);
+    });
 
     const onNavigateSection = vi.fn();
     const user = userEvent.setup();
@@ -735,12 +745,16 @@ describe("AgentChatPanel & AgentChatDrawer", () => {
     };
 
     const listChatSpy = vi.spyOn(api, "listChat").mockResolvedValue([]);
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      jsonResponse({
-        ...DEFAULT_AGENT_STATUS,
-        project_id: freeReportProject.id,
-      }),
-    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/agent/status")) {
+        return jsonResponse({
+          ...DEFAULT_AGENT_STATUS,
+          project_id: freeReportProject.id,
+        });
+      }
+      return jsonResponse({}, 404);
+    });
 
     render(
       <ToastProvider>
@@ -812,6 +826,143 @@ describe("AgentChatPanel & AgentChatDrawer", () => {
     resolveStatus(jsonResponse(DEFAULT_AGENT_STATUS));
     await waitFor(() => {
       expect(indicator).toHaveAttribute("aria-label", "Harness instalado");
+    });
+  });
+
+  it("carrega modelos via /api/harnesses/{id}/models, persiste Modelo e Effort, dispara warmup AGY, envia no stream e exibe badge de modelo", async () => {
+    const historyWithModel: ChatMessageRead[] = [
+      {
+        id: 77,
+        project_id: BASE_PROJECT.id,
+        phase: "jrxml",
+        role: "assistant",
+        content: "Layout revisado com sucesso.",
+        metadata: {
+          harness: "agy",
+          model: "gemini-2.5-pro",
+        },
+        metadata_json: "{}",
+        created_at: "2026-11-26T12:00:00Z",
+      },
+    ];
+
+    vi.spyOn(api, "listChat").mockResolvedValue(historyWithModel);
+
+    const warmupPayloads: Array<Record<string, unknown>> = [];
+    const streamPayloads: Array<Record<string, unknown>> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/agent/status")) {
+        return jsonResponse(DEFAULT_AGENT_STATUS);
+      }
+      if (url.endsWith("/api/harnesses/agy/models")) {
+        return jsonResponse({
+          harness_id: "agy",
+          default_model: "gemini-2.5-pro",
+          models: [
+            { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+            { id: "claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
+          ],
+          supports_effort: true,
+          effort_levels: ["low", "medium", "high", "xhigh"],
+        });
+      }
+      if (url.endsWith("/agent/warmup")) {
+        warmupPayloads.push(JSON.parse(String(init?.body ?? "{}")));
+        return jsonResponse({ ok: true, warmed: true, harness: "agy" });
+      }
+      if (url.endsWith("/agent/stream")) {
+        streamPayloads.push(JSON.parse(String(init?.body ?? "{}")));
+        const sse = makeSseStream([
+          {
+            data: {
+              type: "text_delta",
+              content: "Ajuste aplicado no cabeçalho.",
+              harness: "agy",
+            },
+          },
+          {
+            data: {
+              type: "done",
+              content: "",
+              harness: "agy",
+              metadata: { resolved_model: "claude-sonnet-4-5" },
+            },
+          },
+        ]);
+        return new Response(sse, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return jsonResponse({}, 404);
+    });
+
+    const user = userEvent.setup();
+    render(
+      <ToastProvider>
+        <AgentChatPanel
+          project={BASE_PROJECT}
+          initialPhase="jrxml"
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+        />
+      </ToastProvider>,
+    );
+
+    // Badge do modelo da mensagem persistida aparece no header da bolha
+    const persistedModelBadge = await screen.findByTestId(
+      "assistant-model-badge",
+    );
+    expect(persistedModelBadge).toHaveTextContent("gemini-2.5-pro");
+
+    // Pre-warmup disparado automaticamente ao abrir para AGY
+    await waitFor(() => {
+      expect(warmupPayloads.length).toBeGreaterThanOrEqual(1);
+    });
+    expect(warmupPayloads[0]).toMatchObject({
+      phase: "jrxml",
+      harness: "agy",
+    });
+
+    // Seleciona modelo e nível de raciocínio (effort)
+    const modelSelect = screen.getByLabelText("Modelo do agente");
+    await waitFor(() => {
+      expect(
+        within(modelSelect).getByRole("option", { name: "Claude Sonnet 4.5" }),
+      ).toBeInTheDocument();
+    });
+    await user.selectOptions(modelSelect, "claude-sonnet-4-5");
+    expect(window.localStorage.getItem("salutem:agent-model:agy")).toBe(
+      "claude-sonnet-4-5",
+    );
+
+    const effortSelect = screen.getByLabelText("Raciocínio (Effort)");
+    await user.selectOptions(effortSelect, "high");
+    expect(window.localStorage.getItem("salutem:agent-effort:agy")).toBe(
+      "high",
+    );
+
+    // Envia prompt e confirma model + effort no payload do stream
+    const input = screen.getByLabelText("Mensagem para o agente");
+    await user.type(input, "Corrigir negrito no título{Enter}");
+
+    await waitFor(() => {
+      expect(streamPayloads).toHaveLength(1);
+    });
+    expect(streamPayloads[0]).toMatchObject({
+      phase: "jrxml",
+      prompt: "Corrigir negrito no título",
+      harness_id: "agy",
+      model: "claude-sonnet-4-5",
+      effort: "high",
+    });
+
+    // Nova resposta também mostra o badge do modelo resolvido
+    await waitFor(() => {
+      const badges = screen.getAllByTestId("assistant-model-badge");
+      expect(badges[badges.length - 1]).toHaveTextContent("claude-sonnet-4-5");
     });
   });
 });

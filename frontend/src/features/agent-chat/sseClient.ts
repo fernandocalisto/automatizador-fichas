@@ -65,6 +65,7 @@ export interface ChatTimelineItem {
   content: string;
   createdAt: string;
   harness?: string | null;
+  model?: string | null;
   thoughts?: string;
   toolCalls?: ToolCallRecord[];
   syncedArtifacts?: SyncedArtifactInfo[];
@@ -80,6 +81,7 @@ export interface AgentStreamRequestPayload {
   prompt: string;
   harness_id?: string;
   model?: string;
+  effort?: string;
   gate_authorized?: boolean;
   timeout_seconds?: number;
 }
@@ -654,6 +656,13 @@ export function normalizePersistedChatMessage(
     });
   }
 
+  const persistedModel =
+    typeof meta.model === "string" && meta.model.trim()
+      ? meta.model.trim()
+      : typeof meta.resolved_model === "string" && meta.resolved_model.trim()
+        ? meta.resolved_model.trim()
+        : null;
+
   return {
     id: `msg-${msg.id}`,
     role: msg.role,
@@ -661,6 +670,7 @@ export function normalizePersistedChatMessage(
     content: msg.content,
     createdAt: msg.created_at,
     harness: typeof meta.harness === "string" ? meta.harness : null,
+    model: persistedModel,
     thoughts: thoughts || undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     syncedArtifacts: syncedArtifacts.length > 0 ? syncedArtifacts : undefined,

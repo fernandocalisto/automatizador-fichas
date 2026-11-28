@@ -1,4 +1,6 @@
 import type {
+  AgentWarmupPayload,
+  AgentWarmupResponse,
   ArtifactRevisionRead,
   ArtifactSavePayload,
   ArtifactSaveResponse,
@@ -17,6 +19,7 @@ import type {
   GateApprovalRead,
   GateName,
   GateStatus,
+  HarnessModelsResponse,
   HarnessStatus,
   HealthResponse,
   InspectSelectResult,
@@ -29,6 +32,7 @@ import type {
   ProjectCreatePayload,
   ProjectRead,
   ProjectUpdatePayload,
+  ResolveVisualFeedbackResponse,
   ScenarioType,
   SkillInfo,
   SqlRegeneratePayload,
@@ -103,6 +107,15 @@ export const api = {
     }),
   listSkills: () => requestJson<SkillInfo[]>("/api/skills"),
   listHarnesses: () => requestJson<HarnessStatus[]>("/api/harnesses"),
+  listHarnessModels: (harnessId: string) =>
+    requestJson<HarnessModelsResponse>(
+      `/api/harnesses/${encodeURIComponent(harnessId)}/models`,
+    ),
+  warmupAgent: (projectId: string, payload: AgentWarmupPayload = {}) =>
+    requestJson<AgentWarmupResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/agent/warmup`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
   listMcpTools: () => requestJson<Record<string, unknown>[]>("/api/mcp-tools"),
 
   // Projects
@@ -398,6 +411,18 @@ export const api = {
     }>(
       `/api/projects/${encodeURIComponent(projectId)}/jasper/preview/crop-feedback`,
       { method: "POST", body: JSON.stringify(payload) },
+    ),
+  resolveVisualFeedback: (projectId: string, messageIds?: number[]) =>
+    requestJson<ResolveVisualFeedbackResponse>(
+      `/api/projects/${encodeURIComponent(projectId)}/jasper/feedback/resolve`,
+      {
+        method: "POST",
+        body: JSON.stringify(
+          messageIds && messageIds.length > 0
+            ? { message_ids: messageIds }
+            : {},
+        ),
+      },
     ),
 
   // Subreports

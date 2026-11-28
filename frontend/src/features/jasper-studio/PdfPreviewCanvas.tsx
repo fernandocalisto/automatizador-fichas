@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Bot,
+  CheckCheck,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Crosshair,
+  Eye,
+  EyeOff,
   FileImage,
   FileText,
+  Maximize2,
   MessageSquare,
+  Minimize2,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -42,12 +48,16 @@ export interface PdfPreviewCanvasProps {
   cacheBuster: number;
   annotations: VisualRegionAnnotation[];
   submittingAnnotation: boolean;
+  resolvingAnnotations?: boolean;
   onSubmitAnnotation: (payload: RegionAnnotationSubmitPayload) => Promise<void>;
+  onResolveAnnotations?: (messageIds?: number[]) => Promise<void>;
   onGeneratePreview: () => void;
   onOpenAgentChat?: () => void;
 }
 
-const NUMERIC_ZOOMS: Exclude<ZoomPreset, "fit-width">[] = [0.75, 1, 1.25, 1.5];
+const NUMERIC_ZOOMS: Exclude<ZoomPreset, "fit-width" | "fit-page">[] = [
+  0.75, 1, 1.25, 1.5, 2,
+];
 
 export function PdfPreviewCanvas({
   projectId,
@@ -60,15 +70,22 @@ export function PdfPreviewCanvas({
   cacheBuster,
   annotations,
   submittingAnnotation,
+  resolvingAnnotations = false,
   onSubmitAnnotation,
+  onResolveAnnotations,
   onGeneratePreview,
   onOpenAgentChat,
 }: PdfPreviewCanvasProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const annotationsMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [zoom, setZoom] = useState<ZoomPreset>("fit-width");
-  const [containerWidth, setContainerWidth] = useState<number>(640);
+  const [containerSize, setContainerSize] = useState<{
+    width: number;
+    height: number;
+  }>({ width: 640, height: 760 });
+  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [pdfNumPages, setPdfNumPages] = useState<number | null>(null);
   const [rendererMode, setRendererMode] =
@@ -76,7 +93,14 @@ export function PdfPreviewCanvas({
   const [selectionMode, setSelectionMode] = useState<boolean>(false);
   const [pdfRenderError, setPdfRenderError] = useState<string | null>(null);
   const [renderingPage, setRenderingPage] = useState<boolean>(false);
-  const [annotationsExpanded, setAnnotationsExpanded] = useState<boolean>(true);
+
+  // Controle de popover e visibilidade das anotações visuais
+  const [annotationsPopoverOpen, setAnnotationsPopoverOpen] =
+    useState<boolean>(false);
+  const [showBoxesOnPdf, setShowBoxesOnPdf] = useState<boolean>(true);
+  const [showResolvedHistory, setShowResolvedHistory] =
+    useState<boolean>(false);
+  const [showResolvedOnPdf, setShowResolvedOnPdf] = useState<boolean>(false);
 
   // Nunca usar o cenário recém-clicado antes do POST /jasper/preview retornar o PDF dele
   const effectiveScenario = previewResult?.scenario ?? scenario;
@@ -89,6 +113,20 @@ export function PdfPreviewCanvas({
     1,
     pdfNumPages ?? previewResult?.page_count ?? 1,
   );
+
+  const pendingAnnotations = useMemo(
+    () => annotations.filter((ann) => ann.resolved !== true),
+    [annotations],
+  );
+  const resolvedAnnotations = useMemo(
+    () => annotations.filter((ann) => ann.resolved === true),
+    [annotations],
+  );
+  const visibleAnnotations = useMemo(() => {
+    if (!showBoxesOnPdf) return [];
+    if (showResolvedOnPdf) return annotations;
+    return pendingAnnotations;
+  }, [annotations, pendingAnnotations, showBoxesOnPdf, showResolvedOnPdf]);
 
   useEffect(() => {
     setCurrentPage((prev) => Math.min(Math.max(1, prev), totalPages));
@@ -103,24 +141,76 @@ export function PdfPreviewCanvas({
   useEffect(() => {
     const el = viewportRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const updateWidth = () => {
-      const next = el.clientWidth;
-      if (next > 0) setContainerWidth(next);
+    const updateSize = () => {
+      const nextW = el.clientWidth;
+      const nextH = el.clientHeight;
+      if (nextW > 0 || nextH > 0) {
+        setContainerSize((prev) => ({
+          width: nextW > 0 ? nextW : prev.width,
+          height: nextH > 0 ? nextH : prev.height,
+        }));
+      }
     };
-    updateWidth();
-    const obs = new ResizeObserver(updateWidth);
+    updateSize();
+    const obs = new ResizeObserver(updateSize);
     obs.observe(el);
     return () => obs.disconnect();
-  }, []);
+  }, [isFullscreen]);
+
+  // Fecha popover de ajustes com clique fora ou Escape
+  useEffect(() => {
+    if (!annotationsPopoverOpen) return;
+    const handleOutside = (event: MouseEvent) => {
+      if (
+        annotationsMenuRef.current &&
+        !annotationsMenuRef.current.contains(event.target as Node)
+      ) {
+        setAnnotationsPopoverOpen(false);
+      }
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAnnotationsPopoverOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleOutside);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleOutside);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [annotationsPopoverOpen]);
+
+  // Tecla Escape sai do modo tela cheia quando não está em modo de seleção ou popover aberto
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (
+        event.key === "Escape" &&
+        !selectionMode &&
+        !annotationsPopoverOpen
+      ) {
+        setIsFullscreen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [annotationsPopoverOpen, isFullscreen, selectionMode]);
 
   const effectiveScale = useMemo(() => {
+    if (zoom === "fit-page") {
+      const availW = Math.max(240, containerSize.width - 24);
+      const availH = Math.max(240, containerSize.height - 24);
+      const fit = Math.min(availW / pageDims.width, availH / pageDims.height);
+      return Math.min(2.2, Math.max(0.35, Number(fit.toFixed(3))));
+    }
     if (zoom === "fit-width") {
-      const available = Math.max(280, containerWidth - 48);
-      const fit = available / pageDims.width;
-      return Math.min(1.5, Math.max(0.45, Number(fit.toFixed(3))));
+      const availW = Math.max(240, containerSize.width - 24);
+      const fit = availW / pageDims.width;
+      return Math.min(2.2, Math.max(0.5, Number(fit.toFixed(3))));
     }
     return zoom;
-  }, [zoom, containerWidth, pageDims.width]);
+  }, [zoom, containerSize.width, containerSize.height, pageDims.width, pageDims.height]);
 
   const pdfUrl = useMemo(
     () => api.getPreviewPdfUrl(projectId, effectiveScenario, cacheBuster),
@@ -249,7 +339,7 @@ export function PdfPreviewCanvas({
   ]);
 
   const handleStepZoom = (direction: -1 | 1) => {
-    const currentNum = zoom === "fit-width" ? effectiveScale : zoom;
+    const currentNum = typeof zoom === "number" ? zoom : effectiveScale;
     if (direction > 0) {
       const next =
         NUMERIC_ZOOMS.find((z) => z > currentNum + 0.01) ??
@@ -263,15 +353,30 @@ export function PdfPreviewCanvas({
     }
   };
 
+  const handleSubmitAndExitSelection = useCallback(
+    async (payload: RegionAnnotationSubmitPayload) => {
+      await onSubmitAnnotation(payload);
+      setSelectionMode(false);
+    },
+    [onSubmitAnnotation],
+  );
+
   const displayWidth = Math.round(pageDims.width * effectiveScale);
   const displayHeight = Math.round(pageDims.height * effectiveScale);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-canvas">
-      {/* Barra de controles do visualizador (zoom, páginas, modo PDF.js/PNG, seleção de área) */}
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-surface px-3 py-1.5">
-        {/* Zoom */}
-        <div className="flex items-center gap-1">
+    <div
+      data-testid="pdf-preview-root"
+      data-fullscreen={isFullscreen ? "true" : "false"}
+      className={cn(
+        "flex min-h-0 flex-1 flex-col bg-canvas",
+        isFullscreen && "fixed inset-0 z-50 h-screen w-screen shadow-2xl",
+      )}
+    >
+      {/* Barra de controles do visualizador (zoom, fit-page/width, páginas, PDF.js/PNG, ajustes, seleção, tela cheia) */}
+      <div className="flex flex-wrap items-center justify-between gap-1.5 border-b border-border bg-surface px-2.5 py-1">
+        {/* Zoom + atalhos 1-clique Página inteira / Largura */}
+        <div className="flex flex-wrap items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
@@ -287,7 +392,11 @@ export function PdfPreviewCanvas({
             value={String(zoom)}
             onChange={(e) => {
               const raw = e.target.value;
-              setZoom(raw === "fit-width" ? "fit-width" : (Number(raw) as ZoomPreset));
+              if (raw === "fit-width" || raw === "fit-page") {
+                setZoom(raw);
+              } else {
+                setZoom(Number(raw) as ZoomPreset);
+              }
             }}
             className="h-7 w-36 text-xs"
             disabled={!previewResult}
@@ -308,10 +417,47 @@ export function PdfPreviewCanvas({
           >
             <ZoomIn className="h-3.5 w-3.5" />
           </Button>
+
+          <div
+            role="group"
+            aria-label="Ajuste rápido de zoom"
+            className="ml-0.5 inline-flex items-center gap-0.5 rounded-md border border-border bg-surface-subtle p-0.5"
+          >
+            <button
+              type="button"
+              disabled={!previewResult}
+              aria-pressed={zoom === "fit-page"}
+              onClick={() => setZoom("fit-page")}
+              title="Ajustar página inteira na tela"
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-50",
+                zoom === "fit-page"
+                  ? "bg-surface text-ink shadow-xs"
+                  : "text-ink-muted hover:text-ink",
+              )}
+            >
+              Página inteira
+            </button>
+            <button
+              type="button"
+              disabled={!previewResult}
+              aria-pressed={zoom === "fit-width"}
+              onClick={() => setZoom("fit-width")}
+              title="Ajustar à largura disponível"
+              className={cn(
+                "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors cursor-pointer disabled:pointer-events-none disabled:opacity-50",
+                zoom === "fit-width"
+                  ? "bg-surface text-ink shadow-xs"
+                  : "text-ink-muted hover:text-ink",
+              )}
+            >
+              Largura
+            </button>
+          </div>
         </div>
 
         {/* Navegação de páginas */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1">
           <Button
             variant="outline"
             size="icon"
@@ -324,7 +470,7 @@ export function PdfPreviewCanvas({
           </Button>
           <span
             data-testid="preview-page-indicator"
-            className="min-w-[84px] text-center text-xs font-medium text-ink-secondary tabular-nums"
+            className="min-w-[82px] text-center text-xs font-medium text-ink-secondary tabular-nums"
           >
             Página {currentPage} de {totalPages}
           </span>
@@ -340,7 +486,7 @@ export function PdfPreviewCanvas({
           </Button>
         </div>
 
-        {/* Alternância PDF.js / PNG + Selecionar área */}
+        {/* Alternância PDF.js / PNG + Ajustes (popover) + Selecionar área + Tela cheia */}
         <div className="flex flex-wrap items-center gap-1.5">
           <div
             role="group"
@@ -377,6 +523,229 @@ export function PdfPreviewCanvas({
             </button>
           </div>
 
+          {/* Botão compacto Ajustes (N) com popover */}
+          {annotations.length > 0 && (
+            <div ref={annotationsMenuRef} className="relative">
+              <Button
+                variant={pendingAnnotations.length > 0 ? "blueprint" : "outline"}
+                size="xs"
+                aria-haspopup="dialog"
+                aria-expanded={annotationsPopoverOpen}
+                aria-label={`Ajustes (${pendingAnnotations.length})`}
+                icon={<MessageSquare className="h-3.5 w-3.5" />}
+                onClick={() => setAnnotationsPopoverOpen((prev) => !prev)}
+              >
+                <span>Ajustes</span>
+                <Badge
+                  tone={pendingAnnotations.length > 0 ? "accent" : "neutral"}
+                  className="ml-0.5 px-1.5 py-0 text-[10px] tabular-nums"
+                >
+                  {pendingAnnotations.length}
+                </Badge>
+              </Button>
+
+              {annotationsPopoverOpen && (
+                <div
+                  data-testid="annotations-popover"
+                  role="dialog"
+                  aria-label="Ajustes visuais da sessão"
+                  className="absolute right-0 z-50 mt-1.5 w-96 max-w-[92vw] overflow-hidden rounded-lg border border-border-strong bg-surface-elevated shadow-xl"
+                >
+                  {/* Cabeçalho do popover */}
+                  <div className="flex items-center justify-between gap-2 border-b border-border bg-surface-subtle/70 px-3 py-2">
+                    <div className="flex items-center gap-1.5 text-xs font-semibold text-ink">
+                      <MessageSquare className="h-3.5 w-3.5 text-accent" />
+                      <span>Ajustes visuais</span>
+                      <Badge tone="accent" className="py-0 text-[10px] tabular-nums">
+                        {pendingAnnotations.length} pendente
+                        {pendingAnnotations.length === 1 ? "" : "s"}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {pendingAnnotations.length > 0 && onResolveAnnotations && (
+                        <Button
+                          variant="outline"
+                          size="xs"
+                          loading={resolvingAnnotations}
+                          disabled={resolvingAnnotations}
+                          icon={<CheckCheck className="h-3 w-3" />}
+                          onClick={() => void onResolveAnnotations()}
+                        >
+                          Limpar / Resolver
+                        </Button>
+                      )}
+                      {onOpenAgentChat && (
+                        <Button
+                          variant="primary"
+                          size="xs"
+                          icon={<Bot className="h-3 w-3" />}
+                          onClick={() => {
+                            setAnnotationsPopoverOpen(false);
+                            onOpenAgentChat();
+                          }}
+                        >
+                          Abrir Chat IA
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Controles de visibilidade no PDF */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 px-3 py-1.5 text-[11px] text-ink-secondary">
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={showBoxesOnPdf}
+                        onChange={(e) => setShowBoxesOnPdf(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-accent cursor-pointer"
+                      />
+                      <span className="inline-flex items-center gap-1">
+                        {showBoxesOnPdf ? (
+                          <Eye className="h-3 w-3 text-blueprint" />
+                        ) : (
+                          <EyeOff className="h-3 w-3 text-ink-muted" />
+                        )}
+                        Mostrar caixas no PDF
+                      </span>
+                    </label>
+
+                    {resolvedAnnotations.length > 0 && showBoxesOnPdf && (
+                      <label className="inline-flex items-center gap-1.5 cursor-pointer select-none text-ink-muted">
+                        <input
+                          type="checkbox"
+                          checked={showResolvedOnPdf}
+                          onChange={(e) =>
+                            setShowResolvedOnPdf(e.target.checked)
+                          }
+                          className="h-3 w-3 accent-accent cursor-pointer"
+                        />
+                        <span>Mostrar histórico no PDF</span>
+                      </label>
+                    )}
+                  </div>
+
+                  {/* Lista de ajustes pendentes */}
+                  <div className="max-h-72 overflow-y-auto px-3 py-2">
+                    {pendingAnnotations.length === 0 ? (
+                      <p className="py-2 text-center text-xs text-ink-muted">
+                        Nenhum ajuste pendente no momento.
+                      </p>
+                    ) : (
+                      <ul className="divide-y divide-border/70 text-xs">
+                        {pendingAnnotations.map((ann, idx) => (
+                          <li
+                            key={ann.id}
+                            className="flex items-start justify-between gap-2 py-2 first:pt-0 last:pb-0"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <Badge
+                                  tone="blueprint"
+                                  className="font-mono text-[10px]"
+                                >
+                                  #{idx + 1} · Pág. {ann.page}
+                                </Badge>
+                                <span className="font-mono text-[10px] text-ink-muted tabular-nums">
+                                  detail({ann.detailCoords.x},{" "}
+                                  {ann.detailCoords.y},{" "}
+                                  {ann.detailCoords.width}×
+                                  {ann.detailCoords.height})
+                                </span>
+                                <Badge tone="neutral" className="text-[10px]">
+                                  {ann.scenario}
+                                </Badge>
+                              </div>
+                              <p className="mt-1 text-ink-secondary break-words">
+                                {ann.content}
+                              </p>
+                            </div>
+                            <div className="flex shrink-0 flex-col items-end gap-1">
+                              {ann.page !== currentPage && (
+                                <Button
+                                  variant="ghost"
+                                  size="xs"
+                                  onClick={() => setCurrentPage(ann.page)}
+                                >
+                                  Ir pág. {ann.page}
+                                </Button>
+                              )}
+                              {onResolveAnnotations &&
+                                typeof ann.id === "number" && (
+                                  <Button
+                                    variant="ghost"
+                                    size="xs"
+                                    disabled={resolvingAnnotations}
+                                    onClick={() =>
+                                      void onResolveAnnotations([
+                                        ann.id as number,
+                                      ])
+                                    }
+                                    title="Marcar este ajuste como resolvido"
+                                  >
+                                    Resolver
+                                  </Button>
+                                )}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+
+                    {/* Histórico colapsável de ajustes resolvidos */}
+                    {resolvedAnnotations.length > 0 && (
+                      <div className="mt-2 border-t border-border pt-2">
+                        <button
+                          type="button"
+                          aria-expanded={showResolvedHistory}
+                          onClick={() => setShowResolvedHistory((v) => !v)}
+                          className="flex w-full items-center justify-between text-[11px] font-medium text-ink-muted hover:text-ink cursor-pointer"
+                        >
+                          <span className="inline-flex items-center gap-1">
+                            <ChevronDown
+                              className={cn(
+                                "h-3 w-3 transition-transform",
+                                !showResolvedHistory && "-rotate-90",
+                              )}
+                            />
+                            Histórico resolvido ({resolvedAnnotations.length})
+                          </span>
+                        </button>
+                        {showResolvedHistory && (
+                          <ul className="mt-1.5 space-y-1.5 text-[11px] text-ink-muted">
+                            {resolvedAnnotations.map((ann) => (
+                              <li
+                                key={ann.id}
+                                className="rounded border border-border/60 bg-surface-subtle/50 px-2 py-1.5"
+                              >
+                                <div className="flex items-center justify-between gap-1">
+                                  <span className="font-mono text-[10px]">
+                                    ✓ Pág. {ann.page} · {ann.scenario}
+                                  </span>
+                                  {ann.page !== currentPage && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setCurrentPage(ann.page)}
+                                      className="text-[10px] text-blueprint hover:underline cursor-pointer"
+                                    >
+                                      Ir pág. {ann.page}
+                                    </button>
+                                  )}
+                                </div>
+                                <p className="mt-0.5 break-words line-through opacity-80">
+                                  {ann.content}
+                                </p>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           <Button
             variant={selectionMode ? "primary" : "outline"}
             size="xs"
@@ -387,13 +756,36 @@ export function PdfPreviewCanvas({
           >
             Selecionar área para ajuste
           </Button>
+
+          <Button
+            variant={isFullscreen ? "primary" : "outline"}
+            size="icon"
+            className="h-7 w-7"
+            aria-label={
+              isFullscreen ? "Sair da tela cheia" : "Expandir em tela cheia"
+            }
+            aria-pressed={isFullscreen}
+            title={
+              isFullscreen
+                ? "Sair da tela cheia (Esc)"
+                : "Expandir PDF em tela cheia"
+            }
+            disabled={!previewResult}
+            onClick={() => setIsFullscreen((prev) => !prev)}
+          >
+            {isFullscreen ? (
+              <Minimize2 className="h-3.5 w-3.5" />
+            ) : (
+              <Maximize2 className="h-3.5 w-3.5" />
+            )}
+          </Button>
         </div>
       </div>
 
-      {/* Viewport rolável com a folha A4 renderizada */}
+      {/* Viewport rolável com a folha A4 renderizada (padding compacto p-2.5) */}
       <div
         ref={viewportRef}
-        className="relative flex min-h-0 flex-1 flex-col items-center overflow-auto bg-surface-subtle/60 p-5"
+        className="relative flex min-h-0 flex-1 flex-col items-center overflow-auto bg-surface-subtle/60 p-2.5"
       >
         {!hasJrxml ? (
           <EmptyState
@@ -485,87 +877,15 @@ export function PdfPreviewCanvas({
                 page={currentPage}
                 scenario={effectiveScenario}
                 orientation={orientation}
-                annotations={annotations}
+                annotations={visibleAnnotations}
                 submitting={submittingAnnotation}
-                onSubmitAnnotation={onSubmitAnnotation}
+                onSubmitAnnotation={handleSubmitAndExitSelection}
+                onRequestExitSelection={() => setSelectionMode(false)}
               />
             </div>
           </>
         )}
       </div>
-
-      {/* Lista de anotações visuais enviadas na sessão */}
-      {annotations.length > 0 && (
-        <section
-          aria-label="Anotações visuais enviadas na sessão"
-          className="shrink-0 border-t border-border bg-surface"
-        >
-          <div className="flex w-full items-center justify-between gap-2 bg-surface-subtle/60 px-3 py-1.5 text-xs font-semibold text-ink">
-            <button
-              type="button"
-              onClick={() => setAnnotationsExpanded((v) => !v)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-accent cursor-pointer"
-            >
-              <MessageSquare className="h-3.5 w-3.5 shrink-0 text-accent" />
-              <span className="truncate">Ajustes visuais enviados ao agente</span>
-              <Badge tone="accent" className="tabular-nums">
-                {annotations.length}
-              </Badge>
-              <span className="ml-1 text-[11px] font-normal text-ink-muted">
-                ({annotationsExpanded ? "Recolher" : "Expandir"})
-              </span>
-            </button>
-            {onOpenAgentChat && (
-              <Button
-                variant="primary"
-                size="xs"
-                onClick={onOpenAgentChat}
-                icon={<Bot className="h-3 w-3" />}
-              >
-                Abrir Chat IA
-              </Button>
-            )}
-          </div>
-
-          {annotationsExpanded && (
-            <ul className="max-h-36 divide-y divide-border/70 overflow-y-auto px-3 py-1.5 text-xs">
-              {annotations.map((ann, idx) => (
-                <li
-                  key={ann.id}
-                  className="flex items-start justify-between gap-2 py-1.5"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <Badge tone="blueprint" className="font-mono text-[10px]">
-                        #{idx + 1} · Pág. {ann.page}
-                      </Badge>
-                      <span className="font-mono text-[10px] text-ink-muted tabular-nums">
-                        detail({ann.detailCoords.x}, {ann.detailCoords.y},{" "}
-                        {ann.detailCoords.width}×{ann.detailCoords.height})
-                      </span>
-                      <Badge tone="neutral" className="text-[10px]">
-                        {ann.scenario}
-                      </Badge>
-                    </div>
-                    <p className="mt-0.5 text-ink-secondary break-words">
-                      {ann.content}
-                    </p>
-                  </div>
-                  {ann.page !== currentPage && (
-                    <Button
-                      variant="ghost"
-                      size="xs"
-                      onClick={() => setCurrentPage(ann.page)}
-                    >
-                      Ir pág. {ann.page}
-                    </Button>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
     </div>
   );
 }

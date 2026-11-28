@@ -600,14 +600,35 @@ describe("JasperStudioView", () => {
       });
     });
 
-    // Verifica listagem da anotação enviada na sessão e botão 1-clique Abrir Chat IA
+    // Auto-exit selectionMode após envio (não prende o usuário no modo crosshair)
+    await waitFor(() => {
+      expect(selectToggle).toHaveAttribute("aria-pressed", "false");
+    });
+
+    // Não existe mais o painel gigante no rodapé; ajustes ficam no popover compacto da toolbar
     expect(
-      screen.getByText(
+      screen.queryByRole("region", {
+        name: /Anotações visuais enviadas na sessão/i,
+      }),
+    ).not.toBeInTheDocument();
+
+    const adjustmentsBtn = screen.getByRole("button", {
+      name: /Ajustes \(1\)/i,
+    });
+    await user.click(adjustmentsBtn);
+
+    const adjustmentsPopover = await screen.findByTestId("annotations-popover");
+    expect(
+      within(adjustmentsPopover).getByText(
         /esses 3 checkboxes ficaram colados, espaçar horizontalmente/i,
       ),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /Abrir Chat IA/i }));
+    await user.click(
+      within(adjustmentsPopover).getByRole("button", {
+        name: /Abrir Chat IA/i,
+      }),
+    );
     expect(openChatSpy).toHaveBeenCalledWith("jrxml");
   });
 
@@ -624,9 +645,17 @@ describe("JasperStudioView", () => {
     renderView();
 
     const editor = await screen.findByLabelText("Editor XML JRXML");
+    expect(
+      screen.getByTestId("preview-control-bar-clinical"),
+    ).toBeInTheDocument();
 
-    const exportLink = screen.getByRole("link", {
-      name: /Baixar pacote de entrega \(\.zip\)/i,
+    // Abre dropdown Exportar para conferir Pacote .zip
+    await user.click(screen.getByRole("button", { name: /Exportar/i }));
+    const exportMenu = screen.getByRole("menu", {
+      name: /Opções de exportação/i,
+    });
+    const exportLink = within(exportMenu).getByRole("menuitem", {
+      name: /Pacote \.zip/i,
     });
     expect(exportLink).toHaveAttribute(
       "href",
@@ -641,13 +670,19 @@ describe("JasperStudioView", () => {
       `${MOCK_PROJECT.slug}_entrega_salutem.zip`,
     );
 
-    // Troca cenário e modo e verifica atualização do link de exportação
+    // Fecha dropdown, troca cenário e modo e verifica atualização do link de exportação
     await user.click(screen.getByRole("button", { name: /Estresse de texto/i }));
     await user.selectOptions(
       screen.getByLabelText(/Modo de preview/i),
       "offline",
     );
-    expect(exportLink).toHaveAttribute(
+    await user.click(screen.getByRole("button", { name: /Exportar/i }));
+    const updatedMenu = screen.getByRole("menu", {
+      name: /Opções de exportação/i,
+    });
+    expect(
+      within(updatedMenu).getByRole("menuitem", { name: /Pacote \.zip/i }),
+    ).toHaveAttribute(
       "href",
       api.getExportBundleUrl(MOCK_PROJECT.id, {
         scenario: "stress",
@@ -753,7 +788,10 @@ describe("JasperStudioView", () => {
       await screen.findByTestId("jasper-studio-visual-mode"),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("Editor XML JRXML")).not.toBeInTheDocument();
-    expect(screen.getByTestId("visual-mode-tip-bar")).toBeInTheDocument();
+    // Permanent visual-mode-tip-bar was removed to maximize PDF vertical space
+    expect(
+      screen.queryByTestId("visual-mode-tip-bar"),
+    ).not.toBeInTheDocument();
 
     // Prominent AI CTA calls onOpenAgentChat("jrxml")
     await user.click(
@@ -1206,5 +1244,197 @@ describe("JasperStudioView", () => {
       });
       expect(onProjectUpdated).toHaveBeenCalledWith(updatedProj);
     });
+  });
+
+  it("supports fit-page, fit-width, 200% zoom presets and fullscreen toggle with Escape exit", async () => {
+    vi.spyOn(api, "getArtifact").mockResolvedValue(makeArtifactRevision());
+    vi.spyOn(api, "generatePreview").mockResolvedValue(makePreviewResponse());
+
+    const user = userEvent.setup();
+    renderView();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pdf-preview-canvas")).toBeInTheDocument();
+    });
+
+    const zoomSelect = screen.getByLabelText(/Nível de zoom do preview/i);
+    expect(zoomSelect).toHaveValue("fit-width");
+
+    // 1-click Página inteira -> muda para fit-page
+    const fitPageBtn = screen.getByRole("button", { name: /^Página inteira$/i });
+    const fitWidthBtn = screen.getByRole("button", { name: /^Largura$/i });
+    expect(fitWidthBtn).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(fitPageBtn);
+    expect(zoomSelect).toHaveValue("fit-page");
+    expect(fitPageBtn).toHaveAttribute("aria-pressed", "true");
+
+    // Selecionar 200% no select
+    await user.selectOptions(zoomSelect, "2");
+    expect(zoomSelect).toHaveValue("2");
+    const pageContainer = screen.getByTestId("preview-page-container");
+    expect(pageContainer.style.width).toBe(`${595 * 2}px`);
+    expect(pageContainer.style.height).toBe(`${842 * 2}px`);
+
+    // Expandir em tela cheia e sair com Escape
+    const previewRoot = screen.getByTestId("pdf-preview-root");
+    expect(previewRoot).toHaveAttribute("data-fullscreen", "false");
+
+    const fullscreenBtn = screen.getByRole("button", {
+      name: /Expandir em tela cheia/i,
+    });
+    await user.click(fullscreenBtn);
+    expect(previewRoot).toHaveAttribute("data-fullscreen", "true");
+    expect(
+      screen.getByRole("button", { name: /Sair da tela cheia/i }),
+    ).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    expect(previewRoot).toHaveAttribute("data-fullscreen", "false");
+  });
+
+  it("hides resolved boxes by default, resolves via popover button, exits selectionMode on Escape, and auto-resolves on artifactSyncTick", async () => {
+    vi.spyOn(api, "getArtifact").mockResolvedValue(makeArtifactRevision());
+    vi.spyOn(api, "generatePreview").mockResolvedValue(makePreviewResponse());
+
+    const listChatSpy = vi.spyOn(api, "listChat").mockResolvedValue([
+      {
+        id: 101,
+        project_id: MOCK_PROJECT.id,
+        phase: "jrxml",
+        role: "user",
+        content: "Ajuste pendente no título",
+        metadata: {
+          type: "visual_region_feedback",
+          page: 1,
+          scenario: "full",
+          resolved: false,
+          pdf_rect: { x0: 40, y0: 40, x1: 240, y1: 90, width: 200, height: 50 },
+          detail_coords: { x: 20, y: 10, width: 200, height: 50 },
+        },
+        metadata_json: "{}",
+        created_at: "2026-11-26T10:00:00Z",
+      },
+      {
+        id: 102,
+        project_id: MOCK_PROJECT.id,
+        phase: "jrxml",
+        role: "user",
+        content: "Ajuste antigo já resolvido",
+        metadata: {
+          type: "visual_region_feedback",
+          page: 1,
+          scenario: "full",
+          resolved: true,
+          pdf_rect: { x0: 50, y0: 200, x1: 250, y1: 260, width: 200, height: 60 },
+          detail_coords: { x: 30, y: 50, width: 200, height: 60 },
+        },
+        metadata_json: "{}",
+        created_at: "2026-11-25T09:00:00Z",
+      },
+    ]);
+
+    const resolveSpy = vi
+      .spyOn(api, "resolveVisualFeedback")
+      .mockResolvedValue({ ok: true, resolved_count: 1 });
+
+    const user = userEvent.setup();
+    const { rerender } = render(
+      <ToastProvider>
+        <JasperStudioView
+          project={MOCK_PROJECT}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+          artifactSyncTick={0}
+        />
+      </ToastProvider>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pdf-preview-canvas")).toBeInTheDocument();
+    });
+
+    // Apenas a caixa pendente (id=101) é exibida no PDF; a resolvida (id=102) fica oculta!
+    const boxes = screen.getAllByTestId("region-annotation-box");
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]).toHaveAttribute("data-resolved", "false");
+
+    // Escape sai do selectionMode sem precisar clicar no botão de novo
+    const selectToggle = screen.getByRole("button", {
+      name: /Selecionar área para ajuste/i,
+    });
+    await user.click(selectToggle);
+    expect(selectToggle).toHaveAttribute("aria-pressed", "true");
+    await user.keyboard("{Escape}");
+    expect(selectToggle).toHaveAttribute("aria-pressed", "false");
+
+    // Abre popover Ajustes (1), testa toggle "Mostrar caixas no PDF" e histórico resolvido
+    await user.click(screen.getByRole("button", { name: /Ajustes \(1\)/i }));
+    const popover = screen.getByTestId("annotations-popover");
+    expect(
+      within(popover).getByText("Ajuste pendente no título"),
+    ).toBeInTheDocument();
+
+    const showBoxesToggle = within(popover).getByLabelText(
+      /Mostrar caixas no PDF/i,
+    );
+    await user.click(showBoxesToggle);
+    expect(screen.queryAllByTestId("region-annotation-box")).toHaveLength(0);
+    await user.click(showBoxesToggle);
+    expect(screen.getAllByTestId("region-annotation-box")).toHaveLength(1);
+
+    // Expande histórico resolvido
+    await user.click(
+      within(popover).getByRole("button", { name: /Histórico resolvido \(1\)/i }),
+    );
+    expect(
+      within(popover).getByText("Ajuste antigo já resolvido"),
+    ).toBeInTheDocument();
+
+    // Limpar / Resolver chama POST /jasper/feedback/resolve e limpa caixas do PDF
+    await user.click(
+      within(popover).getByRole("button", { name: /Limpar \/ Resolver/i }),
+    );
+    await waitFor(() => {
+      expect(resolveSpy).toHaveBeenCalledWith(MOCK_PROJECT.id, undefined);
+    });
+    expect(screen.queryAllByTestId("region-annotation-box")).toHaveLength(0);
+
+    // Incrementar artifactSyncTick re-busca anotações e resolve automaticamente
+    listChatSpy.mockResolvedValue([
+      {
+        id: 103,
+        project_id: MOCK_PROJECT.id,
+        phase: "jrxml",
+        role: "user",
+        content: "Ajuste resolvido pelo agente",
+        metadata: {
+          type: "visual_region_feedback",
+          page: 1,
+          scenario: "full",
+          resolved: true,
+          pdf_rect: { x0: 10, y0: 10, x1: 100, y1: 50, width: 90, height: 40 },
+          detail_coords: { x: 0, y: 0, width: 90, height: 40 },
+        },
+        metadata_json: "{}",
+        created_at: "2026-11-26T11:00:00Z",
+      },
+    ]);
+
+    rerender(
+      <ToastProvider>
+        <JasperStudioView
+          project={MOCK_PROJECT}
+          onProjectUpdated={vi.fn()}
+          onNavigateSection={vi.fn()}
+          artifactSyncTick={1}
+        />
+      </ToastProvider>,
+    );
+
+    await waitFor(() => {
+      expect(listChatSpy).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryAllByTestId("region-annotation-box")).toHaveLength(0);
   });
 });

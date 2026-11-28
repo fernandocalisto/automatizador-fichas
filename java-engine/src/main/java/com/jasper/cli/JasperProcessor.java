@@ -155,6 +155,8 @@ public final class JasperProcessor {
         this.context = new SimpleJasperReportsContext(DefaultJasperReportsContext.getInstance());
         // Preview tolerante: fontes ausentes na JVM não abortam o preenchimento/exportação.
         context.setProperty("net.sf.jasperreports.awt.ignore.missing.font", "true");
+        // Garante que elementos sem fontName explícito resolvam para a extensão SansSerif (DejaVu Sans embutida com bold/italic).
+        context.setProperty("net.sf.jasperreports.default.font.name", "SansSerif");
         List<RepositoryService> repos = new ArrayList<>(4);
         repos.add(new RepoSchemeRepositoryService(context, this.subreportDirOverride, this.baseDir));
         if (this.subreportDirOverride != null) {

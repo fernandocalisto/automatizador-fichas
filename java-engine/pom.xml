@@ -36,6 +36,12 @@
             <artifactId>jasperreports</artifactId>
             <version>${jasperreports.version}</version>
         </dependency>
+        <!-- Extensão oficial de fontes (DejaVu Sans / Serif / Sans Mono) -->
+        <dependency>
+            <groupId>net.sf.jasperreports</groupId>
+            <artifactId>jasperreports-fonts</artifactId>
+            <version>${jasperreports.version}</version>
+        </dependency>
 
         <!-- Drivers JDBC embutidos -->
         <dependency>

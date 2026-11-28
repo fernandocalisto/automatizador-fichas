@@ -785,3 +785,29 @@ class WorkspaceService:
             metadata=payload.metadata,
         )
         return ChatMessageRead(**saved)
+
+    def update_chat_message_metadata(
+        self,
+        project_id: str,
+        message_id: int,
+        metadata: dict[str, Any],
+    ) -> ChatMessageRead | None:
+        """Update `metadata_json` on an existing chat message for the project."""
+        self._require_project_row(project_id)
+        updated = self.store.update_chat_message_metadata(project_id, message_id, metadata)
+        return ChatMessageRead(**updated) if updated is not None else None
+
+    def resolve_visual_feedback_messages(
+        self,
+        project_id: str,
+        *,
+        message_ids: list[int] | None = None,
+        resolved_by_jrxml_version: int | None = None,
+    ) -> list[int]:
+        """Mark pending `visual_region_feedback` messages as resolved in SQLite."""
+        self._require_project_row(project_id)
+        return self.store.resolve_visual_feedback_messages(
+            project_id,
+            message_ids=message_ids,
+            resolved_by_jrxml_version=resolved_by_jrxml_version,
+        )

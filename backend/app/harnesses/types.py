@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class HarnessKind(str, Enum):
@@ -32,6 +32,8 @@ class EventType(str, Enum):
 
 
 PhaseKind = Literal["extraction", "jrxml"]
+EffortLevel = Literal["low", "medium", "high", "xhigh", "max"]
+VALID_EFFORT_LEVELS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 
 class HarnessEvent(BaseModel):
@@ -85,8 +87,31 @@ class HarnessRunRequest(BaseModel):
     prompt: str
     gate_authorized: bool = False
     model: str | None = None
+    effort: str | None = None
     image_paths: list[Path] = Field(default_factory=list)
     extra_context: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: float = 300.0
     system_prompt_override: str | None = None
     resume_session_id: str | None = None
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def _normalize_model(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @field_validator("effort", mode="before")
+    @classmethod
+    def _validate_effort(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip().lower()
+        if not cleaned:
+            return None
+        if cleaned not in VALID_EFFORT_LEVELS:
+            raise ValueError(
+                f"Nível de esforço inválido '{value}'. Esperado: {', '.join(VALID_EFFORT_LEVELS)}."
+            )
+        return cleaned

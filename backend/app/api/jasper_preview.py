@@ -124,6 +124,14 @@ class VisualRegionCropRequest(BaseModel):
     dpi: int = Field(default=200, ge=72, le=400)
 
 
+class ResolveVisualFeedbackRequest(BaseModel):
+    """Payload opcional para marcar anotações visuais como resolvidas."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    message_ids: list[int] | None = None
+
+
 # -----------------------------------------------------------------------------
 # FastAPI Dependencies (com lazy imports para permitir injeção de fakes em testes)
 # -----------------------------------------------------------------------------
@@ -1246,6 +1254,33 @@ def stream_visual_feedback_crop_png(
         filename=crop_path.name,
         content_disposition_type="inline",
     )
+
+
+@router.post("/{project_id}/jasper/feedback/resolve")
+def resolve_project_visual_feedback(
+    project_id: str,
+    workspace_service: WorkspaceSvcDep,
+    payload: ResolveVisualFeedbackRequest = Body(default_factory=ResolveVisualFeedbackRequest),
+) -> dict[str, Any]:
+    """
+    Marca anotações `visual_region_feedback` pendentes como resolvidas (`metadata.resolved = True`).
+    Quando `message_ids` for omitido, resolve todas as anotações pendentes do projeto.
+    """
+    try:
+        resolved_ids = workspace_service.resolve_visual_feedback_messages(
+            project_id,
+            message_ids=payload.message_ids,
+        )
+    except Exception as exc:
+        _raise_http_for_workspace_error(exc)
+        raise
+
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "resolved_count": len(resolved_ids),
+        "resolved_message_ids": resolved_ids,
+    }
 
 
 @router.get("/{project_id}/jasper/export-bundle")
